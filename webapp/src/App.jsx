@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 import { createChart, CandlestickSeries } from "lightweight-charts";
 
 // ---------- theme (Apex Forge) ----------
@@ -1401,6 +1401,8 @@ function JournalTab() {
 }
 
 // ---------- candlestick chart ----------
+const EMPTY_BARS = [];
+
 function aggregateBars(bars, minutes) {
   if (minutes <= 1) {
     return bars.map((b) => ({
@@ -1519,10 +1521,11 @@ function CandleChart({ data }) {
 }
 
 function DailyCandles({ dayBars, dayIndex, setDayIndex, timeframe, setTimeframe }) {
+  const day = dayBars && dayBars.days[dayIndex];
+  const bars = (dayBars && dayBars.byDay.get(day)) || EMPTY_BARS;
+  const data = useMemo(() => aggregateBars(bars, timeframe), [bars, timeframe]);
+
   if (!dayBars || dayBars.days.length === 0) return null;
-  const day = dayBars.days[dayIndex];
-  const bars = dayBars.byDay.get(day) || [];
-  const data = aggregateBars(bars, timeframe);
   const navBtn = (disabled) => ({
     ...retryBtn,
     padding: "4px 10px",
