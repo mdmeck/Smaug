@@ -34,7 +34,7 @@ jobs:
         run: |
           git config user.name "smaug-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add spy_1m.db smaug_results.json smaug_report.txt
+          git add spy_1m.db smaug_results.json smaug_report.txt smaug_bars.json
           git diff --cached --quiet && echo "No changes to commit" && exit 0
           git commit -m "Daily run: $(date -u +%Y-%m-%d)"
           git push

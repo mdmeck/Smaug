@@ -29,6 +29,7 @@ import pandas as pd
 DB_PATH = "spy_1m.db"
 RESULTS_JSON = "smaug_results.json"
 REPORT_TXT = "smaug_report.txt"
+BARS_JSON = "smaug_bars.json"
 TICKER = "SPY"
 HORIZONS = [5, 10, 15]          # minutes ahead for forward return targets
 MFE_HORIZON = 10                # minutes for max-favorable-excursion target
@@ -362,6 +363,22 @@ def write_report(results):
     return text
 
 
+def write_bars_json(bars):
+    """Raw 1-min OHLCV for the retained window, for the webapp's candlestick
+    chart. Compact [ts, o, h, l, c, v] rows to keep the file small."""
+    if RTH_ONLY:
+        mod = bars.index.hour * 60 + bars.index.minute
+        mask = (mod >= 9 * 60 + 30) & (mod < 16 * 60)
+        bars = bars[mask]
+    rows = [
+        [ts.isoformat(), round(float(r.open), 4), round(float(r.high), 4),
+         round(float(r.low), 4), round(float(r.close), 4), int(r.volume)]
+        for ts, r in bars.iterrows()
+    ]
+    with open(BARS_JSON, "w") as f:
+        json.dump({"ticker": TICKER, "bars": rows}, f)
+
+
 # ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
@@ -400,6 +417,9 @@ def main():
     with open(RESULTS_JSON, "w") as f:
         json.dump(results, f, indent=1)
     print(f"wrote {RESULTS_JSON}")
+
+    write_bars_json(bars)
+    print(f"wrote {BARS_JSON}")
     print()
     print(write_report(results))
 
