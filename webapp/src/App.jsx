@@ -1452,7 +1452,7 @@ function CandleChart({ data }) {
     const container = containerRef.current;
     const chart = createChart(container, {
       width: container.clientWidth,
-      height: 340,
+      height: 520,
       layout: {
         background: { color: T.panel },
         textColor: T.dim,
