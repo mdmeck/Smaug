@@ -1,234 +1,234 @@
-SMAUG PIPELINE REPORT — 2026-07-16T22:29:45
-Ticker: SPY  |  Bars: 4229  |  Range: ['2026-07-01', '2026-07-16']
+SMAUG PIPELINE REPORT — 2026-07-17T22:22:35
+Ticker: SPY  |  Bars: 4614  |  Range: ['2026-07-01', '2026-07-17']
 
-=== TARGET: fwd_5m_bps (n=4229) ===
-  R2 train 0.0239 | R2 TEST -0.0123   (test is what matters)
+=== TARGET: fwd_5m_bps (n=4614) ===
+  R2 train 0.0236 | R2 TEST -0.0689   (test is what matters)
   Correlations (|r| ranked):
-            ret_5m_bps: -0.0823
-             range_bps: +0.0672
-         dist_ema9_bps: -0.0662
-                 vol_z: +0.0618
-        dist_ema21_bps: -0.0394
-            ret_1m_bps: -0.0333
-                 rsi14: -0.0258
-            body_ratio: -0.0123
-        min_since_open: +0.0090
-        ema_spread_bps: +0.0026
+             range_bps: +0.0705
+                 vol_z: +0.0551
+            ret_5m_bps: -0.0486
+        dist_ema21_bps: -0.0353
+         dist_ema9_bps: -0.0352
+                 rsi14: -0.0329
+        ema_spread_bps: -0.0268
+        min_since_open: -0.0091
+            body_ratio: -0.0087
+            ret_1m_bps: -0.0076
   Std. coefficients (bps per 1-sigma of feature):
-                 rsi14: +0.024
-        ema_spread_bps: +0.664
-         dist_ema9_bps: -0.477
+                 rsi14: -0.051
+        ema_spread_bps: +0.697
+         dist_ema9_bps: -0.501
         dist_ema21_bps: +0.043
-            ret_1m_bps: +0.188
-            ret_5m_bps: -0.540
-             range_bps: +0.547
-            body_ratio: -0.189
-                 vol_z: +0.228
-        min_since_open: +0.242
-  Deciles of ret_5m_bps -> avg fwd_5m_bps:
-    D 1:   +1.48 bps  (n=423)
-    D 2:   +0.25 bps  (n=423)
-    D 3:   +0.04 bps  (n=423)
-    D 4:   +0.11 bps  (n=423)
-    D 5:   +0.26 bps  (n=423)
-    D 6:   -0.27 bps  (n=423)
-    D 7:   -0.47 bps  (n=422)
-    D 8:   -0.64 bps  (n=423)
-    D 9:   -0.22 bps  (n=423)
-    D10:   +0.10 bps  (n=423)
+            ret_1m_bps: +0.226
+            ret_5m_bps: -0.492
+             range_bps: +0.545
+            body_ratio: -0.173
+                 vol_z: +0.189
+        min_since_open: +0.266
   Deciles of range_bps -> avg fwd_5m_bps:
-    D 1:   -0.15 bps  (n=424)
-    D 2:   -0.06 bps  (n=422)
-    D 3:   +0.23 bps  (n=423)
-    D 4:   +0.01 bps  (n=423)
-    D 5:   -0.07 bps  (n=423)
-    D 6:   -0.19 bps  (n=422)
-    D 7:   -0.48 bps  (n=423)
-    D 8:   +0.35 bps  (n=423)
-    D 9:   +0.13 bps  (n=423)
-    D10:   +0.86 bps  (n=423)
-  Deciles of dist_ema9_bps -> avg fwd_5m_bps:
-    D 1:   +1.03 bps  (n=423)
-    D 2:   +0.25 bps  (n=423)
-    D 3:   +0.52 bps  (n=423)
-    D 4:   -0.37 bps  (n=423)
-    D 5:   -0.02 bps  (n=423)
-    D 6:   -0.57 bps  (n=422)
-    D 7:   -0.02 bps  (n=423)
-    D 8:   -0.16 bps  (n=423)
-    D 9:   -0.46 bps  (n=423)
-    D10:   +0.43 bps  (n=423)
+    D 1:   -0.16 bps  (n=462)
+    D 2:   +0.01 bps  (n=461)
+    D 3:   +0.18 bps  (n=461)
+    D 4:   -0.31 bps  (n=462)
+    D 5:   -0.11 bps  (n=461)
+    D 6:   -0.17 bps  (n=461)
+    D 7:   -0.21 bps  (n=462)
+    D 8:   +0.43 bps  (n=461)
+    D 9:   +0.34 bps  (n=461)
+    D10:   +0.88 bps  (n=462)
+  Deciles of vol_z -> avg fwd_5m_bps:
+    D 1:   -0.50 bps  (n=462)
+    D 2:   -0.09 bps  (n=461)
+    D 3:   -0.42 bps  (n=461)
+    D 4:   +0.27 bps  (n=462)
+    D 5:   +0.18 bps  (n=461)
+    D 6:   +0.18 bps  (n=461)
+    D 7:   -0.18 bps  (n=462)
+    D 8:   +0.04 bps  (n=461)
+    D 9:   +0.73 bps  (n=461)
+    D10:   +0.68 bps  (n=462)
+  Deciles of ret_5m_bps -> avg fwd_5m_bps:
+    D 1:   +1.52 bps  (n=462)
+    D 2:   +0.33 bps  (n=461)
+    D 3:   +0.06 bps  (n=461)
+    D 4:   +0.13 bps  (n=462)
+    D 5:   +0.15 bps  (n=461)
+    D 6:   -0.25 bps  (n=461)
+    D 7:   -0.40 bps  (n=462)
+    D 8:   -0.61 bps  (n=461)
+    D 9:   -0.18 bps  (n=461)
+    D10:   +0.14 bps  (n=462)
 
-=== TARGET: fwd_10m_bps (n=4174) ===
-  R2 train 0.0272 | R2 TEST -0.0146   (test is what matters)
+=== TARGET: fwd_10m_bps (n=4554) ===
+  R2 train 0.0263 | R2 TEST -0.0955   (test is what matters)
   Correlations (|r| ranked):
-                 vol_z: +0.0688
-             range_bps: +0.0579
-            ret_5m_bps: -0.0552
-        ema_spread_bps: +0.0439
-            ret_1m_bps: -0.0438
-         dist_ema9_bps: -0.0413
-            body_ratio: -0.0194
-        min_since_open: +0.0084
-        dist_ema21_bps: -0.0032
-                 rsi14: -0.0027
+             range_bps: +0.0783
+                 vol_z: +0.0774
+            ret_5m_bps: -0.0274
+        dist_ema21_bps: -0.0267
+         dist_ema9_bps: -0.0266
+            ret_1m_bps: -0.0246
+        min_since_open: -0.0210
+        ema_spread_bps: -0.0205
+                 rsi14: -0.0167
+            body_ratio: -0.0135
   Std. coefficients (bps per 1-sigma of feature):
-                 rsi14: -0.515
-        ema_spread_bps: +1.442
-         dist_ema9_bps: -0.710
-        dist_ema21_bps: +0.295
-            ret_1m_bps: +0.102
-            ret_5m_bps: -0.309
-             range_bps: +0.704
-            body_ratio: -0.253
-                 vol_z: +0.478
-        min_since_open: +0.359
-  Deciles of vol_z -> avg fwd_10m_bps:
-    D 1:   -0.60 bps  (n=418)
-    D 2:   -0.13 bps  (n=417)
-    D 3:   -0.07 bps  (n=417)
-    D 4:   -0.45 bps  (n=418)
-    D 5:   +0.03 bps  (n=417)
-    D 6:   -0.34 bps  (n=417)
-    D 7:   +0.27 bps  (n=418)
-    D 8:   +0.17 bps  (n=417)
-    D 9:   +0.48 bps  (n=417)
-    D10:   +1.45 bps  (n=418)
+                 rsi14: -0.584
+        ema_spread_bps: +1.423
+         dist_ema9_bps: -0.662
+        dist_ema21_bps: +0.312
+            ret_1m_bps: +0.128
+            ret_5m_bps: -0.341
+             range_bps: +0.692
+            body_ratio: -0.261
+                 vol_z: +0.382
+        min_since_open: +0.404
   Deciles of range_bps -> avg fwd_10m_bps:
-    D 1:   -0.02 bps  (n=418)
-    D 2:   +0.18 bps  (n=417)
-    D 3:   +0.23 bps  (n=417)
-    D 4:   +0.22 bps  (n=418)
-    D 5:   +0.12 bps  (n=417)
-    D 6:   -0.04 bps  (n=417)
-    D 7:   -0.79 bps  (n=418)
-    D 8:   -0.23 bps  (n=417)
-    D 9:   -0.21 bps  (n=417)
-    D10:   +1.34 bps  (n=418)
+    D 1:   +0.03 bps  (n=456)
+    D 2:   +0.13 bps  (n=455)
+    D 3:   +0.07 bps  (n=455)
+    D 4:   -0.02 bps  (n=456)
+    D 5:   -0.03 bps  (n=455)
+    D 6:   -0.51 bps  (n=455)
+    D 7:   -0.33 bps  (n=456)
+    D 8:   +0.29 bps  (n=455)
+    D 9:   +0.07 bps  (n=455)
+    D10:   +1.77 bps  (n=456)
+  Deciles of vol_z -> avg fwd_10m_bps:
+    D 1:   -0.77 bps  (n=456)
+    D 2:   -0.09 bps  (n=455)
+    D 3:   -0.38 bps  (n=455)
+    D 4:   +0.18 bps  (n=456)
+    D 5:   -0.10 bps  (n=455)
+    D 6:   -0.12 bps  (n=455)
+    D 7:   -0.19 bps  (n=456)
+    D 8:   +0.46 bps  (n=455)
+    D 9:   +0.89 bps  (n=455)
+    D10:   +1.58 bps  (n=456)
   Deciles of ret_5m_bps -> avg fwd_10m_bps:
-    D 1:   +1.15 bps  (n=418)
-    D 2:   -0.04 bps  (n=417)
-    D 3:   +0.00 bps  (n=417)
-    D 4:   +0.42 bps  (n=418)
-    D 5:   +0.26 bps  (n=417)
-    D 6:   -0.23 bps  (n=417)
-    D 7:   -0.50 bps  (n=418)
-    D 8:   -0.73 bps  (n=417)
-    D 9:   +0.14 bps  (n=417)
-    D10:   +0.34 bps  (n=418)
+    D 1:   +1.11 bps  (n=456)
+    D 2:   +0.05 bps  (n=455)
+    D 3:   -0.01 bps  (n=455)
+    D 4:   +0.31 bps  (n=456)
+    D 5:   +0.27 bps  (n=455)
+    D 6:   -0.03 bps  (n=455)
+    D 7:   -0.32 bps  (n=456)
+    D 8:   -0.87 bps  (n=455)
+    D 9:   +0.38 bps  (n=455)
+    D10:   +0.57 bps  (n=456)
 
-=== TARGET: fwd_15m_bps (n=4119) ===
-  R2 train 0.0203 | R2 TEST -0.0280   (test is what matters)
+=== TARGET: fwd_15m_bps (n=4494) ===
+  R2 train 0.0212 | R2 TEST -0.1440   (test is what matters)
   Correlations (|r| ranked):
-        ema_spread_bps: +0.0667
-                 vol_z: +0.0388
-        dist_ema21_bps: +0.0334
-             range_bps: +0.0323
-            ret_5m_bps: -0.0227
-                 rsi14: +0.0223
-            ret_1m_bps: -0.0130
-            body_ratio: -0.0103
-        min_since_open: +0.0022
-         dist_ema9_bps: -0.0005
+             range_bps: +0.0625
+                 vol_z: +0.0543
+        min_since_open: -0.0344
+        ema_spread_bps: -0.0331
+        dist_ema21_bps: -0.0259
+            ret_5m_bps: -0.0222
+         dist_ema9_bps: -0.0151
+            body_ratio: -0.0066
+            ret_1m_bps: -0.0034
+                 rsi14: -0.0024
   Std. coefficients (bps per 1-sigma of feature):
-                 rsi14: -1.140
-        ema_spread_bps: +1.709
-         dist_ema9_bps: -0.266
-        dist_ema21_bps: +0.702
-            ret_1m_bps: +0.247
-            ret_5m_bps: -0.621
-             range_bps: +0.510
-            body_ratio: -0.178
-                 vol_z: +0.357
-        min_since_open: +0.319
-  Deciles of ema_spread_bps -> avg fwd_15m_bps:
-    D 1:   -0.23 bps  (n=412)
-    D 2:   +0.01 bps  (n=412)
-    D 3:   -1.47 bps  (n=412)
-    D 4:   -0.46 bps  (n=412)
-    D 5:   -0.91 bps  (n=412)
-    D 6:   +0.17 bps  (n=411)
-    D 7:   -0.78 bps  (n=412)
-    D 8:   -0.29 bps  (n=412)
-    D 9:   +1.96 bps  (n=412)
-    D10:   +2.38 bps  (n=412)
+                 rsi14: -1.193
+        ema_spread_bps: +1.674
+         dist_ema9_bps: -0.166
+        dist_ema21_bps: +0.742
+            ret_1m_bps: +0.192
+            ret_5m_bps: -0.706
+             range_bps: +0.521
+            body_ratio: -0.173
+                 vol_z: +0.290
+        min_since_open: +0.399
+  Deciles of range_bps -> avg fwd_15m_bps:
+    D 1:   +0.20 bps  (n=450)
+    D 2:   +0.04 bps  (n=449)
+    D 3:   +0.09 bps  (n=449)
+    D 4:   -0.03 bps  (n=450)
+    D 5:   -0.25 bps  (n=449)
+    D 6:   -0.27 bps  (n=449)
+    D 7:   -0.38 bps  (n=450)
+    D 8:   +0.27 bps  (n=449)
+    D 9:   +0.03 bps  (n=449)
+    D10:   +1.71 bps  (n=450)
   Deciles of vol_z -> avg fwd_15m_bps:
-    D 1:   -0.41 bps  (n=412)
-    D 2:   -0.16 bps  (n=412)
-    D 3:   -0.34 bps  (n=412)
-    D 4:   -0.01 bps  (n=412)
-    D 5:   +0.16 bps  (n=412)
-    D 6:   -0.44 bps  (n=411)
-    D 7:   +0.17 bps  (n=412)
-    D 8:   +0.12 bps  (n=412)
-    D 9:   +0.21 bps  (n=412)
-    D10:   +1.06 bps  (n=412)
-  Deciles of dist_ema21_bps -> avg fwd_15m_bps:
-    D 1:   +0.53 bps  (n=412)
-    D 2:   -1.14 bps  (n=412)
-    D 3:   -0.18 bps  (n=412)
-    D 4:   -0.82 bps  (n=412)
-    D 5:   -0.39 bps  (n=412)
-    D 6:   -0.01 bps  (n=411)
-    D 7:   -0.24 bps  (n=412)
-    D 8:   -0.53 bps  (n=412)
-    D 9:   +0.67 bps  (n=412)
-    D10:   +2.50 bps  (n=412)
+    D 1:   -0.58 bps  (n=450)
+    D 2:   +0.14 bps  (n=449)
+    D 3:   -0.60 bps  (n=449)
+    D 4:   +0.67 bps  (n=450)
+    D 5:   -0.22 bps  (n=449)
+    D 6:   -0.53 bps  (n=449)
+    D 7:   -0.19 bps  (n=450)
+    D 8:   +0.45 bps  (n=449)
+    D 9:   +0.80 bps  (n=449)
+    D10:   +1.49 bps  (n=450)
+  Deciles of min_since_open -> avg fwd_15m_bps:
+    D 1:   +3.47 bps  (n=451)
+    D 2:   -2.73 bps  (n=456)
+    D 3:   +1.44 bps  (n=444)
+    D 4:   -1.01 bps  (n=456)
+    D 5:   +0.53 bps  (n=444)
+    D 6:   +1.58 bps  (n=456)
+    D 7:   -1.54 bps  (n=444)
+    D 8:   +0.50 bps  (n=444)
+    D 9:   -2.13 bps  (n=456)
+    D10:   +1.40 bps  (n=443)
 
-=== TARGET: mfe_10m_bps (n=4174) ===
-  R2 train 0.1837 | R2 TEST 0.0498   (test is what matters)
+=== TARGET: mfe_10m_bps (n=4554) ===
+  R2 train 0.1878 | R2 TEST 0.0524   (test is what matters)
   Correlations (|r| ranked):
-             range_bps: +0.3550
-        min_since_open: -0.2786
-                 rsi14: -0.1502
-        dist_ema21_bps: -0.1138
-         dist_ema9_bps: -0.1115
-            ret_5m_bps: -0.1078
-                 vol_z: +0.1035
-        ema_spread_bps: -0.0903
-            ret_1m_bps: -0.0570
-            body_ratio: -0.0130
+             range_bps: +0.3571
+        min_since_open: -0.2906
+                 rsi14: -0.1567
+        ema_spread_bps: -0.1523
+        dist_ema21_bps: -0.1373
+                 vol_z: +0.1202
+         dist_ema9_bps: -0.0988
+            ret_5m_bps: -0.0881
+            ret_1m_bps: -0.0377
+            body_ratio: -0.0074
   Std. coefficients (bps per 1-sigma of feature):
-                 rsi14: -0.950
-        ema_spread_bps: +0.348
-         dist_ema9_bps: +0.247
-        dist_ema21_bps: +0.327
-            ret_1m_bps: -0.114
-            ret_5m_bps: -0.445
-             range_bps: +1.741
-            body_ratio: -0.416
-                 vol_z: +0.074
-        min_since_open: -0.859
+                 rsi14: -0.936
+        ema_spread_bps: +0.341
+         dist_ema9_bps: +0.240
+        dist_ema21_bps: +0.319
+            ret_1m_bps: -0.090
+            ret_5m_bps: -0.430
+             range_bps: +1.682
+            body_ratio: -0.401
+                 vol_z: +0.067
+        min_since_open: -0.880
   Deciles of range_bps -> avg mfe_10m_bps:
-    D 1:   +3.24 bps  (n=418)
-    D 2:   +3.90 bps  (n=417)
-    D 3:   +4.57 bps  (n=417)
-    D 4:   +5.07 bps  (n=418)
-    D 5:   +5.90 bps  (n=417)
-    D 6:   +5.91 bps  (n=417)
-    D 7:   +6.36 bps  (n=418)
-    D 8:   +6.98 bps  (n=417)
-    D 9:   +8.11 bps  (n=417)
-    D10:  +10.27 bps  (n=418)
+    D 1:   +3.27 bps  (n=456)
+    D 2:   +4.08 bps  (n=455)
+    D 3:   +4.66 bps  (n=455)
+    D 4:   +5.33 bps  (n=456)
+    D 5:   +5.99 bps  (n=455)
+    D 6:   +6.04 bps  (n=455)
+    D 7:   +6.80 bps  (n=456)
+    D 8:   +7.48 bps  (n=455)
+    D 9:   +8.55 bps  (n=455)
+    D10:  +10.61 bps  (n=456)
   Deciles of min_since_open -> avg mfe_10m_bps:
-    D 1:   +9.52 bps  (n=424)
-    D 2:   +8.13 bps  (n=418)
-    D 3:   +8.03 bps  (n=418)
-    D 4:   +5.29 bps  (n=418)
-    D 5:   +5.61 bps  (n=418)
-    D 6:   +5.51 bps  (n=418)
-    D 7:   +4.19 bps  (n=418)
-    D 8:   +4.81 bps  (n=407)
-    D 9:   +3.69 bps  (n=418)
-    D10:   +5.47 bps  (n=417)
+    D 1:  +10.64 bps  (n=463)
+    D 2:   +8.06 bps  (n=456)
+    D 3:   +8.14 bps  (n=456)
+    D 4:   +5.71 bps  (n=456)
+    D 5:   +5.91 bps  (n=456)
+    D 6:   +5.61 bps  (n=456)
+    D 7:   +4.13 bps  (n=456)
+    D 8:   +4.84 bps  (n=444)
+    D 9:   +3.85 bps  (n=456)
+    D10:   +5.79 bps  (n=455)
   Deciles of rsi14 -> avg mfe_10m_bps:
-    D 1:   +8.55 bps  (n=418)
-    D 2:   +6.90 bps  (n=417)
-    D 3:   +6.36 bps  (n=417)
-    D 4:   +6.05 bps  (n=418)
-    D 5:   +5.48 bps  (n=417)
-    D 6:   +5.28 bps  (n=417)
-    D 7:   +5.58 bps  (n=418)
-    D 8:   +4.97 bps  (n=417)
-    D 9:   +5.23 bps  (n=417)
-    D10:   +5.93 bps  (n=418)
+    D 1:   +8.79 bps  (n=456)
+    D 2:   +7.06 bps  (n=455)
+    D 3:   +6.65 bps  (n=455)
+    D 4:   +6.35 bps  (n=456)
+    D 5:   +5.95 bps  (n=455)
+    D 6:   +5.70 bps  (n=455)
+    D 7:   +5.81 bps  (n=456)
+    D 8:   +5.10 bps  (n=455)
+    D 9:   +5.46 bps  (n=455)
+    D10:   +5.93 bps  (n=456)
