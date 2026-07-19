@@ -81,14 +81,6 @@ function isToday(date) {
 }
 
 // ---------- API helpers ----------
-const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
-
-function isRateLimit(data, response) {
-  if (response && response.status === 429) return true;
-  const dump = JSON.stringify(data || {});
-  return dump.includes("exceeded_limit") || dump.includes("rate_limit");
-}
-
 function parseJsonLoose(text) {
   const cleaned = text.replace(/```json|```/g, "").trim();
   const start = cleaned.indexOf("{");
@@ -115,67 +107,19 @@ function parseJsonLoose(text) {
   throw new Error("Incomplete JSON in response");
 }
 
-async function askClaude(prompt, { useSearch = true } = {}) {
-  const apiKey = localStorage.getItem(API_KEY_STORAGE_KEY);
-  if (!apiKey) {
-    throw new Error("Add your Anthropic API key in settings to use AI features.");
-  }
-  const backoffs = [8000, 16000];
-  for (let attempt = 0; ; attempt++) {
-    let response;
-    let data;
-    try {
-      const body = {
-        model: "claude-sonnet-4-6",
-        max_tokens: 2000,
-        messages: [{ role: "user", content: prompt }],
-      };
-      if (useSearch) {
-        body.tools = [{ type: "web_search_20250305", name: "web_search" }];
-      }
-      response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": apiKey,
-          "anthropic-version": "2023-06-01",
-          "anthropic-dangerous-direct-browser-access": "true",
-        },
-        body: JSON.stringify(body),
-      });
-      data = await response.json();
-    } catch (err) {
-      throw new Error("Network error reaching the API. Retry in a moment.");
-    }
-    if (isRateLimit(data, response)) {
-      if (attempt < backoffs.length) {
-        await sleep(backoffs[attempt]);
-        continue;
-      }
-      throw new Error("Rate limited — wait a minute, then retry.");
-    }
-    if (data.error) throw new Error(data.error.message || "API error");
-    if (!data.content) throw new Error("Empty response from API. Retry.");
-    const text = data.content
-      .filter((b) => b.type === "text")
-      .map((b) => b.text)
-      .join("\n");
-    return parseJsonLoose(text);
-  }
-}
-
 // ---------- prompts ----------
-function buildPrompts() {
+function buildMorningBriefPrompt() {
   const date = todayLabel();
   const range = weekRangeText();
-  const shared =
-    "Respond with ONLY a compact JSON object. No preamble, no markdown fences, no commentary before or after. Keep every string short.";
-  return {
-    econ: `Search the web for the US economic calendar for the trading week of ${range} — the schedule shown on sites like Forex Factory. USD events only, medium and high impact only (Fed speakers, CPI, PPI, jobs data, PMI, FOMC, auctions, consumer sentiment, etc.). ${shared} Schema: {"events": [{"day": "Mon|Tue|Wed|Thu|Fri", "time_et": "8:30 AM", "event": "name", "impact": "high|medium", "forecast": "or empty string", "previous": "or empty string"}]} Max 18 events across the week, each day's events sorted by time.`,
-    earnings: `Search the web for major companies reporting earnings during the trading week of ${range}, with special focus on tech and semiconductor companies plus any mega-caps that move the S&P 500. ${shared} Schema: {"earnings": [{"day": "Mon|Tue|Wed|Thu|Fri", "ticker": "ABC", "company": "name", "time": "BMO|AMC", "note": "why it matters, under 8 words"}]} Max 12 across the week. Empty array if nothing major.`,
-    sentiment: `Search the web for current pre-market / overnight US market sentiment for ${date}: S&P 500 futures direction and %, VIX level, CNN Fear & Greed index, and any major overnight headlines moving markets. ${shared} Schema: {"futures": "e.g. ES +0.3%", "vix": "e.g. 14.2, falling", "fear_greed": "e.g. 62 - Greed", "overnight": "one line on overnight action", "summary": "2 sentences max on the tape's tone", "tone": "bullish|bearish|neutral"}`,
-    cases: `Search the web for the latest news and analyst commentary relevant to SPY / the S&P 500 for ${date}. Build a same-day bull case and bear case for SPY. ${shared} Schema: {"bull": ["point 1", "point 2", "point 3"], "bear": ["point 1", "point 2", "point 3"], "watch": "single most important thing to watch today, one line"} Each point under 15 words.`,
-  };
+  return `You are preparing a morning trading brief for an intraday SPY options scalper (break-and-retest methodology). Search the web and research all four sections below for the trading week of ${range} / today (${date}):
+
+1. ECON CALENDAR: US economic calendar for the week — the schedule shown on sites like Forex Factory. USD events only, medium and high impact only (Fed speakers, CPI, PPI, jobs data, PMI, FOMC, auctions, consumer sentiment, etc). Max 18 events across the week, each day's events sorted by time.
+2. EARNINGS: Major companies reporting earnings this week, with special focus on tech and semiconductor companies plus any mega-caps that move the S&P 500. Max 12 across the week, empty array if nothing major.
+3. SENTIMENT: Current pre-market / overnight US market sentiment for today — S&P 500 futures direction and %, VIX level, CNN Fear & Greed index, and any major overnight headlines moving markets.
+4. BULL/BEAR CASE: Latest news and analyst commentary relevant to SPY / the S&P 500 today. Build a same-day bull case and bear case, each point under 15 words.
+
+Respond with ONLY compact JSON, no preamble, no markdown fences, no commentary before or after, every string short. Schema:
+{"econ": {"events": [{"day": "Mon|Tue|Wed|Thu|Fri", "time_et": "8:30 AM", "event": "name", "impact": "high|medium", "forecast": "or empty string", "previous": "or empty string"}]}, "earnings": {"earnings": [{"day": "Mon|Tue|Wed|Thu|Fri", "ticker": "ABC", "company": "name", "time": "BMO|AMC", "note": "why it matters, under 8 words"}]}, "sentiment": {"futures": "e.g. ES +0.3%", "vix": "e.g. 14.2, falling", "fear_greed": "e.g. 62 - Greed", "overnight": "one line on overnight action", "summary": "2 sentences max on the tape's tone", "tone": "bullish|bearish|neutral"}, "cases": {"bull": ["point 1", "point 2", "point 3"], "bear": ["point 1", "point 2", "point 3"], "watch": "single most important thing to watch today, one line"}}`;
 }
 
 // ---------- clock ----------
@@ -276,43 +220,12 @@ function ImpactDot({ impact }) {
   );
 }
 
-function SourceStatus({ label, status, error, onRetry }) {
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 6,
-        fontFamily: T.mono,
-        fontSize: 10,
-        letterSpacing: "0.08em",
-        color: T.faint,
-      }}
-    >
-      {label}
-      {status === "loading" && <Dots />}
-      {status === "done" && <span style={{ color: T.green }}>✓</span>}
-      {status === "idle" && <span>—</span>}
-      {status === "error" && (
-        <>
-          <span style={{ color: T.red }} title={error}>
-            ✕
-          </span>
-          <button onClick={onRetry} style={retryBtn}>
-            Retry
-          </button>
-        </>
-      )}
-    </span>
-  );
-}
-
 // ---------- week calendar ----------
-function WeekCalendar({ econ, earnings, onRetryEcon, onRetryEarnings }) {
+function WeekCalendar({ econ, earnings }) {
   const week = tradingWeek();
-  const econEvents = (econ.data && econ.data.events) || [];
-  const earnRows = (earnings.data && earnings.data.earnings) || [];
-  const nothingYet = econ.status === "idle" && earnings.status === "idle";
+  const econEvents = (econ && econ.events) || [];
+  const earnRows = (earnings && earnings.earnings) || [];
+  const nothingYet = !econ && !earnings;
 
   return (
     <div
@@ -348,20 +261,6 @@ function WeekCalendar({ econ, earnings, onRetryEcon, onRetryEarnings }) {
           <span style={{ fontSize: 14, fontWeight: 600, color: T.ink }}>
             The week — {weekRangeText()}
           </span>
-        </div>
-        <div style={{ display: "flex", gap: 14 }}>
-          <SourceStatus
-            label="ECON"
-            status={econ.status}
-            error={econ.error}
-            onRetry={onRetryEcon}
-          />
-          <SourceStatus
-            label="EARNINGS"
-            status={earnings.status}
-            error={earnings.error}
-            onRetry={onRetryEarnings}
-          />
         </div>
       </div>
 
@@ -448,18 +347,7 @@ function WeekCalendar({ econ, earnings, onRetryEcon, onRetryEarnings }) {
                   </div>
 
                   <div style={{ padding: "8px 10px", flex: 1 }}>
-                    {econ.status === "loading" && (
-                      <div
-                        style={{
-                          fontFamily: T.mono,
-                          fontSize: 10,
-                          color: T.faint,
-                        }}
-                      >
-                        loading…
-                      </div>
-                    )}
-                    {econ.status === "done" && dayEcon.length === 0 && (
+                    {econ && dayEcon.length === 0 && (
                       <div
                         style={{
                           fontFamily: T.mono,
@@ -517,7 +405,7 @@ function WeekCalendar({ econ, earnings, onRetryEcon, onRetryEarnings }) {
                       ))}
                     </div>
 
-                    {(dayEarn.length > 0 || earnings.status === "loading") && (
+                    {dayEarn.length > 0 && (
                       <div
                         style={{
                           marginTop: 10,
@@ -536,17 +424,6 @@ function WeekCalendar({ econ, earnings, onRetryEcon, onRetryEarnings }) {
                         >
                           EARNINGS
                         </div>
-                        {earnings.status === "loading" && (
-                          <div
-                            style={{
-                              fontFamily: T.mono,
-                              fontSize: 10,
-                              color: T.faint,
-                            }}
-                          >
-                            loading…
-                          </div>
-                        )}
                         <div
                           style={{
                             display: "flex",
@@ -610,7 +487,7 @@ function WeekCalendar({ econ, earnings, onRetryEcon, onRetryEarnings }) {
 }
 
 // ---------- generic panel ----------
-function Panel({ title, tag, status, error, onRetry, children }) {
+function Panel({ title, tag, hasData, children }) {
   return (
     <div
       style={{
@@ -647,29 +524,113 @@ function Panel({ title, tag, status, error, onRetry, children }) {
             {title}
           </span>
         </div>
-        {status === "loading" && <Dots />}
       </div>
       <div style={{ padding: 14, flex: 1, fontSize: 13 }}>
-        {status === "idle" && (
+        {hasData ? (
+          children
+        ) : (
           <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 12 }}>
             Awaiting run
           </div>
         )}
-        {status === "loading" && (
-          <div style={{ color: T.dim, fontFamily: T.mono, fontSize: 12 }}>
-            Searching the web…
-          </div>
-        )}
-        {status === "error" && (
-          <div style={{ color: T.red, fontSize: 12 }}>
-            {error || "Something went wrong."}{" "}
-            <button onClick={onRetry} style={{ ...retryBtn, marginLeft: 8 }}>
-              Retry
-            </button>
-          </div>
-        )}
-        {status === "done" && children}
       </div>
+    </div>
+  );
+}
+
+// ---------- copy/paste AI exchange (uses claude.ai directly — no metered API key) ----------
+function CopyPasteAI({ prompt, onSubmit, onCancel }) {
+  const [text, setText] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [err, setErr] = useState(null);
+  const [showPrompt, setShowPrompt] = useState(false);
+
+  async function copyPrompt() {
+    try {
+      await navigator.clipboard.writeText(prompt);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setErr("Couldn't copy automatically — use Show prompt and copy it manually.");
+      setShowPrompt(true);
+    }
+  }
+
+  function submit() {
+    setErr(null);
+    try {
+      const parsed = parseJsonLoose(text);
+      onSubmit(parsed);
+    } catch (e) {
+      setErr(e.message);
+    }
+  }
+
+  return (
+    <div
+      style={{
+        background: T.bg,
+        border: `1px solid ${T.panelEdge}`,
+        borderRadius: 8,
+        padding: 12,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      <div style={{ fontSize: 12, color: T.dim }}>
+        Copy this prompt into claude.ai, then paste Claude's response below.
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <button
+          onClick={copyPrompt}
+          style={{ ...retryBtn, borderColor: T.amber, color: T.amber }}
+        >
+          {copied ? "Copied!" : "Copy prompt"}
+        </button>
+        <button onClick={() => setShowPrompt((s) => !s)} style={retryBtn}>
+          {showPrompt ? "Hide prompt" : "Show prompt"}
+        </button>
+        {onCancel && (
+          <button onClick={onCancel} style={retryBtn}>
+            Cancel
+          </button>
+        )}
+      </div>
+      {showPrompt && (
+        <textarea
+          readOnly
+          value={prompt}
+          rows={5}
+          style={{ ...inputStyle, resize: "vertical", fontFamily: T.mono, fontSize: 10, color: T.faint }}
+        />
+      )}
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        rows={4}
+        placeholder="Paste Claude's JSON response here"
+        style={{ ...inputStyle, resize: "vertical", fontFamily: T.mono, fontSize: 11 }}
+      />
+      {err && <div style={{ color: T.red, fontSize: 12 }}>{err}</div>}
+      <button
+        onClick={submit}
+        disabled={!text.trim()}
+        style={{
+          background: text.trim() ? T.amber : T.panelEdge,
+          color: text.trim() ? "#141414" : T.dim,
+          border: "none",
+          borderRadius: 8,
+          padding: "8px 16px",
+          fontSize: 12,
+          fontWeight: 700,
+          cursor: text.trim() ? "pointer" : "default",
+          fontFamily: T.sans,
+          alignSelf: "flex-start",
+        }}
+      >
+        Use response
+      </button>
     </div>
   );
 }
@@ -787,7 +748,7 @@ function CasesBody({ data }) {
 }
 
 // ---------- Morning Brief tab ----------
-function MorningBriefTab({ panels, runPanel, runAll, anyLoading, lastRun }) {
+function MorningBriefTab({ panels, stage, prompt, runAll, submitBrief, cancelBrief, lastRun }) {
   return (
     <div>
       <div
@@ -808,34 +769,31 @@ function MorningBriefTab({ panels, runPanel, runAll, anyLoading, lastRun }) {
         </div>
         <button
           onClick={runAll}
-          disabled={anyLoading}
+          disabled={stage === "awaiting-paste"}
           style={{
-            background: anyLoading ? T.panelEdge : T.amber,
-            color: anyLoading ? T.dim : "#141414",
+            background: stage === "awaiting-paste" ? T.panelEdge : T.amber,
+            color: stage === "awaiting-paste" ? T.dim : "#141414",
             border: "none",
             borderRadius: 8,
             padding: "10px 20px",
             fontSize: 14,
             fontWeight: 700,
-            cursor: anyLoading ? "default" : "pointer",
+            cursor: stage === "awaiting-paste" ? "default" : "pointer",
             fontFamily: T.sans,
             flexShrink: 0,
           }}
         >
-          {anyLoading
-            ? "Gathering…"
-            : lastRun
-            ? "Refresh prep"
-            : "Run morning prep"}
+          {lastRun ? "Refresh prep" : "Run morning prep"}
         </button>
       </div>
 
-      <WeekCalendar
-        econ={panels.econ}
-        earnings={panels.earnings}
-        onRetryEcon={() => runPanel("econ")}
-        onRetryEarnings={() => runPanel("earnings")}
-      />
+      {stage === "awaiting-paste" && (
+        <div style={{ marginBottom: 14 }}>
+          <CopyPasteAI prompt={prompt} onSubmit={submitBrief} onCancel={cancelBrief} />
+        </div>
+      )}
+
+      <WeekCalendar econ={panels.econ} earnings={panels.earnings} />
 
       <div
         style={{
@@ -845,34 +803,20 @@ function MorningBriefTab({ panels, runPanel, runAll, anyLoading, lastRun }) {
           marginTop: 14,
         }}
       >
-        <Panel
-          tag="02"
-          title="Market sentiment"
-          status={panels.sentiment.status}
-          error={panels.sentiment.error}
-          onRetry={() => runPanel("sentiment")}
-        >
-          {panels.sentiment.data && (
-            <SentimentBody data={panels.sentiment.data} />
-          )}
+        <Panel tag="02" title="Market sentiment" hasData={!!panels.sentiment}>
+          {panels.sentiment && <SentimentBody data={panels.sentiment} />}
         </Panel>
-        <Panel
-          tag="03"
-          title="Bull vs. bear — SPY"
-          status={panels.cases.status}
-          error={panels.cases.error}
-          onRetry={() => runPanel("cases")}
-        >
-          {panels.cases.data && <CasesBody data={panels.cases.data} />}
+        <Panel tag="03" title="Bull vs. bear — SPY" hasData={!!panels.cases}>
+          {panels.cases && <CasesBody data={panels.cases} />}
         </Panel>
       </div>
 
       <div
         style={{ marginTop: 16, fontSize: 11, color: T.faint, lineHeight: 1.5 }}
       >
-        Data is gathered by live web search at run time and may be delayed or
-        incomplete — verify anything actionable against your platform before
-        trading. Informational only, not financial advice.
+        Built from whatever you paste in from claude.ai — verify anything
+        actionable against your platform before trading. Informational only,
+        not financial advice.
       </div>
     </div>
   );
@@ -910,8 +854,18 @@ function AuthGate({ children }) {
 
   if (session === undefined) {
     return (
-      <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 12 }}>
-        Loading…
+      <div
+        style={{
+          minHeight: "100vh",
+          background: T.bg,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+        }}
+      >
+        <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 12 }}>
+          Loading…
+        </div>
       </div>
     );
   }
@@ -920,50 +874,76 @@ function AuthGate({ children }) {
     return (
       <div
         style={{
-          background: T.panel,
-          border: `1px solid ${T.panelEdge}`,
-          borderRadius: 10,
-          padding: 24,
-          maxWidth: 340,
+          minHeight: "100vh",
+          background: T.bg,
+          fontFamily: T.sans,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "flex-start",
+          padding: 20,
+          paddingTop: "12vh",
         }}
       >
-        <div style={{ fontSize: 14, color: T.ink, marginBottom: 14, fontWeight: 700 }}>
-          Sign in
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="email"
-            style={inputStyle}
-          />
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="password"
-            onKeyDown={(e) => e.key === "Enter" && signIn()}
-            style={inputStyle}
-          />
-          {error && <div style={{ color: T.red, fontSize: 12 }}>{error}</div>}
-          <button
-            onClick={signIn}
-            disabled={busy}
-            style={{
-              background: T.amber,
-              color: "#141414",
-              border: "none",
-              borderRadius: 8,
-              padding: "9px 18px",
-              fontSize: 13,
-              fontWeight: 700,
-              cursor: busy ? "default" : "pointer",
-              fontFamily: T.sans,
-            }}
-          >
-            {busy ? "Signing in…" : "Sign in"}
-          </button>
+        <img
+          src={LOGO}
+          alt="Smaug logo"
+          width={180}
+          height={180}
+          style={{ display: "block", marginBottom: 12 }}
+        />
+        <img
+          src={WORDMARK}
+          alt="SMAUG"
+          style={{ display: "block", height: 54, width: "auto", marginBottom: 36 }}
+        />
+        <div
+          style={{
+            background: T.panel,
+            border: `1px solid ${T.panelEdge}`,
+            borderRadius: 12,
+            padding: 34,
+            width: 440,
+          }}
+        >
+          <div style={{ fontSize: 20, color: T.ink, marginBottom: 20, fontWeight: 700 }}>
+            Sign in
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="email"
+              style={{ ...inputStyle, fontSize: 16, padding: "12px 14px" }}
+            />
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="password"
+              onKeyDown={(e) => e.key === "Enter" && signIn()}
+              style={{ ...inputStyle, fontSize: 16, padding: "12px 14px" }}
+            />
+            {error && <div style={{ color: T.red, fontSize: 13 }}>{error}</div>}
+            <button
+              onClick={signIn}
+              disabled={busy}
+              style={{
+                background: T.amber,
+                color: "#141414",
+                border: "none",
+                borderRadius: 8,
+                padding: "13px 22px",
+                fontSize: 16,
+                fontWeight: 700,
+                cursor: busy ? "default" : "pointer",
+                fontFamily: T.sans,
+              }}
+            >
+              {busy ? "Signing in…" : "Sign in"}
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -1001,7 +981,6 @@ const storage = {
   },
 };
 const storageAvailable = true;
-const API_KEY_STORAGE_KEY = "smaug-api-key";
 
 const emptyEntry = () => ({
   date: todayISO(),
@@ -1020,10 +999,10 @@ function JournalTab() {
   const [feedback, setFeedback] = useState({
     status: "idle",
     data: null,
-    error: null,
+    prompt: null,
   });
 
-  async function getFeedback() {
+  function getFeedback() {
     const recent = entries.slice(0, 20).map((e) => ({
       date: e.date,
       ticker: e.ticker,
@@ -1032,16 +1011,18 @@ function JournalTab() {
       setup: e.setup,
       notes: e.notes,
     }));
-    setFeedback({ status: "loading", data: null, error: null });
     const prompt = `You are a direct, no-fluff trading performance coach. The trader is an intraday SPY options scalper using a break-and-retest methodology with confluence scoring and ATR-based stops. Below are their most recent journal entries (newest first), as JSON:\n\n${JSON.stringify(
       recent
     )}\n\nAnalyze for patterns across entries: setup discipline, direction bias, result patterns, and whether their own notes show recurring mistakes or strengths. Reference specifics from the entries. Respond with ONLY a compact JSON object, no preamble, no markdown fences. Schema: {"observations": ["pattern you noticed, under 20 words"], "strengths": ["what's working, under 15 words"], "risks": ["habit or leak to watch, under 15 words"], "focus": "the single most important adjustment for next session, one sentence"} Max 3 items per array. If there are too few entries to find real patterns, say so honestly in observations rather than inventing them.`;
-    try {
-      const data = await askClaude(prompt, { useSearch: false });
-      setFeedback({ status: "done", data, error: null });
-    } catch (err) {
-      setFeedback({ status: "error", data: null, error: err.message });
-    }
+    setFeedback({ status: "awaiting-paste", data: null, prompt });
+  }
+
+  function submitFeedback(data) {
+    setFeedback({ status: "done", data, prompt: null });
+  }
+
+  function cancelFeedback() {
+    setFeedback({ status: "idle", data: null, prompt: null });
   }
 
   useEffect(() => {
@@ -1269,31 +1250,25 @@ function JournalTab() {
           )}
           <button
             onClick={getFeedback}
-            disabled={feedback.status === "loading"}
             style={{
               ...retryBtn,
               marginLeft: "auto",
               borderColor: T.amber,
-              color: feedback.status === "loading" ? T.faint : T.amber,
+              color: T.amber,
               padding: "5px 14px",
               fontSize: 12,
               fontWeight: 700,
             }}
           >
-            {feedback.status === "loading"
-              ? "Reviewing…"
-              : "Get coach feedback"}
+            Get coach feedback
           </button>
         </div>
       )}
 
       {/* feedback panel */}
-      {feedback.status === "error" && (
-        <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>
-          {feedback.error}{" "}
-          <button onClick={getFeedback} style={{ ...retryBtn, marginLeft: 6 }}>
-            Retry
-          </button>
+      {feedback.status === "awaiting-paste" && (
+        <div style={{ marginBottom: 14 }}>
+          <CopyPasteAI prompt={feedback.prompt} onSubmit={submitFeedback} onCancel={cancelFeedback} />
         </div>
       )}
       {feedback.status === "done" && feedback.data && (
@@ -1982,6 +1957,14 @@ const FEATURE_LABELS = {
   body_ratio: "Body ratio",
   vol_z: "Volume z-score",
   min_since_open: "Minutes since open",
+  dist_prev_day_high_bps: "Dist. from prev-day high",
+  dist_prev_day_low_bps: "Dist. from prev-day low",
+  dist_premkt_high_bps: "Dist. from premarket high",
+  dist_premkt_low_bps: "Dist. from premarket low",
+  dist_or5_high_bps: "Dist. from 5-min OR high",
+  dist_or5_low_bps: "Dist. from 5-min OR low",
+  dist_or15_high_bps: "Dist. from 15-min OR high",
+  dist_or15_low_bps: "Dist. from 15-min OR low",
 };
 
 const TARGET_LABELS = {
@@ -1995,8 +1978,9 @@ const fLabel = (k) => FEATURE_LABELS[k] || k;
 const tLabel = (k) => TARGET_LABELS[k] || k;
 
 function HBar({ label, value, maxAbs, format }) {
-  const pct = maxAbs > 0 ? (Math.abs(value) / maxAbs) * 100 : 0;
-  const color = value >= 0 ? T.green : T.red;
+  const missing = value === null || value === undefined;
+  const pct = !missing && maxAbs > 0 ? (Math.abs(value) / maxAbs) * 100 : 0;
+  const color = missing ? T.faint : value >= 0 ? T.green : T.red;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <span
@@ -2018,7 +2002,7 @@ function HBar({ label, value, maxAbs, format }) {
             top: 2,
             height: 10,
             width: `${pct}%`,
-            minWidth: value !== 0 ? 2 : 0,
+            minWidth: !missing && value !== 0 ? 2 : 0,
             background: color,
             opacity: 0.75,
             borderRadius: 2,
@@ -2035,7 +2019,7 @@ function HBar({ label, value, maxAbs, format }) {
           textAlign: "right",
         }}
       >
-        {format(value)}
+        {missing ? "n/a" : format(value)}
       </span>
     </div>
   );
@@ -2140,7 +2124,7 @@ function TechnicalsTab() {
   const [fetchUrl, setFetchUrl] = useState("");
   const [fetching, setFetching] = useState(false);
   const [target, setTarget] = useState(null);
-  const [ai, setAi] = useState({ status: "idle", data: null, error: null });
+  const [ai, setAi] = useState({ status: "idle", data: null, prompt: null });
   const [dayBars, setDayBars] = useState(null); // { days: ["2026-07-10", ...], byDay: Map }
   const [dayIndex, setDayIndex] = useState(0);
   const [timeframe, setTimeframe] = useState(1);
@@ -2261,10 +2245,9 @@ function TechnicalsTab() {
     setFetching(false);
   }
 
-  async function getAiRead() {
+  function getAiRead() {
     if (!results || !target) return;
     const t = results.targets[target];
-    setAi({ status: "loading", data: null, error: null });
     const payload = {
       target,
       n: t.n,
@@ -2278,12 +2261,15 @@ function TechnicalsTab() {
     const prompt = `You are a quantitative trading analyst reviewing regression results from SPY 1-minute data. The trader is an intraday options scalper (break-and-retest methodology). Stats for target "${target}" (forward move in basis points):\n\n${JSON.stringify(
       payload
     )}\n\nInterpret honestly. Key context: at 1-min resolution |r| of 0.03-0.05 is meaningful, above 0.10 suggests leakage/bugs; negative test R2 means the fit failed out of sample; monotone decile patterns matter more than coefficients; watch for multicollinearity between EMA-distance features. Respond with ONLY compact JSON, no fences: {"read": ["key finding, under 20 words", "..."], "cautions": ["statistical concern, under 20 words"], "actionable": "one sentence: the single most usable takeaway, or say there isn't one yet"} Max 3 per array. Never invent findings the numbers don't support.`;
-    try {
-      const data = await askClaude(prompt, { useSearch: false });
-      setAi({ status: "done", data, error: null });
-    } catch (err) {
-      setAi({ status: "error", data: null, error: err.message });
-    }
+    setAi({ status: "awaiting-paste", data: null, prompt });
+  }
+
+  function submitAiRead(data) {
+    setAi({ status: "done", data, prompt: null });
+  }
+
+  function cancelAiRead() {
+    setAi({ status: "idle", data: null, prompt: null });
   }
 
   if (loadState === "loading") {
@@ -2462,27 +2448,23 @@ function TechnicalsTab() {
             })}
             <button
               onClick={getAiRead}
-              disabled={ai.status === "loading"}
               style={{
                 ...retryBtn,
                 marginLeft: "auto",
                 borderColor: T.amber,
-                color: ai.status === "loading" ? T.faint : T.amber,
+                color: T.amber,
                 padding: "5px 14px",
                 fontWeight: 700,
               }}
             >
-              {ai.status === "loading" ? "Analyzing…" : "AI read"}
+              AI read
             </button>
           </div>
 
           {/* AI read panel */}
-          {ai.status === "error" && (
-            <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>
-              {ai.error}{" "}
-              <button onClick={getAiRead} style={{ ...retryBtn, marginLeft: 6 }}>
-                Retry
-              </button>
+          {ai.status === "awaiting-paste" && (
+            <div style={{ marginBottom: 14 }}>
+              <CopyPasteAI prompt={ai.prompt} onSubmit={submitAiRead} onCancel={cancelAiRead} />
             </div>
           )}
           {ai.status === "done" && ai.data && (
@@ -2879,104 +2861,6 @@ function ResourcesTab() {
   );
 }
 
-// ---------- settings (API key) ----------
-function ApiKeySettings() {
-  const [open, setOpen] = useState(false);
-  const [key, setKey] = useState(() => localStorage.getItem(API_KEY_STORAGE_KEY) || "");
-  const [savedFlash, setSavedFlash] = useState(false);
-
-  function save() {
-    localStorage.setItem(API_KEY_STORAGE_KEY, key.trim());
-    setSavedFlash(true);
-    setTimeout(() => setSavedFlash(false), 1500);
-  }
-  function clear() {
-    localStorage.removeItem(API_KEY_STORAGE_KEY);
-    setKey("");
-  }
-
-  const btnStyle = {
-    background: T.panel,
-    border: `1px solid ${T.panelEdge}`,
-    borderRadius: 6,
-    color: T.ink,
-    fontSize: 12,
-    padding: "5px 10px",
-    cursor: "pointer",
-  };
-
-  return (
-    <div style={{ position: "relative" }}>
-      <button
-        onClick={() => setOpen((o) => !o)}
-        aria-label="Settings"
-        title="Anthropic API key settings"
-        style={{
-          background: "transparent",
-          border: `1px solid ${T.panelEdge}`,
-          borderRadius: 6,
-          color: T.dim,
-          width: 32,
-          height: 32,
-          cursor: "pointer",
-          fontSize: 16,
-          lineHeight: "30px",
-        }}
-      >
-        ⚙
-      </button>
-      {open && (
-        <div
-          style={{
-            position: "absolute",
-            top: 40,
-            right: 0,
-            background: T.panel,
-            border: `1px solid ${T.panelEdge}`,
-            borderRadius: 8,
-            padding: 14,
-            width: 260,
-            zIndex: 20,
-            boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-          }}
-        >
-          <div style={{ fontSize: 12, color: T.dim, marginBottom: 8 }}>
-            Anthropic API key (stored only in this browser)
-          </div>
-          <input
-            type="password"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            placeholder="sk-ant-..."
-            style={{
-              width: "100%",
-              boxSizing: "border-box",
-              background: T.bg,
-              border: `1px solid ${T.panelEdge}`,
-              borderRadius: 6,
-              color: T.ink,
-              padding: "6px 8px",
-              fontSize: 13,
-              marginBottom: 8,
-            }}
-          />
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={save} style={{ ...btnStyle, borderColor: T.amber, color: T.amber }}>
-              Save
-            </button>
-            <button onClick={clear} style={btnStyle}>
-              Clear
-            </button>
-          </div>
-          {savedFlash && (
-            <div style={{ color: T.green, fontSize: 11, marginTop: 6 }}>Saved.</div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ---------- Raw Data tab ----------
 function RawDataTab() {
   const [dayBars, setDayBars] = useState(null);
@@ -3154,6 +3038,429 @@ function RawDataTab() {
   );
 }
 
+// ---------- model tab ----------
+// bars must be sorted ascending by tMs (true of smaug_bars.json as written
+// by the pipeline). Returns the last bar at or before tMs — never a future
+// bar — so a labeled example is always matched to what was actually known
+// at that moment.
+function nearestBarAtOrBefore(bars, tMs) {
+  let lo = 0, hi = bars.length - 1, ans = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (bars[mid].tMs <= tMs) { ans = mid; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  return ans >= 0 ? bars[ans] : null;
+}
+
+function sanitizeRules(arr) {
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .filter((r) => r && typeof r === "object" && r.feature)
+    .slice(0, 8)
+    .map((r) => ({
+      feature: String(r.feature),
+      op: ["<", "<=", ">", ">="].includes(r.op) ? r.op : "?",
+      value: r.value,
+      note: typeof r.note === "string" ? r.note : "",
+    }));
+}
+
+function fmtRuleValue(v) {
+  if (v === null || v === undefined || v === "") return "n/a";
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(2) : String(v);
+}
+
+const CONFIDENCE_COLOR = { low: T.faint, medium: T.amber, high: T.green };
+
+function RuleList({ title, rules }) {
+  return (
+    <div>
+      <div
+        style={{
+          fontFamily: T.mono,
+          fontSize: 10,
+          letterSpacing: "0.12em",
+          color: T.faint,
+          marginBottom: 6,
+        }}
+      >
+        {title.toUpperCase()}
+      </div>
+      {rules.length === 0 ? (
+        <div style={{ fontSize: 12, color: T.faint }}>No conditions.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          {rules.map((r, i) => (
+            <div key={i} style={{ fontSize: 12, color: T.ink }}>
+              <span style={{ fontFamily: T.mono, color: T.amber }}>
+                {fLabel(r.feature)} {r.op} {fmtRuleValue(r.value)}
+              </span>
+              {r.note && <span style={{ color: T.dim }}> — {r.note}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ModelCard({ model, expanded, onToggle, onDelete }) {
+  const rules = model.rules || {};
+  return (
+    <div
+      style={{
+        background: T.panel,
+        border: `1px solid ${T.panelEdge}`,
+        borderRadius: 10,
+        padding: 14,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: T.mono, fontSize: 11, color: T.dim }}>
+          {new Date(model.generated_at).toLocaleString("en-US", {
+            month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false,
+          })}
+        </span>
+        <span
+          style={{
+            fontFamily: T.mono, fontSize: 10, letterSpacing: "0.08em",
+            color: CONFIDENCE_COLOR[model.confidence] || T.faint,
+            border: `1px solid ${CONFIDENCE_COLOR[model.confidence] || T.faint}`,
+            borderRadius: 4, padding: "1px 6px",
+          }}
+        >
+          {(model.confidence || "unknown").toUpperCase()} CONFIDENCE
+        </span>
+        <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
+          {model.examples_used} example{model.examples_used === 1 ? "" : "s"} · {model.bars_analyzed} bars
+        </span>
+        <span style={{ flex: 1 }} />
+        {onToggle && (
+          <button onClick={onToggle} style={{ ...retryBtn, padding: "3px 10px", fontSize: 11 }}>
+            {expanded ? "Collapse" : "Expand"}
+          </button>
+        )}
+        {onDelete && (
+          <button onClick={onDelete} style={{ ...retryBtn, padding: "3px 10px", fontSize: 11 }}>
+            Delete
+          </button>
+        )}
+      </div>
+      {(expanded === undefined || expanded) && (
+        <div style={{ marginTop: 12 }}>
+          {model.summary && (
+            <div style={{ fontSize: 13, color: T.ink, lineHeight: 1.5, marginBottom: 14 }}>
+              {model.summary}
+            </div>
+          )}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+              gap: 14,
+            }}
+          >
+            <RuleList title="Long entry" rules={rules.long_entry || []} />
+            <RuleList title="Short entry" rules={rules.short_entry || []} />
+            <RuleList title="Exit" rules={rules.exit || []} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ModelTab() {
+  const [models, setModels] = useState([]);
+  const [loadState, setLoadState] = useState("loading");
+  const [loadError, setLoadError] = useState(null);
+  const [bars, setBars] = useState(null);
+  const [featureCols, setFeatureCols] = useState([]);
+  const [results, setResults] = useState(null);
+  const [examples, setExamples] = useState([]);
+  const [stage, setStage] = useState("idle");
+  const [pendingPrompt, setPendingPrompt] = useState(null);
+  const [pendingMeta, setPendingMeta] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [buildError, setBuildError] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const [modelsRes, examplesRes, barsResp, resultsResp] = await Promise.all([
+        supabase.from("entry_models").select("*").order("generated_at", { ascending: false }),
+        supabase.from("training_examples").select("*"),
+        fetch(import.meta.env.BASE_URL + "smaug_bars.json").catch(() => null),
+        fetch(import.meta.env.BASE_URL + "smaug_results.json").catch(() => null),
+      ]);
+
+      if (modelsRes.error) setLoadError(modelsRes.error.message);
+      else setModels(modelsRes.data);
+
+      if (examplesRes.error) setLoadError((e) => e || examplesRes.error.message);
+      else setExamples(examplesRes.data);
+
+      if (barsResp && barsResp.ok) {
+        const parsed = await barsResp.json();
+        const cols = parsed.feature_cols || [];
+        setFeatureCols(cols);
+        const flat = parsed.bars.map((row) => {
+          const [ts, , , , , , ...featureVals] = row;
+          const features = {};
+          cols.forEach((name, i) => { features[name] = featureVals[i]; });
+          return { tMs: new Date(ts).getTime(), features };
+        });
+        setBars(flat);
+      }
+
+      if (resultsResp && resultsResp.ok) {
+        const parsed = await resultsResp.json();
+        if (parsed && parsed.targets) setResults(parsed);
+      }
+
+      setLoadState("ready");
+    })();
+  }, []);
+
+  function prepareModelPrompt() {
+    setBuildError(null);
+    try {
+      if (!bars || !results) {
+        throw new Error(
+          "Price/regression data isn't loaded — smaug_bars.json and smaug_results.json must be reachable."
+        );
+      }
+
+      const snapshots = [];
+      for (const ex of examples) {
+        const tMs = new Date(ex.occurred_at).getTime();
+        const bar = nearestBarAtOrBefore(bars, tMs);
+        if (!bar) continue;
+        snapshots.push({
+          quality: ex.quality,
+          type: ex.type,
+          direction: ex.direction,
+          notes: ex.notes,
+          features: bar.features,
+        });
+      }
+
+      const mean = (arr) => arr.reduce((a, b) => a + b, 0) / arr.length;
+      const statsByQuality = {};
+      for (const col of featureCols) {
+        const good = snapshots
+          .filter((s) => s.quality === "Good" && s.features[col] != null)
+          .map((s) => s.features[col]);
+        const bad = snapshots
+          .filter((s) => s.quality === "Bad" && s.features[col] != null)
+          .map((s) => s.features[col]);
+        if (good.length && bad.length) {
+          statsByQuality[col] = {
+            mean_good: Math.round(mean(good) * 100) / 100,
+            mean_bad: Math.round(mean(bad) * 100) / 100,
+            n_good: good.length,
+            n_bad: bad.length,
+          };
+        }
+      }
+
+      const regressionSummary = {};
+      for (const [tKey, t] of Object.entries(results.targets)) {
+        const top = t.correlations.filter(([, v]) => v !== null).slice(0, 5);
+        regressionSummary[tKey] = {
+          n: t.n,
+          r2_test: t.regression.r2_test,
+          top_correlations: top,
+          std_coefficients_bps: Object.fromEntries(
+            top.map(([f]) => [f, t.regression.std_coefficients_bps[f]])
+          ),
+        };
+      }
+
+      const payload = {
+        bars_analyzed: results.bars_analyzed,
+        date_range: results.date_range,
+        feature_columns: featureCols,
+        examples_used: snapshots.length,
+        feature_stats_by_quality: statsByQuality,
+        example_snapshots: snapshots,
+        regression_summary: regressionSummary,
+      };
+
+      const prompt = `You are a quantitative trading analyst building an entry/exit rule set for an intraday SPY scalper (break-and-retest methodology). You have two sources of signal: (1) regression/correlation stats from 1-minute SPY data, and (2) the trader's own labeled examples of good/bad entries and exits, each with the exact feature values at that moment. Data:\n\n${JSON.stringify(
+        payload
+      )}\n\nAll *_bps features are basis-point distances (e.g. dist_or5_low_bps = distance from the 5-min opening-range low, dist_prev_day_high_bps = distance from the prior session's high); rsi14 is 0-100; vol_z is a z-score; body_ratio is 0-1; min_since_open is minutes since 9:30 ET open. Only use feature names from feature_columns — never invent one, since these rules get translated mechanically into a trading indicator later. If examples_used is 0, say so explicitly in the summary and derive rules from the regression/correlation stats alone; confidence must be "low" in that case. With fewer than 10 examples, still lean toward "low" or "medium" confidence and say why. Never invent a finding the numbers don't support. Respond with ONLY compact JSON, no fences: {"long_entry": [{"feature": "name", "op": "<"|"<="|">"|">=", "value": number, "note": "under 15 words"}], "short_entry": [...], "exit": [...], "summary": "3-5 sentences, plain language", "confidence": "low"|"medium"|"high"} Max 5 conditions per array.`;
+
+      setPendingPrompt(prompt);
+      setPendingMeta({
+        barsAnalyzed: results.bars_analyzed || 0,
+        examplesUsed: snapshots.length,
+        dateRange: results.date_range,
+      });
+      setStage("awaiting-paste");
+    } catch (err) {
+      setBuildError(err.message);
+    }
+  }
+
+  function cancelModelPrompt() {
+    setStage("idle");
+    setPendingPrompt(null);
+    setPendingMeta(null);
+  }
+
+  async function submitModel(modelOut) {
+    setBuildError(null);
+    setSubmitting(true);
+    try {
+      const rules = {
+        long_entry: sanitizeRules(modelOut.long_entry),
+        short_entry: sanitizeRules(modelOut.short_entry),
+        exit: sanitizeRules(modelOut.exit),
+      };
+      const confidence = ["low", "medium", "high"].includes(modelOut.confidence)
+        ? modelOut.confidence
+        : "low";
+
+      const { data, error } = await supabase
+        .from("entry_models")
+        .insert({
+          bars_analyzed: pendingMeta.barsAnalyzed,
+          examples_used: pendingMeta.examplesUsed,
+          date_range: pendingMeta.dateRange,
+          rules,
+          summary: typeof modelOut.summary === "string" ? modelOut.summary : "",
+          confidence,
+        })
+        .select()
+        .single();
+      if (error) throw new Error(error.message);
+      setModels([data, ...models]);
+      setExpandedId(data.id);
+      setStage("idle");
+      setPendingPrompt(null);
+      setPendingMeta(null);
+    } catch (err) {
+      setBuildError(err.message);
+    }
+    setSubmitting(false);
+  }
+
+  async function deleteModel(id) {
+    setBuildError(null);
+    const prev = models;
+    setModels(models.filter((m) => m.id !== id));
+    const { error } = await supabase.from("entry_models").delete().eq("id", id);
+    if (error) {
+      setBuildError(error.message);
+      setModels(prev);
+    }
+  }
+
+  if (loadState === "loading") {
+    return (
+      <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 12 }}>
+        Loading…
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: T.dim, marginBottom: 14 }}>
+        Synthesizes an entry/exit rule set from the 30-day regression output plus
+        your Training Data examples. Each build is saved as a new version, so you
+        can watch it evolve as you log more examples.
+      </div>
+      {loadError && (
+        <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>{loadError}</div>
+      )}
+      {buildError && (
+        <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>{buildError}</div>
+      )}
+
+      <div
+        style={{
+          background: T.panel,
+          border: `1px solid ${T.panelEdge}`,
+          borderRadius: 10,
+          padding: 14,
+          marginBottom: 14,
+          display: "flex",
+          alignItems: "center",
+          gap: 14,
+          flexWrap: "wrap",
+        }}
+      >
+        <button
+          onClick={prepareModelPrompt}
+          disabled={!bars || !results || stage === "awaiting-paste"}
+          style={{
+            background: T.amber,
+            color: "#141414",
+            border: "none",
+            borderRadius: 8,
+            padding: "9px 18px",
+            fontSize: 13,
+            fontWeight: 700,
+            cursor: !bars || !results || stage === "awaiting-paste" ? "default" : "pointer",
+            fontFamily: T.sans,
+            opacity: !bars || !results || stage === "awaiting-paste" ? 0.6 : 1,
+          }}
+        >
+          Build model
+        </button>
+        <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
+          {examples.length} training example{examples.length === 1 ? "" : "s"} logged
+          {!bars && " · bars data unavailable"}
+          {!results && " · regression results unavailable"}
+        </span>
+      </div>
+
+      {stage === "awaiting-paste" && (
+        <div style={{ marginBottom: 14 }}>
+          <CopyPasteAI prompt={pendingPrompt} onSubmit={submitModel} onCancel={cancelModelPrompt} />
+          {submitting && (
+            <div style={{ fontSize: 12, color: T.dim, marginTop: 6 }}>Saving…</div>
+          )}
+        </div>
+      )}
+
+      {models.length === 0 ? (
+        <div style={{ color: T.dim, fontSize: 13 }}>No model built yet.</div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <ModelCard model={models[0]} onDelete={() => deleteModel(models[0].id)} />
+          {models.length > 1 && (
+            <div
+              style={{
+                fontFamily: T.mono,
+                fontSize: 10,
+                letterSpacing: "0.12em",
+                color: T.faint,
+                marginTop: 6,
+              }}
+            >
+              PREVIOUS VERSIONS
+            </div>
+          )}
+          {models.slice(1).map((m) => (
+            <ModelCard
+              key={m.id}
+              model={m}
+              expanded={expandedId === m.id}
+              onToggle={() => setExpandedId(expandedId === m.id ? null : m.id)}
+              onDelete={() => deleteModel(m.id)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- main ----------
 const TABS = [
   "Morning Brief",
@@ -3161,6 +3468,7 @@ const TABS = [
   "Modeling",
   "Raw Data",
   "Training Data",
+  "Model",
   "Resources",
 ];
 
@@ -3169,40 +3477,39 @@ export default function Smaug() {
   const countdown = openCountdown(now);
   const [tab, setTab] = useState("Morning Brief");
   const [panels, setPanels] = useState({
-    econ: { status: "idle", data: null, error: null },
-    earnings: { status: "idle", data: null, error: null },
-    sentiment: { status: "idle", data: null, error: null },
-    cases: { status: "idle", data: null, error: null },
+    econ: null,
+    earnings: null,
+    sentiment: null,
+    cases: null,
   });
+  const [briefStage, setBriefStage] = useState("idle");
+  const [briefPrompt, setBriefPrompt] = useState(null);
   const [lastRun, setLastRun] = useState(null);
 
-  const anyLoading = Object.values(panels).some((p) => p.status === "loading");
-
-  function setPanel(key, patch) {
-    setPanels((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
+  function runAll() {
+    setBriefPrompt(buildMorningBriefPrompt());
+    setBriefStage("awaiting-paste");
   }
 
-  async function runPanel(key) {
-    const prompts = buildPrompts();
-    setPanel(key, { status: "loading", error: null });
-    try {
-      const data = await askClaude(prompts[key]);
-      setPanel(key, { status: "done", data });
-    } catch (err) {
-      setPanel(key, { status: "error", error: err.message });
-    }
-  }
-
-  async function runAll() {
+  function submitBrief(parsed) {
+    setPanels({
+      econ: parsed.econ || null,
+      earnings: parsed.earnings || null,
+      sentiment: parsed.sentiment || null,
+      cases: parsed.cases || null,
+    });
+    setBriefStage("idle");
+    setBriefPrompt(null);
     setLastRun(etNow());
-    const keys = ["econ", "earnings", "sentiment", "cases"];
-    keys.forEach((k) => setPanel(k, { status: "loading", error: null }));
-    for (const key of keys) {
-      await runPanel(key);
-    }
+  }
+
+  function cancelBrief() {
+    setBriefStage("idle");
+    setBriefPrompt(null);
   }
 
   return (
+    <AuthGate>
     <div
       style={{
         minHeight: "100vh",
@@ -3331,7 +3638,6 @@ export default function Smaug() {
               flexShrink: 0,
             }}
           >
-            <ApiKeySettings />
             <img
               src={LOGO}
               alt="Smaug logo"
@@ -3346,26 +3652,22 @@ export default function Smaug() {
         {tab === "Morning Brief" && (
           <MorningBriefTab
             panels={panels}
-            runPanel={runPanel}
+            stage={briefStage}
+            prompt={briefPrompt}
             runAll={runAll}
-            anyLoading={anyLoading}
+            submitBrief={submitBrief}
+            cancelBrief={cancelBrief}
             lastRun={lastRun}
           />
         )}
-        {tab === "Journal" && (
-          <AuthGate>
-            <JournalTab />
-          </AuthGate>
-        )}
+        {tab === "Journal" && <JournalTab />}
         {tab === "Modeling" && <TechnicalsTab />}
         {tab === "Raw Data" && <RawDataTab />}
-        {tab === "Training Data" && (
-          <AuthGate>
-            <TrainingDataTab />
-          </AuthGate>
-        )}
+        {tab === "Training Data" && <TrainingDataTab />}
+        {tab === "Model" && <ModelTab />}
         {tab === "Resources" && <ResourcesTab />}
       </div>
     </div>
+    </AuthGate>
   );
 }

@@ -64,7 +64,7 @@ def fetch_recent_bars(retries=3, wait=45):
         try:
             df = yf.download(
                 TICKER, period="7d", interval="1m",
-                auto_adjust=False, progress=False,
+                auto_adjust=False, progress=False, prepost=True,
             )
             if not df.empty:
                 break
@@ -85,6 +85,11 @@ def fetch_recent_bars(retries=3, wait=45):
         }
     )[["open", "high", "low", "close", "volume"]]
     df.index = df.index.tz_convert("America/New_York")
+    # prepost=True also pulls post-market bars, which nothing here uses —
+    # drop them so the DB (and its 30-day git history) only grows to cover
+    # what the pipeline actually needs: premarket through the RTH close.
+    minute_of_day = df.index.hour * 60 + df.index.minute
+    df = df[minute_of_day < 16 * 60]
     return df
 
 
@@ -193,6 +198,51 @@ def compute_features(df):
     out["vol_z"] = (v - vol_mean) / vol_std
 
     out["min_since_open"] = (minute_of_day - (9 * 60 + 30)).astype(float)
+
+    # --- reference levels: prev-day RTH H/L, today's premarket H/L, and
+    # 5/15-min opening range H/L, all expressed as bps distance from close
+    # so they stay stationary like the rest of the feature set. Each is
+    # computed causally (no lookahead): prev-day and premarket levels are
+    # fully known once RTH starts; the opening-range levels use a running
+    # high/low while the window is still forming, then hold the finalized
+    # value for the rest of the session.
+    rth_open_min, rth_close_min = 9 * 60 + 30, 16 * 60
+    day = pd.Series(df.index.date, index=df.index)
+    rth_mask = (minute_of_day >= rth_open_min) & (minute_of_day < rth_close_min)
+    premkt_mask = minute_of_day < rth_open_min
+
+    by_date_high = h[rth_mask].groupby(day[rth_mask]).max()
+    by_date_low = l[rth_mask].groupby(day[rth_mask]).min()
+    prev_high = day.map(by_date_high.shift(1))
+    prev_low = day.map(by_date_low.shift(1))
+    out["dist_prev_day_high_bps"] = (c - prev_high) / c * 10_000
+    out["dist_prev_day_low_bps"] = (c - prev_low) / c * 10_000
+
+    premkt_high = day.map(h[premkt_mask].groupby(day[premkt_mask]).max())
+    premkt_low = day.map(l[premkt_mask].groupby(day[premkt_mask]).min())
+    out["dist_premkt_high_bps"] = (c - premkt_high) / c * 10_000
+    out["dist_premkt_low_bps"] = (c - premkt_low) / c * 10_000
+
+    rth_min_since_open = (minute_of_day - rth_open_min).where(rth_mask)
+    run_high = h.where(rth_mask).groupby(day).cummax()
+    run_low = l.where(rth_mask).groupby(day).cummin()
+    for window, tag in ((5, "or5"), (15, "or15")):
+        forming = rth_min_since_open < window
+        final_high = h.where(rth_mask & forming).groupby(day).transform("max")
+        final_low = l.where(rth_mask & forming).groupby(day).transform("min")
+        or_high = np.where(forming, run_high, final_high)
+        or_low = np.where(forming, run_low, final_low)
+        out[f"dist_{tag}_high_bps"] = (c - or_high) / c * 10_000
+        out[f"dist_{tag}_low_bps"] = (c - or_low) / c * 10_000
+
+    # only meaningful during RTH — blank these out for pre/post-market bars
+    out.loc[~rth_mask, [
+        "dist_prev_day_high_bps", "dist_prev_day_low_bps",
+        "dist_premkt_high_bps", "dist_premkt_low_bps",
+        "dist_or5_high_bps", "dist_or5_low_bps",
+        "dist_or15_high_bps", "dist_or15_low_bps",
+    ]] = np.nan
+
     return out
 
 
@@ -268,7 +318,12 @@ def run_analysis(bars):
     }
 
     for tcol in target_cols:
-        sub = data[feature_cols + [tcol]].dropna()
+        # only require the target to be present — some features (e.g. the
+        # premarket-based ones) are NaN until enough days have accumulated
+        # post-market-hours data, and requiring every feature to be non-null
+        # would silently shrink the usable window to just those days.
+        # Missing feature values are zero-imputed after standardization below.
+        sub = data[feature_cols + [tcol]].dropna(subset=[tcol])
         if len(sub) < MIN_ROWS:
             results["notes"].append(
                 f"{tcol}: only {len(sub)} rows — skipped (min {MIN_ROWS})."
@@ -280,11 +335,18 @@ def run_analysis(bars):
         ]
 
         y = sub[tcol]
-        # correlations
-        corrs = {
-            f: round(float(sub[f].corr(y)), 4) for f in feature_cols
-        }
-        ranked = sorted(corrs.items(), key=lambda kv: -abs(kv[1]))
+        # correlations — NaN (e.g. a feature that's still all-missing, like
+        # premarket levels before enough days have accumulated) becomes
+        # None rather than a bare NaN, since Python's json module emits
+        # non-standard `NaN` tokens that JS's JSON.parse can't read.
+        def safe_corr(f):
+            r = sub[f].corr(y)
+            return round(float(r), 4) if pd.notna(r) else None
+
+        corrs = {f: safe_corr(f) for f in feature_cols}
+        ranked = sorted(
+            corrs.items(), key=lambda kv: -abs(kv[1]) if kv[1] is not None else 0
+        )
 
         # time-based train/test split (never shuffle time series)
         split = int(len(sub) * (1 - TEST_FRACTION))
@@ -300,9 +362,11 @@ def run_analysis(bars):
         r2_train = r2fn(Xtr, train[tcol].values)
         r2_test = r2fn(Xte, test[tcol].values)
 
-        # decile tables for the 3 strongest features
+        # decile tables for the 3 strongest features (skip anything with no
+        # correlation at all — e.g. a feature that's still all-missing)
         deciles = {}
-        for fname, _ in ranked[:3]:
+        top3 = [f for f, corr in ranked if corr is not None][:3]
+        for fname in top3:
             deciles[fname] = decile_table(sub[fname], y)
 
         results["targets"][tcol] = {
@@ -342,7 +406,7 @@ def write_report(results):
         )
         lines.append("  Correlations (|r| ranked):")
         for f, r in t["correlations"]:
-            lines.append(f"    {f:>18}: {r:+.4f}")
+            lines.append(f"    {f:>18}: {r:+.4f}" if r is not None else f"    {f:>18}:      n/a")
         lines.append("  Std. coefficients (bps per 1-sigma of feature):")
         for f, c in reg["std_coefficients_bps"].items():
             lines.append(f"    {f:>18}: {c:+.3f}")
