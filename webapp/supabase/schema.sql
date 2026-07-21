@@ -68,10 +68,12 @@ create policy "entry_models_owner_all"
 -- Daily brief (econ calendar, earnings, sentiment, bull/bear case), written
 -- by the Claude Code routine via its authenticated Supabase connector.
 -- Private like the tables above — the routine authenticates as the owning
--- user, so there's no need to expose this publicly.
+-- user, so there's no need to expose this publicly. One row per user,
+-- overwritten each run (unique user_id + on_conflict=user_id upsert) —
+-- no need to keep historical briefs around.
 create table if not exists daily_briefs (
   id uuid primary key default gen_random_uuid(),
-  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  user_id uuid not null unique default auth.uid() references auth.users(id) on delete cascade,
   generated_at timestamptz not null default now(),
   econ jsonb,
   earnings jsonb,
