@@ -1,0 +1,12 @@
+// RSI 9/21 — static fragment, fetched verbatim by the daily routine.
+// NOTE: because the shared indicator() is overlay=true (required for the
+// price-based L/S/X markers and candlestick labels), these plots initially
+// render on the price scale. Drag the RSI line's price-scale label down in
+// TradingView to move it to its own pane — this is a one-time manual step,
+// not a bug; Pine gives no way for one script to declare mixed panes.
+rsi_len9 = input.int(9, title="RSI Length (fast)", group="RSI 9/21")
+rsi_len21 = input.int(21, title="RSI Length (slow)", group="RSI 9/21")
+rsi_9 = ta.rsi(close, rsi_len9)
+rsi_21 = ta.rsi(close, rsi_len21)
+plot(rsi_9, title="RSI 9", color=color.aqua, linewidth=1)
+plot(rsi_21, title="RSI 21", color=color.purple, linewidth=1)

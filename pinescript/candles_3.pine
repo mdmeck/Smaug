@@ -1,0 +1,45 @@
+// 3-candle patterns — static fragment, fetched verbatim by the daily routine.
+// Only ever labeled on the current/forming candle (barstate.islast).
+// NOTE: classic morning/evening star definitions rely on overnight gaps
+// between candles, which are rare on a continuous 1-min RTH chart like SPY.
+// These use a gap-free, body-size-based approximation instead — noted in
+// each tooltip rather than silently pretending it's the textbook version.
+c3_body0 = math.abs(close - open)
+c3_body1 = math.abs(close[1] - open[1])
+c3_body2 = math.abs(close[2] - open[2])
+c3_bull0 = close > open
+c3_bear0 = close < open
+c3_bull2 = close[2] > open[2]
+c3_bear2 = close[2] < open[2]
+c3_mid2 = (open[2] + close[2]) / 2
+
+c3_isMorningStar = c3_bear2 and c3_body1 <= c3_body2 * 0.4 and c3_bull0 and c3_body0 > c3_body1 and close > c3_mid2
+c3_isEveningStar = c3_bull2 and c3_body1 <= c3_body2 * 0.4 and c3_bear0 and c3_body0 > c3_body1 and close < c3_mid2
+
+c3_isThreeSoldiers = c3_bull2 and close[1] > open[1] and c3_bull0 and close > close[1] and close[1] > close[2] and open > open[1] and open[1] > open[2] and open <= close[1] and open[1] <= close[2]
+c3_isThreeCrows = c3_bear2 and close[1] < open[1] and c3_bear0 and close < close[1] and close[1] < close[2] and open < open[1] and open[1] < open[2] and open >= close[1] and open[1] >= close[2]
+
+c3_code = ""
+c3_tip = ""
+c3_isBearish = false
+if c3_isMorningStar
+    c3_code := "MS"
+    c3_tip := "Morning Star (gap-free approximation) — long red, small-bodied middle candle, strong green closing above the midpoint of the first candle"
+else if c3_isEveningStar
+    c3_code := "EV"
+    c3_tip := "Evening Star (gap-free approximation) — long green, small-bodied middle candle, strong red closing below the midpoint of the first candle"
+    c3_isBearish := true
+else if c3_isThreeSoldiers
+    c3_code := "3S"
+    c3_tip := "Three White Soldiers — three consecutive rising green candles, each opening within the prior body"
+else if c3_isThreeCrows
+    c3_code := "3C"
+    c3_tip := "Three Black Crows — three consecutive falling red candles, each opening within the prior body"
+    c3_isBearish := true
+
+c3_atr = ta.atr(14)
+var label c3_lbl = na
+if barstate.islast
+    label.delete(c3_lbl)
+    if c3_code != ""
+        c3_lbl := label.new(bar_index, c3_isBearish ? high + c3_atr * 3 : low - c3_atr * 3, text=c3_code, style=c3_isBearish ? label.style_label_down : label.style_label_up, color=color.gray, textcolor=color.white, size=size.tiny, tooltip=c3_tip)

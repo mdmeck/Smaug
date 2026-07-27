@@ -303,6 +303,82 @@ function WeekCalendar({ econ, earnings, lastRun }) {
               const today = isToday(day.date);
               const dayEcon = econEvents.filter((e) => e.day === day.label);
               const dayEarn = earnRows.filter((e) => e.day === day.label);
+              const bmoEarn = dayEarn.filter(
+                (e) => (e.time || "").toUpperCase() === "BMO"
+              );
+              const amcEarn = dayEarn.filter(
+                (e) => (e.time || "").toUpperCase() === "AMC"
+              );
+              const otherEarn = dayEarn.filter(
+                (e) => !bmoEarn.includes(e) && !amcEarn.includes(e)
+              );
+              const earnRow = (e, j) => (
+                <div
+                  key={j}
+                  title={e.note || e.company}
+                  style={{ display: "flex", gap: 6, alignItems: "flex-start" }}
+                >
+                  <span style={{ fontSize: 13, lineHeight: 1.4, flexShrink: 0 }}>
+                    💸
+                  </span>
+                  <div style={{ minWidth: 0 }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "baseline",
+                        gap: 6,
+                        flexWrap: "nowrap",
+                      }}
+                    >
+                      <span
+                        style={{
+                          fontSize: 13,
+                          fontWeight: 700,
+                          color: T.blue,
+                          flexShrink: 0,
+                        }}
+                      >
+                        {e.ticker}
+                      </span>
+                      <span
+                        style={{
+                          fontSize: 12,
+                          color: T.faint,
+                          flexShrink: 0,
+                        }}
+                      >
+                        {e.time}
+                      </span>
+                    </div>
+                    {e.company && (
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: T.dim,
+                          lineHeight: 1.3,
+                        }}
+                      >
+                        {e.company}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+              const earnGroup = (rows, { divider = true } = {}) =>
+                rows.length > 0 && (
+                  <div
+                    style={{
+                      marginTop: divider ? 10 : 0,
+                      paddingTop: divider ? 8 : 0,
+                      borderTop: divider ? `1px dashed ${T.panelEdge}` : "none",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 5,
+                    }}
+                  >
+                    {rows.map(earnRow)}
+                  </div>
+                );
               return (
                 <div
                   key={day.label}
@@ -357,11 +433,19 @@ function WeekCalendar({ econ, earnings, lastRun }) {
                   </div>
 
                   <div style={{ padding: "10px 12px", flex: 1, overflowY: "auto" }}>
+                    {earnGroup(bmoEarn, { divider: false })}
+
                     {econ && dayEcon.length === 0 && (
                       <div
                         style={{
                           fontSize: 13,
                           color: T.faint,
+                          marginTop: bmoEarn.length > 0 ? 10 : 0,
+                          paddingTop: bmoEarn.length > 0 ? 8 : 0,
+                          borderTop:
+                            bmoEarn.length > 0
+                              ? `1px dashed ${T.panelEdge}`
+                              : "none",
                         }}
                       >
                         no events
@@ -372,6 +456,12 @@ function WeekCalendar({ econ, earnings, lastRun }) {
                         display: "flex",
                         flexDirection: "column",
                         gap: 8,
+                        marginTop: bmoEarn.length > 0 && dayEcon.length > 0 ? 10 : 0,
+                        paddingTop: bmoEarn.length > 0 && dayEcon.length > 0 ? 8 : 0,
+                        borderTop:
+                          bmoEarn.length > 0 && dayEcon.length > 0
+                            ? `1px dashed ${T.panelEdge}`
+                            : "none",
                       }}
                     >
                       {dayEcon.map((e, j) => (
@@ -423,74 +513,10 @@ function WeekCalendar({ econ, earnings, lastRun }) {
                       ))}
                     </div>
 
-                    {dayEarn.length > 0 && (
-                      <div
-                        style={{
-                          marginTop: 10,
-                          paddingTop: 8,
-                          borderTop: `1px dashed ${T.panelEdge}`,
-                        }}
-                      >
-                        <div
-                          style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: 5,
-                          }}
-                        >
-                          {dayEarn.map((e, j) => (
-                            <div
-                              key={j}
-                              title={e.note || e.company}
-                              style={{ display: "flex", gap: 6, alignItems: "flex-start" }}
-                            >
-                              <span style={{ fontSize: 13, lineHeight: 1.4, flexShrink: 0 }}>
-                                💸
-                              </span>
-                              <div style={{ minWidth: 0 }}>
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "baseline",
-                                    gap: 6,
-                                    flexWrap: "wrap",
-                                  }}
-                                >
-                                  <span
-                                    style={{
-                                      fontSize: 13,
-                                      fontWeight: 700,
-                                      color: T.blue,
-                                    }}
-                                  >
-                                    {e.ticker}
-                                  </span>
-                                  <span
-                                    style={{
-                                      fontSize: 12,
-                                      color: T.faint,
-                                    }}
-                                  >
-                                    {e.time}
-                                  </span>
-                                </div>
-                                {e.company && (
-                                  <div
-                                    style={{
-                                      fontSize: 12,
-                                      color: T.dim,
-                                      lineHeight: 1.3,
-                                    }}
-                                  >
-                                    {e.company}
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+                    {earnGroup(amcEarn)}
+                    {earnGroup(otherEarn, {
+                      divider: bmoEarn.length + dayEcon.length + amcEarn.length > 0,
+                    })}
                   </div>
                 </div>
               );
@@ -984,6 +1010,8 @@ function JournalTab() {
   const [form, setForm] = useState(emptyEntry());
   const [loadState, setLoadState] = useState("loading");
   const [saveError, setSaveError] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editForm, setEditForm] = useState(null);
   const [feedback, setFeedback] = useState({
     status: "idle",
     data: null,
@@ -1056,6 +1084,41 @@ function JournalTab() {
     }
   }
 
+  function startEdit(e) {
+    setSaveError(null);
+    setEditingId(e.id);
+    setEditForm({
+      date: e.date,
+      ticker: e.ticker,
+      direction: e.direction,
+      result: e.result,
+      setup: e.setup,
+      notes: e.notes,
+    });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setEditForm(null);
+  }
+
+  async function saveEdit() {
+    setSaveError(null);
+    const { data, error } = await supabase
+      .from("journal_entries")
+      .update(editForm)
+      .eq("id", editingId)
+      .select()
+      .single();
+    if (error) {
+      setSaveError(error.message);
+      return;
+    }
+    setEntries(entries.map((e) => (e.id === data.id ? data : e)));
+    setEditingId(null);
+    setEditForm(null);
+  }
+
   const field = (label, node) => (
     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span
@@ -1071,6 +1134,90 @@ function JournalTab() {
       {node}
     </div>
   );
+
+  function formFields(f, setF) {
+    return (
+      <>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
+            gap: 10,
+            marginBottom: 10,
+          }}
+        >
+          {field(
+            "DATE",
+            <input
+              type="date"
+              value={f.date}
+              onChange={(e) => setF({ ...f, date: e.target.value })}
+              style={inputStyle}
+            />
+          )}
+          {field(
+            "TICKER",
+            <input
+              value={f.ticker}
+              onChange={(e) =>
+                setF({ ...f, ticker: e.target.value.toUpperCase() })
+              }
+              style={{ ...inputStyle, fontFamily: T.mono }}
+            />
+          )}
+          {field(
+            "DIRECTION",
+            <select
+              value={f.direction}
+              onChange={(e) => setF({ ...f, direction: e.target.value })}
+              style={inputStyle}
+            >
+              <option>Long</option>
+              <option>Short</option>
+              <option>Calls</option>
+              <option>Puts</option>
+            </select>
+          )}
+          {field(
+            "RESULT ($ OR R)",
+            <input
+              value={f.result}
+              onChange={(e) => setF({ ...f, result: e.target.value })}
+              placeholder="+120 / -0.5R"
+              style={{ ...inputStyle, fontFamily: T.mono }}
+            />
+          )}
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
+            gap: 10,
+            marginBottom: 12,
+          }}
+        >
+          {field(
+            "SETUP",
+            <input
+              value={f.setup}
+              onChange={(e) => setF({ ...f, setup: e.target.value })}
+              placeholder="e.g. break & retest of PM high, 3x confluence"
+              style={inputStyle}
+            />
+          )}
+          {field(
+            "NOTES / LESSON",
+            <input
+              value={f.notes}
+              onChange={(e) => setF({ ...f, notes: e.target.value })}
+              placeholder="What did the trade teach you?"
+              style={inputStyle}
+            />
+          )}
+        </div>
+      </>
+    );
+  }
 
   const numericResults = entries
     .map((e) => parseFloat(String(e.result).replace(/[$,+]/g, "")))
@@ -1107,83 +1254,7 @@ function JournalTab() {
         >
           Log a trade
         </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))",
-            gap: 10,
-            marginBottom: 10,
-          }}
-        >
-          {field(
-            "DATE",
-            <input
-              type="date"
-              value={form.date}
-              onChange={(e) => setForm({ ...form, date: e.target.value })}
-              style={inputStyle}
-            />
-          )}
-          {field(
-            "TICKER",
-            <input
-              value={form.ticker}
-              onChange={(e) =>
-                setForm({ ...form, ticker: e.target.value.toUpperCase() })
-              }
-              style={{ ...inputStyle, fontFamily: T.mono }}
-            />
-          )}
-          {field(
-            "DIRECTION",
-            <select
-              value={form.direction}
-              onChange={(e) => setForm({ ...form, direction: e.target.value })}
-              style={inputStyle}
-            >
-              <option>Long</option>
-              <option>Short</option>
-              <option>Calls</option>
-              <option>Puts</option>
-            </select>
-          )}
-          {field(
-            "RESULT ($ OR R)",
-            <input
-              value={form.result}
-              onChange={(e) => setForm({ ...form, result: e.target.value })}
-              placeholder="+120 / -0.5R"
-              style={{ ...inputStyle, fontFamily: T.mono }}
-            />
-          )}
-        </div>
-        <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))",
-            gap: 10,
-            marginBottom: 12,
-          }}
-        >
-          {field(
-            "SETUP",
-            <input
-              value={form.setup}
-              onChange={(e) => setForm({ ...form, setup: e.target.value })}
-              placeholder="e.g. break & retest of PM high, 3x confluence"
-              style={inputStyle}
-            />
-          )}
-          {field(
-            "NOTES / LESSON",
-            <input
-              value={form.notes}
-              onChange={(e) => setForm({ ...form, notes: e.target.value })}
-              placeholder="What did the trade teach you?"
-              style={inputStyle}
-            />
-          )}
-        </div>
+        {formFields(form, setForm)}
         <button
           onClick={addEntry}
           style={{
@@ -1387,6 +1458,45 @@ function JournalTab() {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           {entries.map((e) => {
+            if (editingId === e.id) {
+              return (
+                <div
+                  key={e.id}
+                  style={{
+                    background: T.panel,
+                    border: `1px solid ${T.amber}`,
+                    borderRadius: 10,
+                    padding: 14,
+                  }}
+                >
+                  {formFields(editForm, setEditForm)}
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      onClick={saveEdit}
+                      style={{
+                        background: T.amber,
+                        color: "#141414",
+                        border: "none",
+                        borderRadius: 8,
+                        padding: "7px 16px",
+                        fontSize: 12,
+                        fontWeight: 700,
+                        cursor: "pointer",
+                        fontFamily: T.sans,
+                      }}
+                    >
+                      Save
+                    </button>
+                    <button
+                      onClick={cancelEdit}
+                      style={{ ...retryBtn, padding: "7px 16px", fontSize: 12 }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              );
+            }
             const n = parseFloat(String(e.result).replace(/[$,+]/g, ""));
             const resultColor = isNaN(n)
               ? T.dim
@@ -1436,10 +1546,19 @@ function JournalTab() {
                     </span>
                   )}
                   <button
-                    onClick={() => deleteEntry(e.id)}
+                    onClick={() => startEdit(e)}
                     style={{
                       ...retryBtn,
                       marginLeft: "auto",
+                      color: T.faint,
+                    }}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => deleteEntry(e.id)}
+                    style={{
+                      ...retryBtn,
                       color: T.faint,
                     }}
                   >

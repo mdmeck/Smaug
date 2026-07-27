@@ -1,0 +1,40 @@
+// 1-candle patterns — static fragment, fetched verbatim by the daily routine.
+// Only ever labeled on the current/forming candle (barstate.islast).
+c1_body = math.abs(close - open)
+c1_range = high - low
+c1_upWick = high - math.max(close, open)
+c1_dnWick = math.min(close, open) - low
+
+c1_isDoji = c1_range > 0 and c1_body <= c1_range * 0.1
+c1_isMarubozuBull = close > open and c1_upWick <= c1_body * 0.05 and c1_dnWick <= c1_body * 0.05
+c1_isMarubozuBear = close < open and c1_upWick <= c1_body * 0.05 and c1_dnWick <= c1_body * 0.05
+c1_isHammer = c1_range > 0 and c1_dnWick >= c1_body * 2 and c1_upWick <= c1_body * 0.5 and c1_body <= c1_range * 0.4
+c1_isShootingStar = c1_range > 0 and c1_upWick >= c1_body * 2 and c1_dnWick <= c1_body * 0.5 and c1_body <= c1_range * 0.4
+
+c1_code = ""
+c1_tip = ""
+c1_isBearish = false
+if c1_isMarubozuBull
+    c1_code := "MU"
+    c1_tip := "Bullish Marubozu — full body, no wicks, strong buying pressure"
+else if c1_isMarubozuBear
+    c1_code := "MU"
+    c1_tip := "Bearish Marubozu — full body, no wicks, strong selling pressure"
+    c1_isBearish := true
+else if c1_isHammer
+    c1_code := "HM"
+    c1_tip := "Hammer — small body near the top, long lower wick, potential bullish reversal"
+else if c1_isShootingStar
+    c1_code := "SS"
+    c1_tip := "Shooting Star — small body near the bottom, long upper wick, potential bearish reversal"
+    c1_isBearish := true
+else if c1_isDoji
+    c1_code := "DJ"
+    c1_tip := "Doji — open ≈ close, indecision"
+
+c1_atr = ta.atr(14)
+var label c1_lbl = na
+if barstate.islast
+    label.delete(c1_lbl)
+    if c1_code != ""
+        c1_lbl := label.new(bar_index, c1_isBearish ? high + c1_atr : low - c1_atr, text=c1_code, style=c1_isBearish ? label.style_label_down : label.style_label_up, color=color.gray, textcolor=color.white, size=size.tiny, tooltip=c1_tip)

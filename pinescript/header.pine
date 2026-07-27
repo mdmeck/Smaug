@@ -1,0 +1,2 @@
+//@version=5
+indicator("Smaug Entry Model", overlay=true)

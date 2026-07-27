@@ -1,0 +1,40 @@
+// 2-candle patterns — static fragment, fetched verbatim by the daily routine.
+// Only ever labeled on the current/forming candle (barstate.islast).
+c2_bodyHi = math.max(open, close)
+c2_bodyLo = math.min(open, close)
+c2_bodyHi1 = math.max(open[1], close[1])
+c2_bodyLo1 = math.min(open[1], close[1])
+c2_bull = close > open
+c2_bear = close < open
+c2_bull1 = close[1] > open[1]
+c2_bear1 = close[1] < open[1]
+
+c2_isBullEngulf = c2_bear1 and c2_bull and c2_bodyLo <= c2_bodyLo1 and c2_bodyHi >= c2_bodyHi1
+c2_isBearEngulf = c2_bull1 and c2_bear and c2_bodyLo <= c2_bodyLo1 and c2_bodyHi >= c2_bodyHi1
+c2_isBullHarami = c2_bear1 and c2_bull and c2_bodyHi <= c2_bodyHi1 and c2_bodyLo >= c2_bodyLo1
+c2_isBearHarami = c2_bull1 and c2_bear and c2_bodyHi <= c2_bodyHi1 and c2_bodyLo >= c2_bodyLo1
+
+c2_code = ""
+c2_tip = ""
+c2_isBearish = false
+if c2_isBullEngulf
+    c2_code := "EN"
+    c2_tip := "Bullish Engulfing — current green body fully engulfs prior red body"
+else if c2_isBearEngulf
+    c2_code := "EN"
+    c2_tip := "Bearish Engulfing — current red body fully engulfs prior green body"
+    c2_isBearish := true
+else if c2_isBullHarami
+    c2_code := "HR"
+    c2_tip := "Bullish Harami — small green body contained inside prior larger red body"
+else if c2_isBearHarami
+    c2_code := "HR"
+    c2_tip := "Bearish Harami — small red body contained inside prior larger green body"
+    c2_isBearish := true
+
+c2_atr = ta.atr(14)
+var label c2_lbl = na
+if barstate.islast
+    label.delete(c2_lbl)
+    if c2_code != ""
+        c2_lbl := label.new(bar_index, c2_isBearish ? high + c2_atr * 2 : low - c2_atr * 2, text=c2_code, style=c2_isBearish ? label.style_label_down : label.style_label_up, color=color.gray, textcolor=color.white, size=size.tiny, tooltip=c2_tip)

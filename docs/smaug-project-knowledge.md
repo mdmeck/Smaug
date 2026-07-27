@@ -58,8 +58,37 @@ Every entry-model run also produces a complete TradingView Pine Script v5 indica
   - `dist_or5_*` / `dist_or15_*` — opening-range high/low tracked with a `var` that resets at each new session and updates for the first 5/15 minutes of RTH, then holds.
   - `vol_z` — exact minute-of-day historical mean/std isn't practical in Pine; approximate with a rolling z-score (e.g. `(volume - ta.sma(volume, 20)) / ta.stdev(volume, 20)`) and add a comment noting it's an approximation, not an exact match to the Python calc.
   - `dist_premkt_*` — only replicate if the chart has extended-hours data available; otherwise add a comment noting the limitation rather than guessing.
-- Plot a long-entry marker (`plotshape`, up-arrow) when all `long_entry` conditions are true, a short-entry marker (down-arrow) when all `short_entry` conditions are true, and an exit marker when all `exit` conditions are true.
 - Self-contained — no external requests beyond `request.security` for prior-session levels.
+- No `alertcondition()` calls — visual-only indicator, not wired to TradingView alerts.
+
+### Static fragments — fetch verbatim, never regenerate
+Candlestick pattern detection, RSI, and the entry/exit marker convention are deterministic — they don't need to change day to day, so they're NOT something to regenerate from this prose spec. They're hand-authored, version-controlled Pine fragments in the `pinescript/` folder of the Smaug repo (see `pinescript/README.md` for the full contract). Fetch each raw file and use its exact text — do not paraphrase, retype, or "improve" it from memory. Assemble the final script by concatenating, in this exact order, each preceded by a `// === <filename> ===` comment:
+
+1. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/header.pine`
+2. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/rsi_9_21.pine`
+3. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/candles_1.pine`
+4. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/candles_2.pine`
+5. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/candles_3.pine`
+6. **The generated block** — the only dynamic part, described below.
+7. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/markers.pine`
+
+`header.pine` must be first (`//@version=5` can't have anything before it) and `markers.pine` must be last (it references `longEntry`/`shortEntry`/`exitSignal`, which only exist once step 6 defines them). This is fetch-and-paste-verbatim, not a template — nothing in the fetched files should be edited at generation time.
+
+Before writing `pinescript` to `entry_models`, self-check the assembled text: it must contain exactly one line matching `^//@version=` and exactly one matching `^(indicator|strategy|library)\(`. If either check fails, don't insert a broken script — omit `pinescript` for that row and say so in `summary`.
+
+### Signal markers — fixed convention, never vary this
+The chart marks must look and mean the same thing every single day, regardless of how the underlying rule thresholds change. This is `pinescript/markers.pine` (fragment #7 above) verbatim:
+```pine
+plotchar(longEntry, title="Long Entry", char="L", location=location.belowbar, color=color.green, size=size.tiny)
+plotchar(shortEntry, title="Short Entry", char="S", location=location.abovebar, color=color.red, size=size.tiny)
+plotchar(exitSignal ? close : na, title="Exit", char="X", location=location.absolute, color=color.orange, size=size.tiny)
+```
+Where `longEntry`/`shortEntry`/`exitSignal` are the boolean expressions built from that day's `long_entry`/`short_entry`/`exit` rule conditions (`and`-ed together) — defined in the generated block (step 6), consumed here. Never substitute a different shape, color, character, or location — the trader relies on "L below the bar = long, S above the bar = short, X at price = exit" being stable day over day, even as the thresholds behind them evolve.
+
+### Candlestick patterns and RSI
+Also fetched verbatim as part of the fragments above — not something to regenerate:
+- `candles_1.pine`/`candles_2.pine`/`candles_3.pine` detect a small curated set of 1/2/3-candle patterns (Doji, Hammer, Shooting Star, Marubozu; Bullish/Bearish Engulfing, Harami; Morning/Evening Star, Three White Soldiers/Black Crows) and label them with `label.new()` — gray background, white text, 2-3 char code, `barstate.islast`-gated so a pattern only ever appears on the current/forming candle, never scattered across history.
+- `rsi_9_21.pine` plots a 9-period and 21-period RSI. Because the shared indicator is `overlay=true`, RSI initially renders on the price scale — this is a known Pine limitation (one script can't declare mixed panes), not a bug; the trader drags it to its own pane once in TradingView's UI after pasting.
 
 ## Entry-model output schema
 When asked to synthesize/update the entry model, write a new row to `entry_models` with:
@@ -75,7 +104,7 @@ When asked to synthesize/update the entry model, write a new row to `entry_model
   "bars_analyzed": number,
   "examples_used": number,
   "date_range": [start, end],
-  "pinescript": "full Pine Script v5 source, as a single string"
+  "pinescript": "full Pine Script v5 source, assembled from the pinescript/ static fragments plus the generated rules block — see 'Static fragments' above"
 }
 ```
 `bars_analyzed`, `examples_used`, and `date_range` should echo whatever you actually read from `analysis_runs`/`training_examples` — reflect what was really used, not omitted or guessed.
