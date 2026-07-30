@@ -366,12 +366,22 @@ def compute_features(df):
         out[f"dist_{tag}_high_bps"] = (c - or_high) / c * 10_000
         out[f"dist_{tag}_low_bps"] = (c - or_low) / c * 10_000
 
+    # session VWAP, anchored at the RTH open and reset each day. Cumulative
+    # through the current bar only, so it's causal like everything else; the
+    # premarket bars are masked out first, which both keeps the anchor at 9:30
+    # and leaves those rows NaN (cumsum skips them without breaking the total).
+    typical = (h + l + c) / 3
+    cum_pv = (typical * v).where(rth_mask).groupby(day).cumsum()
+    cum_v = v.where(rth_mask).groupby(day).cumsum().replace(0, np.nan)
+    out["dist_vwap_bps"] = (c - cum_pv / cum_v) / c * 10_000
+
     # only meaningful during RTH — blank these out for pre/post-market bars
     out.loc[~rth_mask, [
         "dist_prev_day_high_bps", "dist_prev_day_low_bps",
         "dist_premkt_high_bps", "dist_premkt_low_bps",
         "dist_or5_high_bps", "dist_or5_low_bps",
         "dist_or15_high_bps", "dist_or15_low_bps",
+        "dist_vwap_bps",
     ]] = np.nan
 
     return out

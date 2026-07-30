@@ -13,9 +13,24 @@ Smaug is a personal intraday SPY options scalping tool. The trader uses a **brea
 **Supabase (query via your Supabase connector, not a plain URL):**
 - `bars` — 1-minute SPY bars + computed features, ~30-day retained window (~8,000 rows). Columns: `ts, ticker, open, high, low, close, volume, features` (jsonb — keys are the feature names below). Public read — no auth needed, but there are far more than 1000 rows, so page through with `.range()`/`limit`+`offset` rather than assuming one query returns everything.
 - `analysis_runs` — daily regression/correlation output. One row per pipeline run (append-only — query `order by generated_at desc limit 1` for the current one). Columns: `generated_at, ticker, bars_analyzed, date_range, targets (jsonb), notes`. Public read, same as `bars`.
-- `training_examples` — the trader's labeled trade examples, each a full round-trip: `entry_at, exit_at, ticker (default 'SPY'), direction (Long/Short), quality (Good/Bad — overall quality of the trade), notes`. **Private, RLS-protected** — only readable when your connector is authenticated as the trader. May be empty. Editable/deletable by the trader in the webapp, so always re-read fresh each run rather than assuming yesterday's set still applies. Note the entry-model synthesis is SPY-specific — if an example has a different ticker, treat it as informational context rather than folding it into the SPY feature-value join.
-- `daily_briefs` — morning brief (econ calendar, earnings, sentiment, bull/bear case), written by the routine: `generated_at, econ (jsonb), earnings (jsonb), sentiment (jsonb), cases (jsonb)`. Private, same auth requirement as `training_examples`. One row per user (`user_id` is unique) — overwritten each run via `upsert` with `on_conflict=user_id`, no history kept. Query with a plain `select` for the current one.
-- `entry_models` — each row is one AI-synthesized entry/exit rule set + PineScript indicator, written directly by the routine (append-only, so the trader can see the model evolve day over day). Private, same auth requirement: `generated_at, bars_analyzed, examples_used, date_range, rules (jsonb), summary, confidence (low/medium/high), pinescript (text)`.
+- `training_examples` — the trader's labeled trade examples, each a full round-trip: `entry_at, exit_at, ticker (default 'SPY'), direction (Long/Short), quality (Good/Bad — overall quality of the trade), strategy, key_level, notes`. **Private, RLS-protected** — but see "Writing as the routine" below: the connector reads it fine. May be empty.
+  - `strategy` — which setup the trader was playing: currently `Break and Retest`, `Opening Range Break`, or `Bounce`, though it's plain text with no DB constraint (the webapp dropdown is the only thing enforcing the list), so treat unfamiliar values as valid and new rather than as errors. May be empty on older rows. Useful for grouping: rules synthesized from a mix of strategies are weaker than rules that respect the split, so mention in `summary` which strategies the examples covered.
+  - `key_level` — the price level the setup was built around (the level broken and retested, the opening-range boundary, the level bounced off). Nullable. Where present it's the anchor the trade was reasoning about, so `close - key_level` at the entry snapshot is usually more meaningful than the raw price, and worth comparing against the `dist_*` features to see which stored level the trader was actually watching. Editable/deletable by the trader in the webapp, so always re-read fresh each run rather than assuming yesterday's set still applies. Note the entry-model synthesis is SPY-specific — if an example has a different ticker, treat it as informational context rather than folding it into the SPY feature-value join.
+- `daily_briefs` — morning brief (econ calendar, earnings, sentiment, bull/bear case), written by the routine: `generated_at, econ (jsonb), earnings (jsonb), sentiment (jsonb), cases (jsonb)`. Private. One row per user (`user_id` is unique) — overwritten each run via `upsert` with `on_conflict=user_id`, no history kept. Query with a plain `select` for the current one.
+- `entry_models` — each row is one AI-synthesized entry/exit rule set + PineScript indicator, written directly by the routine (append-only, so the trader can see the model evolve day over day). Private: `generated_at, bars_analyzed, examples_used, date_range, rules (jsonb), summary, confidence (low/medium/high), pinescript (text)`.
+
+### Writing as the routine — `user_id` is required
+
+The Supabase connector authenticates as the **`postgres`** role, not as an end user, so `auth.uid()` evaluates to `NULL` in everything the routine runs. Two consequences:
+
+- **Reads just work.** `postgres` owns these tables and they don't set `FORCE ROW LEVEL SECURITY`, so RLS is bypassed on `select`. No authenticated user session is needed to read `training_examples`, `daily_briefs`, or `entry_models`.
+- **Writes must set `user_id` explicitly.** All four private tables declare `user_id uuid NOT NULL DEFAULT auth.uid()`. With `auth.uid()` NULL, any insert that omits the column fails a not-null violation before RLS is ever consulted. Always pass:
+
+  ```
+  user_id = c0b48756-5f94-4862-886a-8ecdb7099ef6
+  ```
+
+This applies to the `daily_briefs` upsert and every `entry_models` insert. Symptom when it's forgotten: reads look completely healthy while `daily_briefs`/`entry_models` silently stop gaining rows, even though `bars`/`analysis_runs` stay current (those are written by the pipeline's service-role key, which is a separate path and unaffected).
 
 For each training example, join **two** feature snapshots — never a later bar than the timestamp in question (that would be lookahead):
 - **Entry snapshot**: the `bars` row with the largest `ts <= entry_at`. Good Long examples' entry snapshots inform `long_entry` rules; Good Short examples' entry snapshots inform `short_entry` rules.
@@ -38,8 +53,9 @@ For each training example, join **two** feature snapshots — never a later bar 
 | `dist_premkt_high_bps` / `dist_premkt_low_bps` | distance of close from **today's** pre-market high/low, in bps |
 | `dist_or5_high_bps` / `dist_or5_low_bps` | distance of close from the 5-minute opening-range high/low (first 5 min of RTH), in bps |
 | `dist_or15_high_bps` / `dist_or15_low_bps` | distance of close from the 15-minute opening-range high/low, in bps |
+| `dist_vwap_bps` | distance of close from the session VWAP, in bps. Anchored at the 9:30 RTH open and reset daily; premarket volume is excluded from the anchor |
 
-All `dist_*`/`ret_*`/`range_bps`/`ema_spread_bps` features are causal — computed only from information available at or before that bar (no lookahead). Opening-range features use a running high/low while the window is still forming, then hold the finalized value for the rest of the session.
+All `dist_*`/`ret_*`/`range_bps`/`ema_spread_bps` features are causal — computed only from information available at or before that bar (no lookahead). Opening-range features use a running high/low while the window is still forming, then hold the finalized value for the rest of the session. VWAP accumulates through the current bar only, so it likewise never sees the future.
 
 ## Targets
 | target | meaning |
@@ -56,6 +72,7 @@ Every entry-model run also produces a complete TradingView Pine Script v5 indica
   - `ema_spread_bps`, `dist_ema9_bps`, `dist_ema21_bps`, `ret_1m_bps`, `ret_5m_bps`, `range_bps`, `body_ratio` — same algebra as the Python formulas above, computed directly from `close`/`open`/`high`/`low` and `close[1]`/`close[5]`.
   - `dist_prev_day_high_bps` / `dist_prev_day_low_bps` — previous session's RTH high/low via `request.security(syminfo.tickerid, "D", high[1])` / `low[1]`.
   - `dist_or5_*` / `dist_or15_*` — opening-range high/low tracked with a `var` that resets at each new session and updates for the first 5/15 minutes of RTH, then holds.
+  - `dist_vwap_bps` — `ta.vwap` (session-anchored and daily-reset by default in Pine, matching the Python anchor), then `(close - ta.vwap) / close * 10000`. One of the few features that translates exactly rather than approximately, provided the chart is set to regular-hours data — extended-hours charts fold premarket volume into the anchor and will drift from the Python value.
   - `vol_z` — exact minute-of-day historical mean/std isn't practical in Pine; approximate with a rolling z-score (e.g. `(volume - ta.sma(volume, 20)) / ta.stdev(volume, 20)`) and add a comment noting it's an approximation, not an exact match to the Python calc.
   - `dist_premkt_*` — only replicate if the chart has extended-hours data available; otherwise add a comment noting the limitation rather than guessing.
 - Self-contained — no external requests beyond `request.security` for prior-session levels.
