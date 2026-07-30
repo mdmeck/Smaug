@@ -43,7 +43,7 @@ MFE_HORIZON = 10                # minutes for max-favorable-excursion target
 RTH_ONLY = True                 # keep regular trading hours only (9:30-16:00 ET)
 TEST_FRACTION = 0.25            # most recent 25% of data held out for testing
 MIN_ROWS = 500                  # refuse to run analysis on less than this
-RETENTION_DAYS = 30             # prune bars older than this so the table stays bounded
+RETENTION_DAYS = 60             # prune bars older than this so the table stays bounded
 SUPABASE_PAGE_SIZE = 1000       # PostgREST's default max rows per request
 SUPABASE_BATCH_SIZE = 500       # rows per upsert request
 
@@ -154,17 +154,76 @@ def upsert_features_supabase(bars, feats):
     return len(rows)
 
 
-def prune_old_bars_supabase(days=RETENTION_DAYS):
-    """Drop bars older than `days` so the table stays bounded."""
-    cutoff = (pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=days))
-    headers = _supabase_headers()
-    resp = requests.delete(
-        f"{SUPABASE_URL}/rest/v1/bars",
-        headers=headers,
-        params={"ts": f"lt.{cutoff.isoformat()}"},
+def _protected_session_dates():
+    """ET dates referenced by any training_examples row (entry or exit).
+
+    Those sessions are exempt from pruning: the routine joins each labeled
+    example to the `bars` row at its timestamp to recover the feature snapshot,
+    so dropping the bars silently makes the example useless. The trader's hand
+    labels are the scarcest data here and can't be regenerated, unlike bars.
+
+    Read with the service-role key, which bypasses the RLS on this table."""
+    resp = requests.get(
+        f"{SUPABASE_URL}/rest/v1/training_examples",
+        headers=_supabase_headers(),
+        params={"select": "entry_at,exit_at"},
         timeout=30,
     )
     _raise_for_status(resp)
+    dates = set()
+    for row in resp.json():
+        for key in ("entry_at", "exit_at"):
+            if row.get(key):
+                dates.add(pd.Timestamp(row[key]).tz_convert("America/New_York").date())
+    return dates
+
+
+def prune_old_bars_supabase(days=RETENTION_DAYS):
+    """Drop bars older than `days`, except whole sessions pinned by a training
+    example. Deletes a day at a time rather than one `ts < cutoff` sweep, since
+    the protected dates punch holes in the range that a single filter can't
+    express. In steady state only one day ages out per run."""
+    cutoff = (pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=days))
+    protected = _protected_session_dates()
+    headers = _supabase_headers()
+
+    stale_dates = set()
+    offset = 0
+    while True:
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/bars",
+            headers=headers,
+            params={
+                "select": "ts",
+                "ts": f"lt.{cutoff.isoformat()}",
+                "order": "ts.asc",
+                "limit": SUPABASE_PAGE_SIZE,
+                "offset": offset,
+            },
+            timeout=30,
+        )
+        _raise_for_status(resp)
+        page = resp.json()
+        for row in page:
+            stale_dates.add(
+                pd.Timestamp(row["ts"]).tz_convert("America/New_York").date()
+            )
+        if len(page) < SUPABASE_PAGE_SIZE:
+            break
+        offset += SUPABASE_PAGE_SIZE
+
+    for d in sorted(stale_dates - protected):
+        start = pd.Timestamp(d, tz="America/New_York")
+        end = start + pd.Timedelta(days=1)
+        resp = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/bars",
+            headers=headers,
+            params={"ts": [f"gte.{start.isoformat()}", f"lt.{end.isoformat()}"]},
+            timeout=30,
+        )
+        _raise_for_status(resp)
+
+    return len(stale_dates - protected), len(stale_dates & protected)
 
 
 def load_all_bars_supabase():
@@ -615,7 +674,8 @@ def main():
             print(f"WARNING: fetch failed ({e}); analyzing stored data only",
                   file=sys.stderr)
 
-    prune_old_bars_supabase()
+    dropped, pinned = prune_old_bars_supabase()
+    print(f"pruned {dropped} stale session(s); kept {pinned} pinned by training examples")
 
     bars = load_all_bars_supabase()
     if len(bars) < MIN_ROWS:
