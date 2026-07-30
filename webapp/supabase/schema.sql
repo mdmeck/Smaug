@@ -24,6 +24,10 @@ create policy "journal_entries_owner_all"
 
 -- Each row is one full labeled trade: an entry moment and an exit moment,
 -- so the model can learn from feature values at both points.
+-- `strategy` is deliberately unconstrained text, unlike direction/quality: the
+-- taxonomy is expected to grow as the trader names new setups, and a CHECK
+-- constraint would mean a migration each time. The webapp offers a fixed
+-- dropdown (STRATEGIES in App.jsx) — the constraint lives there, not here.
 create table if not exists training_examples (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
@@ -32,6 +36,8 @@ create table if not exists training_examples (
   ticker text not null default 'SPY',
   direction text not null check (direction in ('Long', 'Short')),
   quality text not null check (quality in ('Good', 'Bad')),
+  strategy text default '',
+  key_level double precision,
   notes text default '',
   created_at timestamptz not null default now()
 );

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from "react";
-import { createChart, CandlestickSeries } from "lightweight-charts";
+import { createChart, CandlestickSeries, createSeriesMarkers } from "lightweight-charts";
 import { supabase } from "./supabaseClient.js";
 
 // ---------- supabase helpers ----------
@@ -204,6 +204,21 @@ const retryBtn = {
   fontSize: 11,
   cursor: "pointer",
   fontFamily: T.sans,
+};
+
+// shared by the sidebar's group and child nav buttons; callers override
+// font/size/height/indent and the active-state colors
+const navBtnBase = {
+  background: "transparent",
+  border: "none",
+  fontFamily: T.display,
+  letterSpacing: "0.06em",
+  padding: "0 12px",
+  display: "flex",
+  alignItems: "center",
+  cursor: "pointer",
+  textAlign: "left",
+  whiteSpace: "nowrap",
 };
 
 const inputStyle = {
@@ -1592,6 +1607,10 @@ function JournalTab() {
 }
 
 // ---------- Training Data tab ----------
+// The strategy taxonomy is constrained here rather than by a DB CHECK, so
+// adding a setup name never needs a migration (see webapp/supabase/schema.sql).
+const STRATEGIES = ["Break and Retest", "Opening Range Break", "Bounce"];
+
 const emptyExample = () => ({
   date: todayISO(),
   entryTime: "09:30",
@@ -1599,6 +1618,8 @@ const emptyExample = () => ({
   ticker: "SPY",
   direction: "Long",
   quality: "Good",
+  strategy: "",
+  keyLevel: "",
   notes: "",
 });
 
@@ -1637,6 +1658,9 @@ function TrainingDataTab() {
         ticker: form.ticker,
         direction: form.direction,
         quality: form.quality,
+        strategy: form.strategy,
+        // empty stays null rather than 0 — an unfilled level is "not recorded"
+        key_level: form.keyLevel === "" ? null : Number(form.keyLevel),
         notes: form.notes,
       })
       .select()
@@ -1672,6 +1696,8 @@ function TrainingDataTab() {
       ticker: ex.ticker,
       direction: ex.direction,
       quality: ex.quality,
+      strategy: ex.strategy || "",
+      keyLevel: ex.key_level === null || ex.key_level === undefined ? "" : String(ex.key_level),
       notes: ex.notes,
     });
   }
@@ -1693,6 +1719,8 @@ function TrainingDataTab() {
         ticker: editForm.ticker,
         direction: editForm.direction,
         quality: editForm.quality,
+        strategy: editForm.strategy,
+        key_level: editForm.keyLevel === "" ? null : Number(editForm.keyLevel),
         notes: editForm.notes,
       })
       .eq("id", editingId)
@@ -1790,6 +1818,34 @@ function TrainingDataTab() {
               onChange={(v) => setF({ ...f, quality: v })}
               options={["Good", "Bad"]}
               colorFor={(o) => (o === "Good" ? T.green : T.red)}
+            />
+          )}
+          {field(
+            "STRATEGY",
+            // a real <select> rather than the ToggleGroup used above: this list
+            // is expected to grow, and buttons stop fitting the grid cell
+            <select
+              value={f.strategy}
+              onChange={(e) => setF({ ...f, strategy: e.target.value })}
+              style={inputStyle}
+            >
+              <option value="">—</option>
+              {STRATEGIES.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          )}
+          {field(
+            "KEY LEVEL",
+            <input
+              type="number"
+              step="0.01"
+              value={f.keyLevel}
+              onChange={(e) => setF({ ...f, keyLevel: e.target.value })}
+              placeholder="e.g. 743.44"
+              style={inputStyle}
             />
           )}
         </div>
@@ -1944,6 +2000,26 @@ function TrainingDataTab() {
                 <span style={{ fontFamily: T.mono, fontSize: 11, color: T.blue, minWidth: 55 }}>
                   {ex.direction}
                 </span>
+                {ex.strategy && (
+                  <span
+                    style={{
+                      fontFamily: T.mono,
+                      fontSize: 10,
+                      color: T.dim,
+                      border: `1px solid ${T.panelEdge}`,
+                      borderRadius: 4,
+                      padding: "1px 6px",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {ex.strategy}
+                  </span>
+                )}
+                {ex.key_level != null && (
+                  <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
+                    @ {Number(ex.key_level).toFixed(2)}
+                  </span>
+                )}
                 <span style={{ fontSize: 12, color: T.dim, flex: 1 }}>{ex.notes}</span>
                 <button
                   onClick={() => startEdit(ex)}
@@ -2009,10 +2085,11 @@ function aggregateBars(bars, minutes) {
   return out;
 }
 
-function CandleChart({ data }) {
+function CandleChart({ data, markers }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
+  const markersRef = useRef(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -2062,6 +2139,9 @@ function CandleChart({ data }) {
     });
     chartRef.current = chart;
     seriesRef.current = series;
+    // v5 moved markers off the series object into a plugin; created once here
+    // and fed via setMarkers below (the v4 series.setMarkers() no longer exists)
+    markersRef.current = createSeriesMarkers(series, []);
 
     const ro = new ResizeObserver(() => {
       if (containerRef.current) {
@@ -2082,6 +2162,10 @@ function CandleChart({ data }) {
       chartRef.current.timeScale().fitContent();
     }
   }, [data]);
+
+  useEffect(() => {
+    if (markersRef.current) markersRef.current.setMarkers(markers || []);
+  }, [markers]);
 
   return <div ref={containerRef} style={{ width: "100%" }} />;
 }
@@ -2990,7 +3074,7 @@ function ResourcesTab() {
         { label: "Outputs", value: "Supabase: bars, analysis_runs tables" },
         { label: "Schedule", value: "Daily 4:15 PM ET (see README)" },
       ],
-      note: "Modeling and Raw Data read live from Supabase — no manual paste needed.",
+      note: "Charts and Raw Data read live from Supabase — no manual paste needed.",
     },
   ];
   return (
@@ -3299,6 +3383,397 @@ function fmtRuleValue(v) {
   return Number.isFinite(n) ? n.toFixed(2) : String(v);
 }
 
+// ---------- rule evaluation (drives the Preview) ----------
+// Evaluated against the `features` jsonb the pipeline already stored on each
+// bar, so this never re-derives indicators in JS — the values here are exactly
+// what compute_features() produced. Note this makes the preview the canonical
+// reading of the rules; the PineScript recomputes features from Pine primitives
+// and knowingly diverges (vol_z is approximated, premarket may be unavailable),
+// so small disagreements with TradingView are expected, not bugs.
+const RULE_OPS = {
+  "<": (a, b) => a < b,
+  "<=": (a, b) => a <= b,
+  ">": (a, b) => a > b,
+  ">=": (a, b) => a >= b,
+};
+
+function ruleHolds(features, rule) {
+  const fn = RULE_OPS[rule.op];
+  const v = features ? features[rule.feature] : undefined;
+  // a missing feature (null in the jsonb — e.g. premarket levels before enough
+  // days accumulated) fails the rule rather than firing a signal on no evidence
+  if (!fn || v === null || v === undefined) return false;
+  return fn(Number(v), Number(rule.value));
+}
+
+function rulesHold(features, rules) {
+  // an empty rule list must never fire, or every bar would signal
+  if (!Array.isArray(rules) || rules.length === 0) return false;
+  return rules.every((r) => ruleHolds(features, r));
+}
+
+// Every bar whose conditions hold produces a signal — deliberately no position
+// state, matching the PineScript, which plots a marker on each qualifying bar
+// rather than tracking an open trade.
+function deriveSignals(bars, rules) {
+  if (!rules) return [];
+  const out = [];
+  for (const b of bars) {
+    const f = b.features;
+    if (rulesHold(f, rules.exit)) out.push({ kind: "exit", bar: b });
+    if (rulesHold(f, rules.long_entry)) out.push({ kind: "long", bar: b });
+    if (rulesHold(f, rules.short_entry)) out.push({ kind: "short", bar: b });
+  }
+  return out;
+}
+
+// For labeling: pair an entry signal with the first exit signal after it,
+// falling back to the last bar of the session if the model never exits.
+function pairedExit(signals, entry, bars) {
+  const next = signals.find(
+    (s) => s.kind === "exit" && new Date(s.bar.ts) > new Date(entry.bar.ts)
+  );
+  if (next) return next.bar;
+  return bars.length ? bars[bars.length - 1] : entry.bar;
+}
+
+const SIGNAL_STYLE = {
+  long: { text: "L", position: "belowBar", color: T.green, shape: "arrowUp" },
+  short: { text: "S", position: "aboveBar", color: T.red, shape: "arrowDown" },
+  exit: { text: "X", position: "inBar", color: T.amber, shape: "circle" },
+};
+
+function etTime(ts) {
+  return new Date(ts).toLocaleTimeString("en-US", {
+    timeZone: "America/New_York",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+}
+
+// ---------- indicator preview ----------
+// Replays one model's rules over a single session's stored bars so the trader
+// can see where it would have fired, scroll day to day, and label any signal
+// straight into training_examples for the next routine run to learn from.
+function IndicatorPreview({ model }) {
+  const [days, setDays] = useState(null);
+  const [dayIndex, setDayIndex] = useState(0);
+  const [bars, setBars] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [labeling, setLabeling] = useState(null); // signal being labeled
+  const [note, setNote] = useState("");
+  const [saved, setSaved] = useState({}); // key -> quality, for inline feedback
+  const [copied, setCopied] = useState(false);
+
+  // day list first (ts only — cheap), then the selected day's bars with
+  // features on demand, so we never pull ~10k feature blobs at once
+  useEffect(() => {
+    (async () => {
+      try {
+        const rows = await fetchAllRows("bars", { select: "ts", orderBy: "ts" });
+        const uniq = [...new Set(rows.map((r) => r.ts.slice(0, 10)))].sort();
+        setDays(uniq);
+        setDayIndex(Math.max(0, uniq.length - 1));
+      } catch (e) {
+        setError(e.message);
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  const day = days && days[dayIndex];
+
+  useEffect(() => {
+    if (!day) return;
+    let cancelled = false;
+    setLoading(true);
+    (async () => {
+      const { data, error: err } = await supabase
+        .from("bars")
+        .select("ts,open,high,low,close,features")
+        .gte("ts", `${day}T00:00:00Z`)
+        .lt("ts", `${day}T23:59:59.999Z`)
+        .order("ts", { ascending: true });
+      if (cancelled) return;
+      if (err) setError(err.message);
+      else {
+        setError(null);
+        setBars(data);
+      }
+      setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [day]);
+
+  const rules = model && model.rules;
+  const signals = useMemo(() => deriveSignals(bars, rules), [bars, rules]);
+
+  const chartData = useMemo(
+    () =>
+      bars.map((b) => ({
+        time: Math.floor(new Date(b.ts).getTime() / 1000),
+        open: b.open,
+        high: b.high,
+        low: b.low,
+        close: b.close,
+      })),
+    [bars]
+  );
+
+  const markers = useMemo(
+    () =>
+      signals.map((s) => ({
+        time: Math.floor(new Date(s.bar.ts).getTime() / 1000),
+        ...SIGNAL_STYLE[s.kind],
+      })),
+    [signals]
+  );
+
+  async function label(signal, quality) {
+    const key = `${signal.kind}:${signal.bar.ts}`;
+    const exitBar = pairedExit(signals, signal, bars);
+    const { error: err } = await supabase.from("training_examples").insert({
+      entry_at: signal.bar.ts,
+      exit_at: exitBar.ts,
+      ticker: "SPY",
+      direction: signal.kind === "short" ? "Short" : "Long",
+      quality,
+      notes: note
+        ? `${note} [from preview of model ${model.generated_at}]`
+        : `from preview of model ${model.generated_at}`,
+    });
+    if (err) {
+      setError(err.message);
+      return;
+    }
+    setSaved({ ...saved, [key]: quality });
+    setLabeling(null);
+    setNote("");
+  }
+
+  async function copyForChat() {
+    // only the features the rules actually reference — enough to reason about
+    // a signal in conversation without pasting the whole jsonb blob
+    const referenced = [
+      ...new Set(
+        ["long_entry", "short_entry", "exit"].flatMap((k) =>
+          (rules[k] || []).map((r) => r.feature)
+        )
+      ),
+    ];
+    const payload = {
+      day,
+      model_generated_at: model.generated_at,
+      rules,
+      signals: signals.map((s) => ({
+        kind: s.kind,
+        at: s.bar.ts,
+        close: s.bar.close,
+        features: Object.fromEntries(
+          referenced.map((f) => [f, s.bar.features ? s.bar.features[f] : null])
+        ),
+      })),
+    };
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setError("Couldn't copy — clipboard blocked by the browser.");
+    }
+  }
+
+  if (!rules) {
+    return (
+      <div style={{ fontSize: 12, color: T.dim }}>
+        This model has no rules to preview.
+      </div>
+    );
+  }
+  if (days === null) {
+    return <div style={{ fontSize: 12, color: T.faint }}>Loading sessions…</div>;
+  }
+  if (days.length === 0) {
+    return <div style={{ fontSize: 12, color: T.dim }}>No bars stored yet.</div>;
+  }
+
+  const counts = signals.reduce((acc, s) => {
+    acc[s.kind] = (acc[s.kind] || 0) + 1;
+    return acc;
+  }, {});
+
+  return (
+    <div>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: 10,
+          marginBottom: 12,
+        }}
+      >
+        <button
+          onClick={() => setDayIndex((i) => Math.max(0, i - 1))}
+          disabled={dayIndex === 0}
+          style={{ ...retryBtn, padding: "4px 10px", opacity: dayIndex === 0 ? 0.35 : 1 }}
+        >
+          ← Prev
+        </button>
+        <span
+          style={{
+            fontFamily: T.mono,
+            fontSize: 12,
+            color: T.ink,
+            minWidth: 90,
+            textAlign: "center",
+          }}
+        >
+          {day}
+        </span>
+        <button
+          onClick={() => setDayIndex((i) => Math.min(days.length - 1, i + 1))}
+          disabled={dayIndex === days.length - 1}
+          style={{
+            ...retryBtn,
+            padding: "4px 10px",
+            opacity: dayIndex === days.length - 1 ? 0.35 : 1,
+          }}
+        >
+          Next →
+        </button>
+        <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
+          {counts.long || 0}L · {counts.short || 0}S · {counts.exit || 0}X
+        </span>
+        <span style={{ flex: 1 }} />
+        <button
+          onClick={copyForChat}
+          style={{ ...retryBtn, padding: "4px 10px", borderColor: T.amber, color: T.amber }}
+        >
+          {copied ? "Copied" : "Copy day for chat"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ fontSize: 12, color: T.red, marginBottom: 10 }}>{error}</div>
+      )}
+
+      <CandleChart data={chartData} markers={markers} />
+
+      <div style={{ marginTop: 14 }}>
+        <div
+          style={{
+            fontFamily: T.mono,
+            fontSize: 10,
+            letterSpacing: "0.14em",
+            color: T.amber,
+            marginBottom: 8,
+          }}
+        >
+          SIGNALS {loading ? "· loading…" : ""}
+        </div>
+        {signals.length === 0 && !loading && (
+          <div style={{ fontSize: 12, color: T.dim }}>
+            No signals fired this session — the rules never all held at once.
+          </div>
+        )}
+        {signals.map((s) => {
+          const key = `${s.kind}:${s.bar.ts}`;
+          const style = SIGNAL_STYLE[s.kind];
+          const isLabeling = labeling === key;
+          return (
+            <div
+              key={key}
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                alignItems: "center",
+                gap: 10,
+                padding: "6px 0",
+                borderBottom: `1px solid ${T.panelEdge}`,
+                fontSize: 12,
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: T.mono,
+                  fontWeight: 700,
+                  color: style.color,
+                  width: 14,
+                }}
+              >
+                {style.text}
+              </span>
+              <span style={{ fontFamily: T.mono, color: T.dim, width: 46 }}>
+                {etTime(s.bar.ts)}
+              </span>
+              <span style={{ fontFamily: T.mono, color: T.faint }}>
+                {s.bar.close != null ? s.bar.close.toFixed(2) : "—"}
+              </span>
+              <span style={{ flex: 1 }} />
+              {saved[key] ? (
+                <span
+                  style={{
+                    fontFamily: T.mono,
+                    fontSize: 11,
+                    color: saved[key] === "Good" ? T.green : T.red,
+                  }}
+                >
+                  saved as {saved[key]}
+                </span>
+              ) : isLabeling ? (
+                <>
+                  <input
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="note (optional)"
+                    style={{ ...inputStyle, padding: "3px 8px", fontSize: 11, width: 200 }}
+                  />
+                  <button
+                    onClick={() => label(s, "Good")}
+                    style={{ ...retryBtn, padding: "3px 10px", borderColor: T.green, color: T.green }}
+                  >
+                    Good
+                  </button>
+                  <button
+                    onClick={() => label(s, "Bad")}
+                    style={{ ...retryBtn, padding: "3px 10px", borderColor: T.red, color: T.red }}
+                  >
+                    Bad
+                  </button>
+                  <button
+                    onClick={() => {
+                      setLabeling(null);
+                      setNote("");
+                    }}
+                    style={{ ...retryBtn, padding: "3px 10px" }}
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => {
+                    setLabeling(key);
+                    setNote("");
+                  }}
+                  style={{ ...retryBtn, padding: "3px 10px", fontSize: 11 }}
+                >
+                  Label
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 const CONFIDENCE_COLOR = { low: T.faint, medium: T.amber, high: T.green };
 
 function RuleList({ title, rules }) {
@@ -3463,6 +3938,7 @@ function ModelTab() {
   const [loadState, setLoadState] = useState("loading");
   const [loadError, setLoadError] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
+  const [view, setView] = useState("Rules");
 
   useEffect(() => {
     (async () => {
@@ -3506,11 +3982,31 @@ function ModelTab() {
         <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>{loadError}</div>
       )}
 
+      {models.length > 0 && (
+        <div style={{ maxWidth: 280, marginBottom: 16 }}>
+          <ToggleGroup
+            value={view}
+            onChange={setView}
+            options={["Rules", "Preview"]}
+          />
+        </div>
+      )}
+
+      {models.length > 0 && view === "Preview" && (
+        <div>
+          <div style={{ fontSize: 12, color: T.dim, marginBottom: 12 }}>
+            Latest model replayed over stored bars — scroll sessions, then label
+            any signal to file it as a training example.
+          </div>
+          <IndicatorPreview model={models[0]} />
+        </div>
+      )}
+
       {models.length === 0 ? (
         <div style={{ color: T.dim, fontSize: 13 }}>
           No model yet — the daily routine will populate this.
         </div>
-      ) : (
+      ) : view === "Preview" ? null : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <ModelCard model={models[0]} onDelete={() => deleteModel(models[0].id)} />
           {models.length > 1 && (
@@ -3542,14 +4038,16 @@ function ModelTab() {
 }
 
 // ---------- main ----------
-const TABS = [
-  "Morning Brief",
-  "Journal",
-  "Modeling",
-  "Training Data",
-  "Model",
-  "Resources",
+// Sidebar nav. Items with `children` render as an expandable group; `tab`
+// always holds a leaf name, never a group name, so the content switch below
+// only ever matches leaves.
+const NAV = [
+  { label: "Morning Brief" },
+  { label: "Journal" },
+  { label: "Modeling", children: ["Charts", "Training Data", "Indicator"] },
+  { label: "Resources" },
 ];
+
 
 export default function Smaug() {
   const session = useSession();
@@ -3696,33 +4194,62 @@ export default function Smaug() {
               </span>
               <span style={{ color: countdown.tone }}>{countdown.label}</span>
             </div>
-            {TABS.map((t) => {
-              const active = tab === t;
+            {NAV.map((item) => {
+              // children are always listed; a group header is highlighted when
+              // one of them is active and selects the first child when clicked
+              const active = item.children
+                ? item.children.includes(tab)
+                : tab === item.label;
               return (
-                <button
-                  key={t}
-                  onClick={() => setTab(t)}
-                  style={{
-                    background: active ? "rgba(224,123,42,0.1)" : "transparent",
-                    border: "none",
-                    borderLeft: active
-                      ? `2px solid ${T.amber}`
-                      : "2px solid transparent",
-                    color: active ? T.ink : T.faint,
-                    fontFamily: T.display,
-                    fontSize: 17,
-                    letterSpacing: "0.06em",
-                    padding: "0 12px",
-                    height: 48,
-                    display: "flex",
-                    alignItems: "center",
-                    cursor: "pointer",
-                    textAlign: "left",
-                    whiteSpace: "nowrap",
-                  }}
-                >
-                  {t.toUpperCase()}
-                </button>
+                <div key={item.label}>
+                  <button
+                    onClick={() =>
+                      setTab(item.children ? item.children[0] : item.label)
+                    }
+                    style={{
+                      ...navBtnBase,
+                      background:
+                        active && !item.children ? "rgba(224,123,42,0.1)" : "transparent",
+                      borderLeft:
+                        active && !item.children
+                          ? `2px solid ${T.amber}`
+                          : "2px solid transparent",
+                      color: active ? T.ink : T.faint,
+                      fontSize: 17,
+                      height: 48,
+                      width: "100%",
+                    }}
+                  >
+                    {item.label.toUpperCase()}
+                  </button>
+                  {item.children &&
+                    item.children.map((child) => {
+                      const childActive = tab === child;
+                      return (
+                        <button
+                          key={child}
+                          onClick={() => setTab(child)}
+                          style={{
+                            ...navBtnBase,
+                            background: childActive
+                              ? "rgba(224,123,42,0.1)"
+                              : "transparent",
+                            borderLeft: childActive
+                              ? `2px solid ${T.amber}`
+                              : "2px solid transparent",
+                            color: childActive ? T.ink : T.faint,
+                            fontFamily: T.mono,
+                            fontSize: 11,
+                            padding: "0 12px 0 26px",
+                            height: 30,
+                            width: "100%",
+                          }}
+                        >
+                          {child.toUpperCase()}
+                        </button>
+                      );
+                    })}
+                </div>
               );
             })}
           </div>
@@ -3733,13 +4260,13 @@ export default function Smaug() {
           <MorningBriefTab panels={panels} lastRun={lastRun} />
         )}
         {tab === "Journal" && <JournalTab />}
-        {tab === "Modeling" && (
+        {tab === "Charts" && (
           <div style={{ maxWidth: 1100, margin: "0 auto" }}>
             <TechnicalsTab />
           </div>
         )}
         {tab === "Training Data" && <TrainingDataTab />}
-        {tab === "Model" && <ModelTab />}
+        {tab === "Indicator" && <ModelTab />}
         {tab === "Resources" && <ResourcesTab />}
           </div>
         </div>
