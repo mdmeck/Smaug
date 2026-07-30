@@ -2020,7 +2020,25 @@ function TrainingDataTab() {
                     @ {Number(ex.key_level).toFixed(2)}
                   </span>
                 )}
-                <span style={{ fontSize: 12, color: T.dim, flex: 1 }}>{ex.notes}</span>
+                <span style={{ fontSize: 12, color: T.dim, flex: 1 }}>
+                  {ex.notes}
+                  {/* routine-written, so shown read-only and visually distinct —
+                      it must never be editable here or it stops being the
+                      routine's own record */}
+                  {ex.analysis_notes && (
+                    <span
+                      style={{
+                        display: "block",
+                        marginTop: 4,
+                        fontSize: 11,
+                        color: T.faint,
+                        fontStyle: "italic",
+                      }}
+                    >
+                      AI: {ex.analysis_notes}
+                    </span>
+                  )}
+                </span>
                 <button
                   onClick={() => startEdit(ex)}
                   style={{ ...retryBtn, padding: "3px 10px", fontSize: 11, flexShrink: 0 }}

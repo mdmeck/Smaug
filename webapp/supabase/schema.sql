@@ -39,6 +39,11 @@ create table if not exists training_examples (
   strategy text default '',
   key_level double precision,
   notes text default '',
+  -- written by the AI routine, never by the trader. Deliberately a separate
+  -- column from `notes`: if the routine wrote findings into the field it also
+  -- reads as ground truth, later runs would learn from their own output and
+  -- the trader's observations would become indistinguishable from inferences.
+  analysis_notes text default '',
   created_at timestamptz not null default now()
 );
 
