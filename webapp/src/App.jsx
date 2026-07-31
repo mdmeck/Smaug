@@ -255,6 +255,11 @@ function ImpactEmoji({ impact }) {
 }
 
 // ---------- week calendar ----------
+const isSameDay = (a, b) =>
+  a.getFullYear() === b.getFullYear() &&
+  a.getMonth() === b.getMonth() &&
+  a.getDate() === b.getDate();
+
 function WeekCalendar({ econ, earnings, lastRun }) {
   const week = tradingWeek();
   const econEvents = (econ && econ.events) || [];
@@ -287,8 +292,18 @@ function WeekCalendar({ econ, earnings, lastRun }) {
           </span>
         </div>
         {lastRun && (
-          <div style={{ fontFamily: T.mono, fontSize: 12, color: T.faint }}>
+          // date, not just time: a brief that stopped refreshing days ago used
+          // to look identical to one written this morning
+          <div
+            style={{
+              fontFamily: T.mono,
+              fontSize: 12,
+              color: isSameDay(lastRun, new Date()) ? T.faint : T.amber,
+            }}
+          >
             Last run{" "}
+            {lastRun.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
+            {", "}
             {lastRun.toLocaleTimeString("en-US", { hour12: false })} ET
           </div>
         )}
@@ -331,52 +346,42 @@ function WeekCalendar({ econ, earnings, lastRun }) {
                 <div
                   key={j}
                   title={e.note || e.company}
-                  style={{ display: "flex", gap: 6, alignItems: "flex-start" }}
+                  style={{ display: "flex", gap: 6, alignItems: "baseline" }}
                 >
                   <span style={{ fontSize: 13, lineHeight: 1.4, flexShrink: 0 }}>
                     💸
                   </span>
-                  <div style={{ minWidth: 0 }}>
-                    <div
+                  <span
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 700,
+                      color: T.blue,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {e.ticker}
+                  </span>
+                  {e.company && (
+                    // truncates rather than wrapping — the day column is narrow,
+                    // and a second line is exactly what this row is avoiding.
+                    // The full name stays available via the title attribute.
+                    <span
                       style={{
-                        display: "flex",
-                        alignItems: "baseline",
-                        gap: 6,
-                        flexWrap: "nowrap",
+                        fontSize: 12,
+                        color: T.dim,
+                        flex: 1,
+                        minWidth: 0,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
                       }}
                     >
-                      <span
-                        style={{
-                          fontSize: 13,
-                          fontWeight: 700,
-                          color: T.blue,
-                          flexShrink: 0,
-                        }}
-                      >
-                        {e.ticker}
-                      </span>
-                      <span
-                        style={{
-                          fontSize: 12,
-                          color: T.faint,
-                          flexShrink: 0,
-                        }}
-                      >
-                        {e.time}
-                      </span>
-                    </div>
-                    {e.company && (
-                      <div
-                        style={{
-                          fontSize: 12,
-                          color: T.dim,
-                          lineHeight: 1.3,
-                        }}
-                      >
-                        {e.company}
-                      </div>
-                    )}
-                  </div>
+                      {e.company}
+                    </span>
+                  )}
+                  <span style={{ fontSize: 12, color: T.faint, flexShrink: 0 }}>
+                    {e.time}
+                  </span>
                 </div>
               );
               const earnGroup = (rows, { divider = true } = {}) =>
