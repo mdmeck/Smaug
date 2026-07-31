@@ -1614,7 +1614,12 @@ function JournalTab() {
 // ---------- Training Data tab ----------
 // The strategy taxonomy is constrained here rather than by a DB CHECK, so
 // adding a setup name never needs a migration (see webapp/supabase/schema.sql).
-const STRATEGIES = ["Break and Retest", "Opening Range Break", "Bounce"];
+const STRATEGIES = [
+  "Break and Retest",
+  "Opening Range Break",
+  "Order Block Break",
+  "Bounce",
+];
 
 const emptyExample = () => ({
   date: todayISO(),
