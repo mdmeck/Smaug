@@ -39,6 +39,16 @@ For each training example, join **two** feature snapshots — never a later bar 
 - **Entry snapshot**: the `bars` row with the largest `ts <= entry_at`. Good Long examples' entry snapshots inform `long_entry` rules; Good Short examples' entry snapshots inform `short_entry` rules.
 - **Exit snapshot**: the `bars` row with the largest `ts <= exit_at`. All Good examples' exit snapshots (regardless of direction) inform `exit` rules.
 
+### Bad examples are negative constraints, not just absent positives
+
+A `quality = 'Bad'` row is a setup that looked valid and wasn't. Its **entry snapshot is the evidence**; its exit is often nominal (the trader may never have taken the trade, and the timestamp may just be carried over from a paired example), so **do not use a Bad example's exit snapshot for `exit` rules**.
+
+Use Bad entry snapshots as constraints the rules must *fail*: a `short_entry` rule set that fires on a Bad Short entry is wrong regardless of how well it fits the Good ones. After drafting the rules from the Good examples, evaluate them against every Bad entry snapshot of the same direction; if one fires, tighten a threshold until it doesn't — while confirming the Good examples still pass.
+
+**Matched pairs are the highest-value data here.** When a Bad and a Good example share a direction, `strategy`, and `key_level` and sit minutes apart, the difference between their entry snapshots is close to a controlled experiment: nearly everything is held constant, so whichever feature separates them is likely the real discriminator. Look for the pairing explicitly, and say in `summary` which feature separated them.
+
+If **no** feature cleanly separates a Bad entry from the Good ones, say so plainly rather than inventing a threshold that happens to split them — with this few examples, a boundary drawn between two nearby points is almost certainly fitting noise. An honest "these two look alike on the stored features" is a real finding, and usually means the distinguishing information isn't in the feature set yet.
+
 ### Treat the timestamps and levels as approximate — they are eyeballed off a chart
 
 **This is the most important thing to understand about `training_examples`.** The trader reads these off a chart by eye; they are not tick-accurate records of executed trades. `entry_at`, `exit_at`, and `key_level` mark roughly where a setup was, not precisely when or at what price it was taken. A real example: a `key_level` recorded as `738` when the actual opening-range low was `738.72`, and an exit given as "10:50, or preferably 12:17" — a 87-minute spread the trader considered acceptable either way.
