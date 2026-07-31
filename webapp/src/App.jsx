@@ -1621,6 +1621,14 @@ const STRATEGIES = [
   "Bounce",
 ];
 
+// A Bad example is a setup that should never have been entered, so it has no
+// exit — the form hides the field and this returns null regardless of whatever
+// exitTime is left over in form state from a previous Good/Bad toggle.
+const exitISO = (f) =>
+  f.quality === "Bad" || !f.exitTime
+    ? null
+    : new Date(`${f.date}T${f.exitTime}:00`).toISOString();
+
 const emptyExample = () => ({
   date: todayISO(),
   entryTime: "09:30",
@@ -1659,7 +1667,7 @@ function TrainingDataTab() {
   async function addExample() {
     setSaveError(null);
     const entry_at = new Date(`${form.date}T${form.entryTime}:00`).toISOString();
-    const exit_at = new Date(`${form.date}T${form.exitTime}:00`).toISOString();
+    const exit_at = exitISO(form);
     const { data, error } = await supabase
       .from("training_examples")
       .insert({
@@ -1697,12 +1705,11 @@ function TrainingDataTab() {
   function startEdit(ex) {
     setSaveError(null);
     const entryParts = isoToLocalParts(ex.entry_at);
-    const exitParts = isoToLocalParts(ex.exit_at);
     setEditingId(ex.id);
     setEditForm({
       date: entryParts.date,
       entryTime: entryParts.time,
-      exitTime: exitParts.time,
+      exitTime: ex.exit_at ? isoToLocalParts(ex.exit_at).time : "",
       ticker: ex.ticker,
       direction: ex.direction,
       quality: ex.quality,
@@ -1720,7 +1727,7 @@ function TrainingDataTab() {
   async function saveEdit() {
     setSaveError(null);
     const entry_at = new Date(`${editForm.date}T${editForm.entryTime}:00`).toISOString();
-    const exit_at = new Date(`${editForm.date}T${editForm.exitTime}:00`).toISOString();
+    const exit_at = exitISO(editForm);
     const { data, error } = await supabase
       .from("training_examples")
       .update({
@@ -1794,15 +1801,30 @@ function TrainingDataTab() {
               style={inputStyle}
             />
           )}
-          {field(
-            "EXIT TIME",
-            <input
-              type="time"
-              value={f.exitTime}
-              onChange={(e) => setF({ ...f, exitTime: e.target.value })}
-              style={inputStyle}
-            />
-          )}
+          {f.quality === "Bad"
+            ? field(
+                "EXIT TIME",
+                <div
+                  style={{
+                    ...inputStyle,
+                    color: T.faint,
+                    fontSize: 11,
+                    display: "flex",
+                    alignItems: "center",
+                  }}
+                >
+                  never entered
+                </div>
+              )
+            : field(
+                "EXIT TIME",
+                <input
+                  type="time"
+                  value={f.exitTime}
+                  onChange={(e) => setF({ ...f, exitTime: e.target.value })}
+                  style={inputStyle}
+                />
+              )}
           {field(
             "TICKER",
             <input
@@ -1987,11 +2009,13 @@ function TrainingDataTab() {
                     hour12: false,
                   })}
                   {" → "}
-                  {new Date(ex.exit_at).toLocaleTimeString("en-US", {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                    hour12: false,
-                  })}
+                  {ex.exit_at
+                    ? new Date(ex.exit_at).toLocaleTimeString("en-US", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                        hour12: false,
+                      })
+                    : "—"}
                 </span>
                 <span
                   style={{
@@ -3563,10 +3587,12 @@ function IndicatorPreview({ model }) {
 
   async function label(signal, quality) {
     const key = `${signal.kind}:${signal.bar.ts}`;
-    const exitBar = pairedExit(signals, signal, bars);
+    // Bad = the model should not have signaled here at all, so there is no
+    // exit to pair — see exitISO() in the Training Data tab.
+    const exitBar = quality === "Bad" ? null : pairedExit(signals, signal, bars);
     const { error: err } = await supabase.from("training_examples").insert({
       entry_at: signal.bar.ts,
-      exit_at: exitBar.ts,
+      exit_at: exitBar ? exitBar.ts : null,
       ticker: "SPY",
       direction: signal.kind === "short" ? "Short" : "Long",
       quality,

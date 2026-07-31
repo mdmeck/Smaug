@@ -49,7 +49,7 @@ This table holds exactly one row, overwritten each run. No history is kept.
 
 1. Fetch `https://raw.githubusercontent.com/mdmeck/Smaug/main/smaug_pipeline.py`. `compute_features()` is the ground truth for what every feature column means, `compute_targets()` for the targets. Cross-reference against the feature/target tables in the spec you fetched in Part 0.
 2. Query `analysis_runs` — `order by generated_at desc limit 1` — for the current regression/correlation output (correlations, standardized coefficients, r2_train/r2_test, deciles, per target).
-3. Query `training_examples` for the trader's labeled examples. May be empty. Each row is a full round trip: `entry_at`, `exit_at`, `ticker`, `direction` (Long/Short), `quality` (Good/Bad), `strategy`, `key_level`, `notes`, `analysis_notes`. Re-read these fresh every run — the trader edits and deletes them, so yesterday's set may not still apply.
+3. Query `training_examples` for the trader's labeled examples. May be empty. Each row has `entry_at`, `exit_at`, `ticker`, `direction` (Long/Short), `quality` (Good/Bad), `strategy`, `key_level`, `notes`, `analysis_notes`. `exit_at` is null on Bad examples — those trades were never entered, so they have no exit; join one snapshot, not two, and never substitute an exit for them. Re-read these fresh every run — the trader edits and deletes them, so yesterday's set may not still apply.
 
 Join two feature snapshots per example from `bars` exactly as the spec describes — never a later bar than the timestamp in question, which would be lookahead. Sessions referenced by an example are exempt from the bars retention window, so old examples remain joinable; a missing bar is a problem to report, not a stale example to skip.
 

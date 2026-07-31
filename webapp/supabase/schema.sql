@@ -32,7 +32,11 @@ create table if not exists training_examples (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
   entry_at timestamptz not null,
-  exit_at timestamptz not null,
+  -- nullable, unlike entry_at: a Bad example is a trade that should never have
+  -- been entered, so it has no exit. Forcing one would mean inventing a
+  -- timestamp, and the routine reads exit snapshots as evidence for `exit`
+  -- rules — fabricated exits would train the model on a trade that never was.
+  exit_at timestamptz,
   ticker text not null default 'SPY',
   direction text not null check (direction in ('Long', 'Short')),
   quality text not null check (quality in ('Good', 'Bad')),
