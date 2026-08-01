@@ -1413,6 +1413,10 @@ function PnlCalendar({ byDay, bounds }) {
         border: `1px solid ${B.edge}`,
         borderRadius: 16,
         overflow: "hidden",
+        flex: 1,
+        minWidth: 0,
+        display: "flex",
+        flexDirection: "column",
       }}
     >
       <div
@@ -1455,7 +1459,7 @@ function PnlCalendar({ byDay, bounds }) {
         </div>
       </div>
 
-      <div style={{ overflowX: "auto" }}>
+      <div style={{ overflowX: "auto", flex: 1 }}>
         <div style={{ minWidth: 620, padding: 12 }}>
           <div
             style={{
@@ -1634,6 +1638,8 @@ function AiFeedbackPanel({ fb }) {
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
+        flex: 1,
+        minWidth: 0,
       }}
     >
       <div
@@ -1677,6 +1683,8 @@ function AiFeedbackPanel({ fb }) {
             flexDirection: "column",
             gap: 20,
             flex: 1,
+            minHeight: 0,
+            overflowY: "auto",
           }}
         >
           <FeedbackList label="OBSERVATIONS" items={fb.observations} color={B.blue} />
@@ -1891,6 +1899,19 @@ function DashboardTab() {
   const bounds = useMemo(() => rangeBounds(preset, custom), [preset, custom]);
   const s = useMemo(() => computeStats(entries, bounds), [entries, bounds]);
 
+  // The feedback panel is capped to whatever the calendar happens to be —
+  // 5 vs 6 week rows changes that, so it's measured rather than guessed.
+  const calRef = useRef(null);
+  const [calHeight, setCalHeight] = useState(null);
+  useEffect(() => {
+    const el = calRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setCalHeight(el.offsetHeight));
+    ro.observe(el);
+    setCalHeight(el.offsetHeight);
+    return () => ro.disconnect();
+  }, [loadState]);
+
   if (loadState === "loading") {
     return (
       <div style={{ fontFamily: B.mono, fontSize: 12, color: B.faint }}>Loading…</div>
@@ -1928,15 +1949,23 @@ function DashboardTab() {
 
       {/* flex rather than grid so the two panels keep a ~3:1 split when there's
           room and stack cleanly when there isn't — the calendar has a hard
-          minimum width it can't compress below */}
-      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "stretch" }}>
-        <div style={{ flex: "3 1 640px", minWidth: 0 }}>
+          minimum width it can't compress below. flex-start, not stretch: the
+          calendar sets the row height and the feedback is capped to match it,
+          since stretching would let a long critique grow the calendar and pad
+          it with empty weeks. */}
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div ref={calRef} style={{ flex: "3 1 640px", minWidth: 0, display: "flex" }}>
           <PnlCalendar byDay={s.byDay} bounds={bounds} />
         </div>
-        <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex" }}>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <AiFeedbackPanel fb={feedback} />
-          </div>
+        <div
+          style={{
+            flex: "1 1 300px",
+            minWidth: 0,
+            display: "flex",
+            maxHeight: calHeight || undefined,
+          }}
+        >
+          <AiFeedbackPanel fb={feedback} />
         </div>
       </div>
 
