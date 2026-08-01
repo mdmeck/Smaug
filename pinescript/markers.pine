@@ -1,6 +1,17 @@
 // Signal markers — fixed convention, never vary this file.
 // Relies on longEntry / shortEntry / exitSignal booleans defined by that
 // day's generated rules block (inserted immediately before this fragment).
-plotchar(longEntry, title="Long Entry", char="L", location=location.belowbar, color=color.green, size=size.tiny)
-plotchar(shortEntry, title="Short Entry", char="S", location=location.abovebar, color=color.red, size=size.tiny)
-plotchar(exitSignal ? close : na, title="Exit", char="X", location=location.absolute, color=color.orange, size=size.tiny)
+//
+// Those three are STATE, not events. A threshold set like "close above EMA9
+// and EMA9 above EMA21 and RSI above 48" describes being in an uptrend, which
+// stays true for dozens of consecutive bars — plotting it directly marked 43%
+// of a session's bars long and 98% exit, which is unreadable. So a marker is
+// drawn only on the bar where a condition BECOMES true: one sustained move
+// produces one signal instead of one per bar. Edge detection lives here rather
+// than in the generated block so it cannot be regressed at generation time.
+mk_long = longEntry and not longEntry[1]
+mk_short = shortEntry and not shortEntry[1]
+mk_exit = exitSignal and not exitSignal[1]
+plotchar(mk_long, title="Long Entry", char="L", location=location.belowbar, color=color.green, size=size.tiny)
+plotchar(mk_short, title="Short Entry", char="S", location=location.abovebar, color=color.red, size=size.tiny)
+plotchar(mk_exit ? close : na, title="Exit", char="X", location=location.absolute, color=color.orange, size=size.tiny)

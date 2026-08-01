@@ -109,6 +109,35 @@ create policy "daily_briefs_owner_all"
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
+-- Coaching feedback on the trader's own journal, written by the routine and
+-- shown on the Dashboard. Columns mirror the schema the Journal tab's
+-- copy/paste flow already asks claude.ai for, so the routine and the manual
+-- fallback produce interchangeable output. One row per user, upserted on
+-- user_id like daily_briefs — this is "what to work on now", not a log, and
+-- keeping every past critique around would just bury the current one.
+create table if not exists trade_feedback (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null unique default auth.uid() references auth.users(id) on delete cascade,
+  generated_at timestamptz not null default now(),
+  observations jsonb default '[]'::jsonb,
+  strengths jsonb default '[]'::jsonb,
+  risks jsonb default '[]'::jsonb,
+  focus text default '',
+  -- what the critique was based on, so the UI can show its scope rather than
+  -- implying the feedback covers trades it never saw
+  trades_reviewed int not null default 0,
+  date_range jsonb,
+  created_at timestamptz not null default now()
+);
+
+alter table trade_feedback enable row level security;
+
+create policy "trade_feedback_owner_all"
+  on trade_feedback
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
 -- 1-minute SPY bars + computed indicator features. Public read (this is
 -- just market data, not personal) so both the webapp and the routine can
 -- read it without authentication; writes only via the service_role key,

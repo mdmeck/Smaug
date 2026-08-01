@@ -12,7 +12,7 @@ Concatenate raw fetches of these files, in this exact order, each preceded by a 
 4. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/candles_2.pine`
 5. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/candles_3.pine`
 6. **Generated block** (not a file here) — `input.float`/`input.int` per rule threshold, feature recomputation, and `longEntry`/`shortEntry`/`exitSignal` boolean definitions. See the "PineScript generation" section of `docs/smaug-project-knowledge.md`.
-7. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/markers.pine` — must be last; it references `longEntry`/`shortEntry`/`exitSignal`, which only exist once step 6 defines them (Pine requires definition-before-use).
+7. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/markers.pine` — must be last; it references `longEntry`/`shortEntry`/`exitSignal`, which only exist once step 6 defines them (Pine requires definition-before-use). It also converts those three from state to edge triggers, so the generated block must define them as plain conditions with no once-only guard of their own.
 
 This is fetch-and-paste-verbatim, not a template to fill in — nothing in these files should be edited or "improved" by the routine at generation time.
 
@@ -30,7 +30,7 @@ Pine has no per-file scoping. Every `var`, function, and local variable defined 
 | `candles_1.pine` | `c1_` |
 | `candles_2.pine` | `c2_` |
 | `candles_3.pine` | `c3_` |
-| `markers.pine` | none — consumes the `longEntry`/`shortEntry`/`exitSignal` names the generated block defines. Don't rename these three identifiers anywhere. |
+| `markers.pine` | `mk_` for its own locals; consumes the unprefixed `longEntry`/`shortEntry`/`exitSignal` names the generated block defines. Don't rename those three identifiers anywhere. |
 
 ## Pattern label style
 

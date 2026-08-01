@@ -21,6 +21,21 @@ Smaug is a personal intraday SPY options scalping tool. The trader uses a **brea
 Sessions referenced by a training example are **exempt from the `bars` retention window** — the pipeline pins those whole days so the feature-snapshot join above keeps working indefinitely, even once the session ages past the 60-day cutoff. So an old example is still joinable; don't assume a missing bar means the example is stale. Editable/deletable by the trader in the webapp, so always re-read fresh each run rather than assuming yesterday's set still applies. Note the entry-model synthesis is SPY-specific — if an example has a different ticker, treat it as informational context rather than folding it into the SPY feature-value join.
 - `daily_briefs` — morning brief (econ calendar, earnings, sentiment, bull/bear case), written by the routine: `generated_at, econ (jsonb), earnings (jsonb), sentiment (jsonb), cases (jsonb)`. Private. One row per user (`user_id` is unique) — overwritten each run via `upsert` with `on_conflict=user_id`, no history kept. Query with a plain `select` for the current one.
 - `entry_models` — each row is one AI-synthesized entry/exit rule set + PineScript indicator, written directly by the routine (append-only, so the trader can see the model evolve day over day). Private: `generated_at, bars_analyzed, examples_used, date_range, rules (jsonb), summary, confidence (low/medium/high), pinescript (text)`.
+- `journal_entries` — the trader's own trade log, one row per round trip: `date, ticker, direction (Long/Short), setup, result, notes`. Private. **This is a record of what was actually traded**, unlike `training_examples`, which is a record of what *should* have been traded — the two are different things and a trade can appear in one, both, or neither. `result` is free text the trader types (`+30`, `-$12.50`, `+1.5R`); parse the leading number and skip anything unparseable rather than guessing. `setup` is free text and is often empty, especially on rows bulk-imported from a broker export — an empty `setup` means "not recorded", never "no setup".
+- `trade_feedback` — your coaching critique of `journal_entries`, written by the routine and shown on the Dashboard: `generated_at, observations (jsonb array), strengths (jsonb array), risks (jsonb array), focus (text), trades_reviewed (int), date_range (jsonb)`. Private. One row per user (`user_id` is unique) — upsert with `on_conflict=user_id`, no history. The column shape matches what the Journal tab's copy/paste flow asks claude.ai for, so both sources are interchangeable.
+
+### Reviewing the journal
+
+`trade_feedback` is a critique of execution, which is a different question from the one `entry_models` answers. The model asks "where was the edge?"; this asks "did the trader take it, and take it well?" Keep them separate — do not let journal performance quietly retune the rules, or a bad week of discipline will get encoded as a threshold change.
+
+What to actually look for, in rough order of value:
+
+- **Distribution, not average.** Win rate and net P&L hide the thing that usually matters. Compare average win against average loss, and check whether a single day or a single repeated ticker accounts for most of the damage. A 59% win rate that still loses money is a sizing-and-exits story, not a setup story.
+- **Repeat entries on one instrument in one session.** Several round trips on the same strike the same day, each worse than the last, is the signature of re-entering a losing idea. Name the date and the count.
+- **The two logs against each other.** Where a `journal_entries` date overlaps a `training_examples` date, ask whether the trades taken were the setups labeled. Trading well on days with no labeled setup — or ignoring a labeled Good setup — are both findings.
+- **What the trader already said.** `notes` is their own reasoning; a mistake they name repeatedly in their own words is stronger evidence than anything inferred from the numbers.
+
+Say plainly when the data can't support a claim. With `setup` empty there is no setup discipline analysis to give — say so in `observations` instead of substituting something you can measure for something you can't. Be specific and quantitative, cite dates and figures, and skip encouragement that isn't backed by a number. Never give position-sizing prescriptions or anything that reads as financial advice: describe what the record shows and what to watch, not what to trade.
 
 ### Writing as the routine — `user_id` is required
 
@@ -121,11 +136,28 @@ Before writing `pinescript` to `entry_models`, self-check the assembled text: it
 ### Signal markers — fixed convention, never vary this
 The chart marks must look and mean the same thing every single day, regardless of how the underlying rule thresholds change. This is `pinescript/markers.pine` (fragment #7 above) verbatim:
 ```pine
-plotchar(longEntry, title="Long Entry", char="L", location=location.belowbar, color=color.green, size=size.tiny)
-plotchar(shortEntry, title="Short Entry", char="S", location=location.abovebar, color=color.red, size=size.tiny)
-plotchar(exitSignal ? close : na, title="Exit", char="X", location=location.absolute, color=color.orange, size=size.tiny)
+mk_long = longEntry and not longEntry[1]
+mk_short = shortEntry and not shortEntry[1]
+mk_exit = exitSignal and not exitSignal[1]
+plotchar(mk_long, title="Long Entry", char="L", location=location.belowbar, color=color.green, size=size.tiny)
+plotchar(mk_short, title="Short Entry", char="S", location=location.abovebar, color=color.red, size=size.tiny)
+plotchar(mk_exit ? close : na, title="Exit", char="X", location=location.absolute, color=color.orange, size=size.tiny)
 ```
 Where `longEntry`/`shortEntry`/`exitSignal` are the boolean expressions built from that day's `long_entry`/`short_entry`/`exit` rule conditions (`and`-ed together) — defined in the generated block (step 6), consumed here. Never substitute a different shape, color, character, or location — the trader relies on "L below the bar = long, S above the bar = short, X at price = exit" being stable day over day, even as the thresholds behind them evolve.
+
+**Define those three as plain state, not as events.** `markers.pine` already converts them to edge triggers — do not add `ta.crossover`, `not …[1]`, or any other once-only guard to the generated block, or the signal will require two simultaneous transitions and almost never fire.
+
+### Rules are state predicates, and that has a failure mode
+
+Every rule list is `and`-ed and evaluated per bar, so it describes a *condition the market is in*, not a moment. "Close above EMA9, EMA9 above EMA21, RSI above 48" is a description of an uptrend — it is true for as long as the uptrend lasts, not once at its start. Edge detection in `markers.pine` turns that into one signal per move, but it cannot rescue a rule set that is simply too loose.
+
+So check the **firing rate**, not just satisfiability. For each list, count the bars it holds on across the analyzed window:
+
+- **0%** — contradictory or impossibly tight. Already covered by the satisfiability check.
+- **over ~30%** — too loose to be a signal. A condition that describes a third of the session is describing the market, not an entry. This has happened: an `exit` list of `range_bps >= 1.5` and `vol_z >= -1` held on **382 of 390 bars (98%)** of 2026-07-31, and a `long_entry` list held on 167 (43%).
+- **a few percent, clustered** — what a real setup looks like.
+
+Report the per-list firing rate in `summary` every run, as a percentage of bars and as signals-per-session after edge detection. The trader expects **a handful of entries per session**, so a list producing more than ~10 edge-triggered signals a day is still too loose even if the raw rate looks acceptable. Tighten the discriminating threshold — the one the training examples actually support — rather than adding more conditions, since each extra `and` narrows the window without making the rule more specific to the setup.
 
 ### Candlestick patterns and RSI
 Also fetched verbatim as part of the fragments above — not something to regenerate:

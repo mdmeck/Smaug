@@ -59,6 +59,8 @@ Group by `strategy` where the examples support it (currently `Break and Retest`,
 
 Combine the regression signal with the labeled examples to build `long_entry`, `short_entry`, and `exit` rules. Only use feature names that actually appear in `analysis_runs` / `compute_features()` — never invent one, since these are translated mechanically into the indicator. `dist_vwap_bps` (session VWAP distance) is part of the feature set; use it if present in the data you read, and don't assume it exists if it isn't.
 
+**Check each rule list's firing rate against real bars before writing it, in both directions.** A list that fires on ~0% of bars is contradictory; a list that fires on more than ~30% is too loose to be a signal at all. Both are broken, and the second is the one that has actually shipped — see "Rules are state predicates, and that has a failure mode" in the spec, which gives the thresholds and what to report in `summary`. The trader's standard is a handful of entries per session.
+
 **Verify every rule list is satisfiable before writing it.** Conditions within a list are AND-ed together. A list containing mutually exclusive conditions on the same feature — e.g. `rsi14 >= 70` alongside `rsi14 <= 41` — can never fire, which silently produces a model that never signals in the app or in TradingView. This has happened. If you want alternatives, express them as a band that can actually hold (`ret_1m_bps < 2` with `ret_1m_bps > -2`), or scope the condition so it isn't self-contradictory. Sanity-check each list against real bars: if it fires zero times across the analyzed window, say so in `summary` rather than shipping it silently.
 
 If there are no training examples, say so explicitly in the summary and derive rules from the regression alone; `confidence` must be `low`. With few examples, still lean `low` or `medium` and say why. Never invent a finding the numbers don't support.
@@ -78,7 +80,26 @@ Insert ONE new row into `entry_models` with all of:
 
 Leave `generated_at` to its default. This table is append-only — always insert, never update.
 
-=== PART 3: RECORD WHAT YOU FOUND ===
+=== PART 3: REVIEW THE TRADES ===
+
+Query `journal_entries` — the trader's log of what they actually traded, which is a different question from what they should have traded. Review the most recent 60 rows (or all of them, if fewer). Follow the spec's "Reviewing the journal" section for what to look for and what not to claim.
+
+Upsert into `trade_feedback` with conflict target `user_id`:
+
+- `user_id`: the UUID from Part 0 — required, do not omit
+- `observations`: up to 3 strings, each under 20 words — patterns in the record, each citing a date, count, or figure
+- `strengths`: up to 3 strings, each under 15 words — only what a number actually supports
+- `risks`: up to 3 strings, each under 15 words — habits or leaks, not market predictions
+- `focus`: one sentence, the single most important adjustment for the next session
+- `trades_reviewed`: how many rows you actually read
+- `date_range`: `{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}` covering those rows
+- `generated_at`: current timestamp
+
+This table holds exactly one row, overwritten each run. If `journal_entries` is empty, say so in `observations` and write the row anyway with `trades_reviewed: 0` — an honest empty state is more useful than a stale critique left in place.
+
+Keep this strictly separate from Part 2: journal performance must not feed back into the entry rules. Describe what the record shows; never prescribe position sizing or anything that reads as financial advice.
+
+=== PART 4: RECORD WHAT YOU FOUND ===
 
 For each training example that materially informed the rules, write your findings back to that row's `analysis_notes` via an `update` on its `id` (no `user_id` needed on an update — the row already has one). Note which features actually distinguished it, whether it agreed with others of its `strategy`, and anything that makes it an outlier.
 

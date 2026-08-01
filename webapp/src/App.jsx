@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from "react";
-import { createChart, CandlestickSeries, createSeriesMarkers } from "lightweight-charts";
+import { createChart, CandlestickSeries, BaselineSeries, createSeriesMarkers } from "lightweight-charts";
 import { supabase } from "./supabaseClient.js";
 
 // ---------- supabase helpers ----------
@@ -38,6 +38,60 @@ const T = {
   sans: "'Lato', -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
   display: "'Bebas Neue', 'Arial Narrow', sans-serif",
 };
+
+// ---------- Morning Brief design tokens ----------
+// Imported from the "Dashboard redesign review" Claude Design project
+// (Market Dashboard.dc.html). See docs/design.md for the rules these encode.
+//
+// Deliberately scoped to the Morning Brief rather than folded into `T`: this is
+// a cooler, larger-type, more spacious system than the rest of the app, and a
+// half-applied palette reads worse than a tab that is confidently its own
+// thing. If the other tabs ever adopt it, these names should migrate into `T`.
+const B = {
+  bg: "oklch(0.15 0.008 265)",
+  surface: "oklch(0.19 0.008 265)",
+  sunken: "oklch(0.17 0.008 265)", // inset tiles and footer strips
+  edge: "oklch(0.3 0.008 265)",
+  edgeSoft: "oklch(0.28 0.008 265)", // dividers inside a card
+
+  // one text ramp, used top to bottom: headings -> body -> labels -> disclaimer
+  ink: "oklch(0.95 0.005 260)",
+  body: "oklch(0.92 0.005 260)",
+  muted: "oklch(0.85 0.005 260)",
+  dim: "oklch(0.6 0.01 260)",
+  faint: "oklch(0.55 0.01 260)",
+  ghost: "oklch(0.45 0.008 260)",
+
+  amber: "oklch(0.75 0.15 55)",
+  amberDim: "oklch(0.68 0.14 55)",
+  amberBright: "oklch(0.78 0.14 55)",
+  green: "oklch(0.75 0.16 155)",
+  greenText: "oklch(0.78 0.16 155)",
+  red: "oklch(0.72 0.18 25)",
+  redDeep: "oklch(0.62 0.18 25)",
+  blue: "oklch(0.78 0.1 235)", // tickers
+  // The source's category dots, kept for reference — the timeline rail uses
+  // emoji markers instead (docs/design.md, deviation 1). Unused in code.
+  blueDot: "oklch(0.65 0.1 235)",
+  purple: "oklch(0.72 0.11 300)",
+
+  todayBg: "oklch(0.2 0.014 55)",
+  todayEdge: "oklch(0.5 0.11 55 / 0.5)",
+  todayGlow: "0 16px 40px -16px oklch(0.6 0.14 55 / 0.3)",
+
+  sans: "'Inter', -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
+  mono: "'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace",
+};
+
+// The design's one recurring label treatment: mono, small, wide-tracked, above
+// the thing it names. Every section header and stat label in the brief is this.
+const eyebrow = (color = B.faint, size = 10.5) => ({
+  fontFamily: B.mono,
+  fontSize: size,
+  fontWeight: 600,
+  letterSpacing: "0.08em",
+  color,
+});
 
 // Smaug wordmark, background keyed to transparent
 const WORDMARK = "data:image/webp;base64,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";
@@ -234,207 +288,317 @@ const inputStyle = {
   boxSizing: "border-box",
 };
 
-function ImpactEmoji({ impact }) {
-  const isRed = impact === "high";
-  return (
-    <span
-      style={{
-        fontSize: 13,
-        lineHeight: 1,
-        display: "inline-block",
-        flexShrink: 0,
-        filter: isRed
-          ? "hue-rotate(-50deg) saturate(2.2) brightness(0.95)"
-          : "none",
-      }}
-      title={isRed ? "red folder — high impact" : impact}
-    >
-      📁
-    </span>
-  );
-}
-
 // ---------- week calendar ----------
 const isSameDay = (a, b) =>
   a.getFullYear() === b.getFullYear() &&
   a.getMonth() === b.getMonth() &&
   a.getDate() === b.getDate();
 
+// Flattens one day into a single ordered timeline instead of the three
+// separately-bordered groups this used to render: pre-market earnings, then
+// the session's econ prints, then after-close earnings. Same ordering as
+// before — it's chronological in spirit even though only econ rows carry a
+// clock time — but expressed as one sequence, which is what lets the dot rail
+// in TimelineItem read as a day unfolding.
+function dayTimeline(econEvents, earnRows, label) {
+  const dayEcon = econEvents.filter((e) => e.day === label);
+  const dayEarn = earnRows.filter((e) => e.day === label);
+  const at = (t) => dayEarn.filter((e) => (e.time || "").toUpperCase() === t);
+  const bmo = at("BMO");
+  const amc = at("AMC");
+  const other = dayEarn.filter((e) => !bmo.includes(e) && !amc.includes(e));
+
+  const asEarnings = (e) => ({
+    emoji: "💸",
+    hot: false,
+    ticker: e.ticker,
+    name: e.company || "",
+    weight: 450,
+    tag: e.time,
+    time: "",
+    sub: "",
+    title: e.note || e.company || "",
+  });
+  // The folder is the Forex Factory convention the trader already reads — a
+  // red folder is a high-impact print. Kept over the design's uniform dot
+  // because it encodes impact at a glance without a second label.
+  const asEcon = (e) => ({
+    emoji: "📁",
+    hot: e.impact === "high",
+    ticker: "",
+    name: e.event,
+    weight: 600,
+    tag: "",
+    time: e.time_et || "",
+    sub: [e.forecast && `f ${e.forecast}`, e.previous && `p ${e.previous}`]
+      .filter(Boolean)
+      .join(" · "),
+    title: e.event,
+  });
+
+  return [
+    ...bmo.map(asEarnings),
+    ...dayEcon.map(asEcon),
+    ...amc.map(asEarnings),
+    ...other.map(asEarnings),
+  ];
+}
+
+// The design's core list motif: a dot rail down the left with a hairline
+// joining consecutive events, dropped on the last item so the rail ends clean.
+function TimelineItem({ item, last }) {
+  // Earnings names truncate so they stay on the ticker's line (the column is
+  // narrow, and keeping the two inline is the point). Econ event names have no
+  // ticker to sit beside and are often long, so they wrap instead of clipping.
+  const nameStyle = item.ticker
+    ? {
+        flex: 1,
+        minWidth: 0,
+        overflow: "hidden",
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }
+    : { flex: 1, minWidth: 0 };
+
+  return (
+    <div style={{ display: "flex", gap: 10, padding: "8px 0" }}>
+      {/* the emoji is the rail marker, in place of the design's colored dot —
+          fixed-width so the hairline below it still centers under every row */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          width: 16,
+          flexShrink: 0,
+          paddingTop: 2,
+        }}
+      >
+        <span
+          title={item.hot ? "red folder — high impact" : undefined}
+          style={{
+            fontSize: 13,
+            lineHeight: 1.2,
+            filter: item.hot
+              ? "hue-rotate(-50deg) saturate(2.2) brightness(0.95)"
+              : "none",
+          }}
+        >
+          {item.emoji}
+        </span>
+        {!last && (
+          <span
+            style={{ width: 1, flex: 1, background: B.edge, marginTop: 4 }}
+          />
+        )}
+      </div>
+      <div style={{ minWidth: 0, flex: 1 }}>
+        <div
+          title={item.title}
+          style={{ display: "flex", alignItems: "baseline", gap: 7 }}
+        >
+          {item.ticker && (
+            <span
+              style={{
+                fontFamily: B.mono,
+                fontSize: 13.5,
+                fontWeight: 700,
+                color: B.blue,
+                flexShrink: 0,
+              }}
+            >
+              {item.ticker}
+            </span>
+          )}
+          {item.name && (
+            <span
+              style={{
+                fontSize: 13.5,
+                fontWeight: item.weight,
+                lineHeight: 1.3,
+                color: B.body,
+                ...nameStyle,
+              }}
+            >
+              {item.name}
+            </span>
+          )}
+          {item.tag && (
+            <span
+              style={{
+                marginLeft: "auto",
+                fontFamily: B.mono,
+                fontSize: 10.5,
+                letterSpacing: "0.04em",
+                color: B.faint,
+                flexShrink: 0,
+              }}
+            >
+              {item.tag}
+            </span>
+          )}
+        </div>
+        {(item.time || item.sub) && (
+          <div
+            style={{
+              display: "flex",
+              alignItems: "baseline",
+              gap: 7,
+              marginTop: 2,
+            }}
+          >
+            {item.time && (
+              <span
+                style={{ fontFamily: B.mono, fontSize: 11.5, color: B.dim }}
+              >
+                {item.time}
+              </span>
+            )}
+            {item.sub && (
+              <span
+                style={{ fontFamily: B.mono, fontSize: 11.5, color: B.faint }}
+              >
+                {item.sub}
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function WeekCalendar({ econ, earnings, lastRun }) {
   const week = tradingWeek();
   const econEvents = (econ && econ.events) || [];
   const earnRows = (earnings && earnings.earnings) || [];
   const nothingYet = !econ && !earnings;
+  // date, not just time: a brief that stopped refreshing days ago used to look
+  // identical to one written this morning
+  const stale = lastRun && !isSameDay(lastRun, new Date());
 
   return (
-    <div
-      style={{
-        background: T.panel,
-        border: `1px solid ${T.panelEdge}`,
-        borderRadius: 10,
-        overflow: "hidden",
-      }}
-    >
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
       <div
         style={{
           display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
+          alignItems: "flex-end",
           justifyContent: "space-between",
-          gap: 10,
-          padding: "10px 14px",
-          borderBottom: `1px solid ${T.panelEdge}`,
+          flexWrap: "wrap",
+          gap: 12,
+          paddingBottom: 18,
+          borderBottom: `1px solid ${B.edge}`,
         }}
       >
-        <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
-          <span style={{ fontSize: 16, fontWeight: 600, color: T.ink }}>
-            {monthYearText()}
-          </span>
-        </div>
-        {lastRun && (
-          // date, not just time: a brief that stopped refreshing days ago used
-          // to look identical to one written this morning
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div
+            style={{ ...eyebrow(B.amberDim, 11.5), letterSpacing: "0.14em" }}
+          >
+            WEEKLY MARKET CALENDAR
+          </div>
           <div
             style={{
-              fontFamily: T.mono,
-              fontSize: 12,
-              color: isSameDay(lastRun, new Date()) ? T.faint : T.amber,
+              fontSize: 36,
+              fontWeight: 800,
+              letterSpacing: "-0.02em",
+              lineHeight: 1,
+              color: B.ink,
             }}
           >
-            Last run{" "}
-            {lastRun.toLocaleDateString("en-US", { month: "short", day: "numeric" })}
-            {", "}
-            {lastRun.toLocaleTimeString("en-US", { hour12: false })} ET
+            {monthYearText()}
+          </div>
+        </div>
+        {lastRun && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "flex-end",
+              gap: 6,
+            }}
+          >
+            <div
+              style={{
+                ...eyebrow(stale ? B.amber : B.dim, 11.5),
+                fontWeight: 400,
+                letterSpacing: "0.06em",
+              }}
+            >
+              LAST RUN
+            </div>
+            <div
+              style={{
+                fontFamily: B.mono,
+                fontSize: 15,
+                fontWeight: 500,
+                color: stale ? B.amber : B.muted,
+              }}
+            >
+              {lastRun.toLocaleDateString("en-US", {
+                month: "short",
+                day: "numeric",
+              })}
+              {", "}
+              {lastRun.toLocaleTimeString("en-US", { hour12: false })} ET
+            </div>
           </div>
         )}
       </div>
 
       {nothingYet ? (
-        <div
-          style={{
-            padding: 14,
-            color: T.faint,
-            fontFamily: T.mono,
-            fontSize: 12,
-          }}
-        >
+        <div style={{ fontFamily: B.mono, fontSize: 12, color: B.faint }}>
           Awaiting run
         </div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
+        <div style={{ overflowX: "auto", paddingBottom: 4 }}>
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "repeat(5, minmax(195px, 1fr))",
-              minWidth: 975,
+              gridTemplateColumns: "repeat(5, minmax(210px, 1fr))",
+              gap: 18,
+              minWidth: 1060,
             }}
           >
-            {week.map((day, i) => {
+            {week.map((day) => {
               const today = isToday(day.date);
-              const dayEcon = econEvents.filter((e) => e.day === day.label);
-              const dayEarn = earnRows.filter((e) => e.day === day.label);
-              const bmoEarn = dayEarn.filter(
-                (e) => (e.time || "").toUpperCase() === "BMO"
-              );
-              const amcEarn = dayEarn.filter(
-                (e) => (e.time || "").toUpperCase() === "AMC"
-              );
-              const otherEarn = dayEarn.filter(
-                (e) => !bmoEarn.includes(e) && !amcEarn.includes(e)
-              );
-              const earnRow = (e, j) => (
-                <div
-                  key={j}
-                  title={e.note || e.company}
-                  style={{ display: "flex", gap: 6, alignItems: "baseline" }}
-                >
-                  <span style={{ fontSize: 13, lineHeight: 1.4, flexShrink: 0 }}>
-                    💸
-                  </span>
-                  <span
-                    style={{
-                      fontSize: 13,
-                      fontWeight: 700,
-                      color: T.blue,
-                      flexShrink: 0,
-                    }}
-                  >
-                    {e.ticker}
-                  </span>
-                  {e.company && (
-                    // truncates rather than wrapping — the day column is narrow,
-                    // and a second line is exactly what this row is avoiding.
-                    // The full name stays available via the title attribute.
-                    <span
-                      style={{
-                        fontSize: 12,
-                        color: T.dim,
-                        flex: 1,
-                        minWidth: 0,
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                        whiteSpace: "nowrap",
-                      }}
-                    >
-                      {e.company}
-                    </span>
-                  )}
-                  <span style={{ fontSize: 12, color: T.faint, flexShrink: 0 }}>
-                    {e.time}
-                  </span>
-                </div>
-              );
-              const earnGroup = (rows, { divider = true } = {}) =>
-                rows.length > 0 && (
-                  <div
-                    style={{
-                      marginTop: divider ? 10 : 0,
-                      paddingTop: divider ? 8 : 0,
-                      borderTop: divider ? `1px dashed ${T.panelEdge}` : "none",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 5,
-                    }}
-                  >
-                    {rows.map(earnRow)}
-                  </div>
-                );
+              const items = dayTimeline(econEvents, earnRows, day.label);
               return (
                 <div
                   key={day.label}
                   style={{
-                    borderLeft: i === 0 ? "none" : `1px solid ${T.panelEdge}`,
-                    background: today ? "rgba(224,123,42,0.06)" : "transparent",
+                    background: today ? B.todayBg : B.surface,
+                    border: `1px solid ${today ? B.todayEdge : B.edge}`,
+                    borderRadius: 16,
+                    boxShadow: today ? B.todayGlow : "none",
                     display: "flex",
                     flexDirection: "column",
-                    height: 230,
                   }}
                 >
                   <div
                     style={{
-                      padding: "10px 12px",
-                      borderBottom: `1px solid ${T.panelEdge}`,
                       display: "flex",
-                      alignItems: "baseline",
-                      gap: 6,
-                      borderTop: today
-                        ? `2px solid ${T.amber}`
-                        : "2px solid transparent",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "10px 16px",
+                      borderBottom: `1px solid ${
+                        today ? "oklch(0.45 0.1 55 / 0.35)" : B.edgeSoft
+                      }`,
                     }}
                   >
                     <span
                       style={{
-                        fontSize: 13,
-                        color: today ? T.amber : T.dim,
-                        fontWeight: today ? 700 : 400,
+                        ...eyebrow(today ? B.amberBright : B.faint, 11),
+                        letterSpacing: "0.1em",
                       }}
                     >
                       {day.label.toUpperCase()}
                     </span>
                     <span
                       style={{
-                        fontSize: 13,
-                        color: today ? T.ink : T.faint,
+                        fontSize: 18,
+                        fontWeight: 800,
+                        letterSpacing: "-0.02em",
+                        color: today ? "oklch(0.97 0.01 55)" : B.ink,
                       }}
                     >
                       {day.date.getDate()}
@@ -443,8 +607,14 @@ function WeekCalendar({ econ, earnings, lastRun }) {
                       <span
                         style={{
                           marginLeft: "auto",
-                          fontSize: 13,
-                          color: T.amber,
+                          fontFamily: B.mono,
+                          fontSize: 10,
+                          fontWeight: 700,
+                          letterSpacing: "0.1em",
+                          color: "oklch(0.16 0.01 55)",
+                          background: B.amber,
+                          padding: "3px 8px",
+                          borderRadius: 20,
                         }}
                       >
                         TODAY
@@ -452,91 +622,39 @@ function WeekCalendar({ econ, earnings, lastRun }) {
                     )}
                   </div>
 
-                  <div style={{ padding: "10px 12px", flex: 1, overflowY: "auto" }}>
-                    {earnGroup(bmoEarn, { divider: false })}
-
-                    {econ && dayEcon.length === 0 && (
+                  <div
+                    style={{
+                      padding: "4px 18px 14px",
+                      display: "flex",
+                      flexDirection: "column",
+                      flex: 1,
+                      // the design lets cards grow to the tallest day; this
+                      // caps a pathological earnings day rather than pushing
+                      // the sentiment panels off-screen
+                      maxHeight: 340,
+                      overflowY: "auto",
+                    }}
+                  >
+                    {items.length === 0 ? (
                       <div
                         style={{
-                          fontSize: 13,
-                          color: T.faint,
-                          marginTop: bmoEarn.length > 0 ? 10 : 0,
-                          paddingTop: bmoEarn.length > 0 ? 8 : 0,
-                          borderTop:
-                            bmoEarn.length > 0
-                              ? `1px dashed ${T.panelEdge}`
-                              : "none",
+                          fontFamily: B.mono,
+                          fontSize: 11.5,
+                          color: B.faint,
+                          padding: "10px 0",
                         }}
                       >
                         no events
                       </div>
+                    ) : (
+                      items.map((it, j) => (
+                        <TimelineItem
+                          key={j}
+                          item={it}
+                          last={j === items.length - 1}
+                        />
+                      ))
                     )}
-                    <div
-                      style={{
-                        display: "flex",
-                        flexDirection: "column",
-                        gap: 8,
-                        marginTop: bmoEarn.length > 0 && dayEcon.length > 0 ? 10 : 0,
-                        paddingTop: bmoEarn.length > 0 && dayEcon.length > 0 ? 8 : 0,
-                        borderTop:
-                          bmoEarn.length > 0 && dayEcon.length > 0
-                            ? `1px dashed ${T.panelEdge}`
-                            : "none",
-                      }}
-                    >
-                      {dayEcon.map((e, j) => (
-                        <div key={j} style={{ display: "flex", gap: 7 }}>
-                          <ImpactEmoji impact={e.impact} />
-                          <div style={{ minWidth: 0 }}>
-                            <div
-                              style={{
-                                display: "flex",
-                                alignItems: "baseline",
-                                gap: 6,
-                                flexWrap: "wrap",
-                              }}
-                            >
-                              <span
-                                style={{
-                                  fontSize: 13,
-                                  fontWeight: 700,
-                                  color: T.amber,
-                                  flexShrink: 0,
-                                }}
-                              >
-                                {e.time_et}
-                              </span>
-                              <span
-                                style={{
-                                  fontSize: 13,
-                                  color: T.ink,
-                                  lineHeight: 1.3,
-                                }}
-                              >
-                                {e.event}
-                              </span>
-                            </div>
-                            {(e.forecast || e.previous) && (
-                              <div
-                                style={{
-                                  fontSize: 13,
-                                  color: T.faint,
-                                }}
-                              >
-                                {e.forecast && `f ${e.forecast}`}
-                                {e.forecast && e.previous && " · "}
-                                {e.previous && `p ${e.previous}`}
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-
-                    {earnGroup(amcEarn)}
-                    {earnGroup(otherEarn, {
-                      divider: bmoEarn.length + dayEcon.length + amcEarn.length > 0,
-                    })}
                   </div>
                 </div>
               );
@@ -544,46 +662,6 @@ function WeekCalendar({ econ, earnings, lastRun }) {
           </div>
         </div>
       )}
-    </div>
-  );
-}
-
-// ---------- generic panel ----------
-function Panel({ title, hasData, children }) {
-  return (
-    <div
-      style={{
-        background: T.panel,
-        border: `1px solid ${T.panelEdge}`,
-        borderRadius: 10,
-        display: "flex",
-        flexDirection: "column",
-        minHeight: 200,
-        overflow: "hidden",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "10px 14px",
-          borderBottom: `1px solid ${T.panelEdge}`,
-        }}
-      >
-        <span style={{ fontSize: 14, fontWeight: 600, color: T.ink }}>
-          {title}
-        </span>
-      </div>
-      <div style={{ padding: 14, flex: 1, fontSize: 13 }}>
-        {hasData ? (
-          children
-        ) : (
-          <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 12 }}>
-            Awaiting run
-          </div>
-        )}
-      </div>
     </div>
   );
 }
@@ -729,146 +807,1164 @@ function CopyPasteAI({ prompt, onSubmit, onCancel, showPromptBox = true }) {
   );
 }
 
-function SentimentBody({ data }) {
-  const toneColor =
-    data.tone === "bullish"
-      ? T.green
-      : data.tone === "bearish"
-      ? T.red
-      : T.amber;
-  const stat = (label, value) => (
-    <div style={{ flex: "1 1 45%", minWidth: 120 }}>
-      <div
-        style={{
-          fontFamily: T.mono,
-          fontSize: 10,
-          color: T.faint,
-          letterSpacing: "0.1em",
-        }}
-      >
-        {label}
-      </div>
-      <div
-        style={{ fontFamily: T.mono, fontSize: 13, color: T.ink, marginTop: 2 }}
-      >
-        {value || "—"}
-      </div>
-    </div>
-  );
+// A brief panel: a rounded card whose header sits inside the padded body,
+// unlike the app's other panels which use a bordered header strip. `flush`
+// turns the body padding off for panels that bleed content to the edges (the
+// bull/bear split), leaving them to pad their own sections.
+function BriefPanel({ title, right, hasData, flush = false, children }) {
   return (
-    <div>
+    <div
+      style={{
+        background: B.surface,
+        border: `1px solid ${B.edge}`,
+        borderRadius: 16,
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
       <div
         style={{
-          display: "inline-block",
-          fontFamily: T.mono,
-          fontSize: 11,
-          letterSpacing: "0.14em",
-          color: toneColor,
-          border: `1px solid ${toneColor}`,
-          borderRadius: 5,
-          padding: "2px 10px",
-          marginBottom: 12,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          padding: flush ? "28px 30px 0" : "28px 30px 0",
         }}
       >
-        {(data.tone || "neutral").toUpperCase()}
+        <div style={{ fontSize: 17, fontWeight: 700, color: B.ink }}>
+          {title}
+        </div>
+        {right}
       </div>
-      <div
-        style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 12 }}
-      >
-        {stat("ES FUTURES", data.futures)}
-        {stat("VIX", data.vix)}
-        {stat("FEAR / GREED", data.fear_greed)}
-        {stat("OVERNIGHT", data.overnight)}
-      </div>
-      <div style={{ color: T.dim, lineHeight: 1.5 }}>{data.summary}</div>
-    </div>
-  );
-}
-
-function CasesBody({ data }) {
-  const col = (title, points, color) => (
-    <div style={{ flex: 1, minWidth: 180 }}>
-      <div
-        style={{
-          fontFamily: T.mono,
-          fontSize: 11,
-          letterSpacing: "0.14em",
-          color,
-          marginBottom: 8,
-        }}
-      >
-        {title}
-      </div>
-      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-        {(points || []).map((p, i) => (
-          <div key={i} style={{ display: "flex", gap: 8 }}>
-            <span style={{ color, flexShrink: 0 }}>▸</span>
-            <span style={{ color: T.ink, lineHeight: 1.4 }}>{p}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-  return (
-    <div>
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 20 }}>
-        {col("BULL", data.bull, T.green)}
-        {col("BEAR", data.bear, T.red)}
-      </div>
-      {data.watch && (
+      {hasData ? (
         <div
           style={{
-            marginTop: 14,
-            paddingTop: 12,
-            borderTop: `1px solid ${T.panelEdge}`,
-            fontSize: 12,
+            display: "flex",
+            flexDirection: "column",
+            flex: 1,
+            ...(flush ? { marginTop: 20 } : { padding: "24px 30px 28px", gap: 24 }),
           }}
         >
-          <span
-            style={{
-              fontFamily: T.mono,
-              fontSize: 10,
-              color: T.amber,
-              letterSpacing: "0.12em",
-            }}
-          >
-            WATCH ·{" "}
-          </span>
-          <span style={{ color: T.dim }}>{data.watch}</span>
+          {children}
+        </div>
+      ) : (
+        <div
+          style={{
+            padding: "20px 30px 28px",
+            fontFamily: B.mono,
+            fontSize: 12,
+            color: B.faint,
+          }}
+        >
+          Awaiting run
         </div>
       )}
     </div>
   );
 }
 
-// ---------- Morning Brief tab ----------
-function MorningBriefTab({ panels, lastRun }) {
+const TONE = {
+  bullish: { dot: B.green, text: B.greenText, wash: "oklch(0.72 0.15 155 / 0.14)" },
+  bearish: { dot: B.red, text: "oklch(0.75 0.18 25)", wash: "oklch(0.68 0.19 25 / 0.14)" },
+  neutral: { dot: B.amber, text: B.amberBright, wash: "oklch(0.72 0.15 55 / 0.14)" },
+};
+
+// The routine writes fear_greed as free text like "39 — Fear" or "62 - Greed".
+// The leading integer is the needle position; anything unparseable just means
+// no gauge, since a needle at a guessed value would be worse than none.
+function fearGreedValue(text) {
+  const n = parseInt(String(text || "").trim(), 10);
+  return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
+}
+
+function TonePill({ tone }) {
+  const c = TONE[tone] || TONE.neutral;
   return (
-    <div>
-      <WeekCalendar econ={panels.econ} earnings={panels.earnings} lastRun={lastRun} />
+    <div
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 7,
+        padding: "6px 15px",
+        borderRadius: 20,
+        background: c.wash,
+        flexShrink: 0,
+      }}
+    >
+      <span
+        style={{
+          width: 6,
+          height: 6,
+          borderRadius: "50%",
+          background: c.dot,
+        }}
+      />
+      <span
+        style={{
+          fontFamily: B.mono,
+          fontSize: 12,
+          fontWeight: 700,
+          letterSpacing: "0.08em",
+          color: c.text,
+        }}
+      >
+        {(tone || "neutral").toUpperCase()}
+      </span>
+    </div>
+  );
+}
+
+function SentimentBody({ data }) {
+  const fg = fearGreedValue(data.fear_greed);
+  const tile = (label, value) => (
+    <div
+      style={{
+        background: B.sunken,
+        borderRadius: 10,
+        padding: "14px 16px",
+      }}
+    >
+      <div style={{ ...eyebrow(B.faint), letterSpacing: "0.07em", marginBottom: 6 }}>
+        {label}
+      </div>
+      <div style={{ fontSize: 14.5, lineHeight: 1.5, color: B.body }}>
+        {value || "—"}
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      {fg !== null && (
+        // gradient rail red -> amber -> green with a needle at the value; the
+        // ring around the needle is the card background, so it reads as a
+        // notch cut through the rail rather than a dot sitting on it
+        <div>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "baseline",
+              justifyContent: "space-between",
+              marginBottom: 10,
+            }}
+          >
+            <span
+              style={{ ...eyebrow(B.dim, 11.5), fontWeight: 400, letterSpacing: "0.08em" }}
+            >
+              FEAR &amp; GREED
+            </span>
+            <span style={{ fontSize: 15, fontWeight: 700, color: B.amber }}>
+              {data.fear_greed}
+            </span>
+          </div>
+          <div
+            style={{
+              position: "relative",
+              height: 8,
+              borderRadius: 6,
+              background: `linear-gradient(90deg, ${B.redDeep}, ${B.amber}, ${B.green})`,
+            }}
+          >
+            <div
+              style={{
+                position: "absolute",
+                top: -4,
+                left: `${fg}%`,
+                width: 3,
+                height: 16,
+                borderRadius: 2,
+                background: "oklch(0.97 0.005 260)",
+                boxShadow: `0 0 0 3px ${B.surface}`,
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))",
-          gap: 14,
-          marginTop: 14,
+          gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+          gap: 16,
         }}
       >
-        <Panel title="Market sentiment" hasData={!!panels.sentiment}>
+        {tile("ES FUTURES", data.futures)}
+        {tile("VIX", data.vix)}
+      </div>
+
+      {data.overnight && (
+        <div>
+          <div style={{ ...eyebrow(B.faint), letterSpacing: "0.07em", marginBottom: 8 }}>
+            OVERNIGHT
+          </div>
+          <div style={{ fontSize: 14.5, lineHeight: 1.6, color: "oklch(0.88 0.005 260)" }}>
+            {data.overnight}
+          </div>
+        </div>
+      )}
+
+      {data.summary && (
+        <div
+          style={{
+            fontSize: 14.5,
+            lineHeight: 1.65,
+            color: "oklch(0.75 0.008 260)",
+            paddingTop: 4,
+            borderTop: `1px solid ${B.edgeSoft}`,
+          }}
+        >
+          {data.summary}
+        </div>
+      )}
+    </>
+  );
+}
+
+function CasesBody({ data }) {
+  const side = (label, points, color, wash, divider) => (
+    <div
+      style={{
+        background: wash,
+        padding: "20px 24px 24px",
+        borderRight: divider ? `1px solid ${B.edge}` : "none",
+      }}
+    >
+      <div
+        style={{
+          fontFamily: B.mono,
+          fontSize: 12,
+          fontWeight: 700,
+          letterSpacing: "0.1em",
+          color,
+          marginBottom: 16,
+        }}
+      >
+        {label}
+      </div>
+      {(points || []).map((p, i) => (
+        <div key={i} style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+          <span
+            style={{
+              width: 5,
+              height: 5,
+              borderRadius: "50%",
+              background: color,
+              marginTop: 7,
+              flexShrink: 0,
+            }}
+          />
+          <span style={{ fontSize: 14.5, lineHeight: 1.55, color: B.body }}>
+            {p}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+
+  return (
+    <>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          flex: 1,
+        }}
+      >
+        {side("BULL", data.bull, B.green, "oklch(0.72 0.15 155 / 0.06)", true)}
+        {side("BEAR", data.bear, B.red, "oklch(0.68 0.19 25 / 0.06)", false)}
+      </div>
+      {data.watch && (
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            fontSize: 14,
+            lineHeight: 1.55,
+            padding: "18px 30px",
+            borderTop: `1px solid ${B.edge}`,
+            background: B.sunken,
+          }}
+        >
+          <span
+            style={{
+              fontFamily: B.mono,
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: "0.08em",
+              color: B.amber,
+              whiteSpace: "nowrap",
+            }}
+          >
+            WATCH
+          </span>
+          <span style={{ color: B.muted }}>{data.watch}</span>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ---------- Morning Brief tab ----------
+// Styled from the imported Claude Design system (`B` tokens, docs/design.md)
+// rather than the app-wide `T` — see the note on `B` for why the two coexist.
+function MorningBriefTab({ panels, lastRun }) {
+  return (
+    <div
+      style={{
+        fontFamily: B.sans,
+        color: B.ink,
+        display: "flex",
+        flexDirection: "column",
+        gap: 28,
+      }}
+    >
+      <WeekCalendar
+        econ={panels.econ}
+        earnings={panels.earnings}
+        lastRun={lastRun}
+      />
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
+          gap: 20,
+          alignItems: "stretch",
+        }}
+      >
+        <BriefPanel
+          title="Market sentiment"
+          hasData={!!panels.sentiment}
+          right={
+            panels.sentiment && <TonePill tone={panels.sentiment.tone} />
+          }
+        >
           {panels.sentiment && <SentimentBody data={panels.sentiment} />}
-        </Panel>
-        <Panel title="Bull vs. bear — SPY" hasData={!!panels.cases}>
+        </BriefPanel>
+        <BriefPanel title="Bull vs. bear — SPY" hasData={!!panels.cases} flush>
           {panels.cases && <CasesBody data={panels.cases} />}
-        </Panel>
+        </BriefPanel>
       </div>
 
       <div
-        style={{ marginTop: 16, fontSize: 11, color: T.faint, lineHeight: 1.5 }}
+        style={{
+          textAlign: "center",
+          fontSize: 12.5,
+          color: B.ghost,
+          padding: "4px 0",
+          lineHeight: 1.5,
+        }}
       >
         Built from whatever you paste in from claude.ai — verify anything
         actionable against your platform before trading. Informational only,
         not financial advice.
+      </div>
+    </div>
+  );
+}
+
+// ---------- Dashboard tab ----------
+// Styled with the `B` design tokens (docs/design.md), not `T` — the reference
+// screenshots this was built from are the same cool dark-surface family, and
+// the warm Apex Forge palette would have looked nothing like them.
+
+// Same parse the Journal's own stats row uses, so the two can never disagree
+// about what a `result` string is worth. Returns null for anything unparseable
+// rather than 0 — a blank result is "not recorded", not a scratch.
+function tradePL(result) {
+  const n = parseFloat(String(result).replace(/[$,+]/g, ""));
+  return Number.isFinite(n) ? n : null;
+}
+
+const usd = (n, { sign = false, cents = true } = {}) => {
+  const s = Math.abs(n).toLocaleString("en-US", {
+    minimumFractionDigits: cents ? 2 : 0,
+    maximumFractionDigits: cents ? 2 : 0,
+  });
+  const lead = n < 0 ? "-" : sign && n > 0 ? "+" : "";
+  return `${lead}$${s}`;
+};
+
+const ymd = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate()
+  ).padStart(2, "0")}`;
+
+const RANGES = ["All", "YTD", "90D", "30D", "MTD", "Custom"];
+
+// Dates are compared as YYYY-MM-DD strings throughout: `journal_entries.date`
+// is a DATE (no time, no zone), so parsing it into a JS Date only introduces
+// a timezone bug waiting to shift a trade into the previous day.
+function rangeBounds(preset, custom) {
+  const now = etNow();
+  const today = ymd(now);
+  const back = (days) => {
+    const d = new Date(now);
+    d.setDate(d.getDate() - days);
+    return ymd(d);
+  };
+  switch (preset) {
+    case "YTD":
+      return { from: `${now.getFullYear()}-01-01`, to: today };
+    case "MTD":
+      return { from: ymd(new Date(now.getFullYear(), now.getMonth(), 1)), to: today };
+    case "90D":
+      return { from: back(89), to: today };
+    case "30D":
+      return { from: back(29), to: today };
+    case "Custom":
+      return { from: custom.from || null, to: custom.to || null };
+    default:
+      return { from: null, to: null };
+  }
+}
+
+const rangeLabel = (preset, { from, to }) => {
+  if (preset === "All") return "all time";
+  if (preset === "Custom") return from && to ? `${from} to ${to}` : "a custom range";
+  return { YTD: "year to date", MTD: "month to date", "90D": "the last 90 days", "30D": "the last 30 days" }[preset];
+};
+
+// Per-day rollup plus the headline numbers. Trades with an unparseable result
+// are excluded from every money figure and counted separately, so a blank
+// result can never silently drag an average toward zero.
+function computeStats(entries, { from, to }) {
+  const used = [];
+  let skipped = 0;
+  for (const e of entries) {
+    if (from && e.date < from) continue;
+    if (to && e.date > to) continue;
+    const pl = tradePL(e.result);
+    if (pl === null) {
+      skipped += 1;
+      continue;
+    }
+    used.push({ ...e, pl });
+  }
+
+  const byDay = new Map();
+  for (const t of used) {
+    const d = byDay.get(t.date) || { pl: 0, n: 0 };
+    d.pl += t.pl;
+    d.n += 1;
+    byDay.set(t.date, d);
+  }
+
+  const wins = used.filter((t) => t.pl > 0).map((t) => t.pl);
+  const losses = used.filter((t) => t.pl < 0).map((t) => t.pl);
+  const sum = (a) => a.reduce((x, y) => x + y, 0);
+  const grossLoss = Math.abs(sum(losses));
+
+  let running = 0;
+  const curve = [...byDay.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([date, d]) => {
+      running += d.pl;
+      return { time: date, value: Number(running.toFixed(2)) };
+    });
+
+  return {
+    trades: used.length,
+    skipped,
+    net: sum(wins) + sum(losses),
+    avgWin: wins.length ? sum(wins) / wins.length : null,
+    avgLoss: losses.length ? sum(losses) / losses.length : null,
+    winRate: wins.length + losses.length ? wins.length / (wins.length + losses.length) : null,
+    profitFactor: grossLoss ? sum(wins) / grossLoss : null,
+    tradingDays: byDay.size,
+    byDay,
+    curve,
+  };
+}
+
+function KpiCard({ label, value, tone = "neutral" }) {
+  const color =
+    tone === "pos" ? B.greenText : tone === "neg" ? "oklch(0.75 0.18 25)" : B.ink;
+  return (
+    <div
+      style={{
+        background: B.surface,
+        border: `1px solid ${B.edge}`,
+        borderRadius: 14,
+        padding: "18px 22px 20px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+        minWidth: 0,
+      }}
+    >
+      <div style={{ fontSize: 13, color: B.dim, whiteSpace: "nowrap" }}>{label}</div>
+      <div
+        style={{
+          fontSize: 28,
+          fontWeight: 700,
+          letterSpacing: "-0.02em",
+          color,
+          lineHeight: 1.1,
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+const signTone = (n) => (n == null ? "neutral" : n > 0 ? "pos" : n < 0 ? "neg" : "neutral");
+
+function KpiGrid({ s }) {
+  return (
+    <div
+      style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+        gap: 16,
+      }}
+    >
+      <KpiCard label="Net P&L" value={usd(s.net, { sign: true })} tone={signTone(s.net)} />
+      <KpiCard
+        label="Average Winning Trade"
+        value={s.avgWin == null ? "—" : usd(s.avgWin)}
+        tone={s.avgWin == null ? "neutral" : "pos"}
+      />
+      <KpiCard
+        label="Average Losing Trade"
+        value={s.avgLoss == null ? "—" : usd(s.avgLoss)}
+        tone={s.avgLoss == null ? "neutral" : "neg"}
+      />
+      <KpiCard
+        label="Win Rate"
+        value={s.winRate == null ? "—" : `${(s.winRate * 100).toFixed(0)}%`}
+      />
+      <KpiCard
+        label="Profit Factor"
+        value={s.profitFactor == null ? "—" : s.profitFactor.toFixed(2)}
+        tone={s.profitFactor == null ? "neutral" : s.profitFactor >= 1 ? "pos" : "neg"}
+      />
+    </div>
+  );
+}
+
+// ---------- P&L calendar ----------
+const DOW = ["SUN", "MON", "TUE", "WED", "THR", "FRI", "SAT"];
+
+// Whole weeks (Sun-Sat) covering the month, so the grid is always rectangular
+// and the trailing/leading days of adjacent months render as dimmed context.
+function monthWeeks(cursor) {
+  const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
+  const start = new Date(first);
+  start.setDate(1 - first.getDay());
+  const weeks = [];
+  const d = new Date(start);
+  for (let w = 0; w < 6; w++) {
+    const week = [];
+    for (let i = 0; i < 7; i++) {
+      week.push(new Date(d));
+      d.setDate(d.getDate() + 1);
+    }
+    weeks.push(week);
+    // stop once we've passed the month, rather than always drawing 6 rows
+    if (d.getMonth() !== cursor.getMonth() && d > new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0)) break;
+  }
+  return weeks;
+}
+
+function PnlCalendar({ byDay, bounds }) {
+  // Opens on the most recent month that actually has trades, not on today —
+  // logging lags the market, and landing on an empty August when every trade
+  // is in July reads as "the dashboard is broken".
+  const [cursor, setCursor] = useState(() => {
+    const keys = [...byDay.keys()].sort();
+    const latest = keys.length ? new Date(`${keys[keys.length - 1]}T12:00:00`) : etNow();
+    return new Date(latest.getFullYear(), latest.getMonth(), 1);
+  });
+
+  const weeks = monthWeeks(cursor);
+  const inRange = (key) =>
+    (!bounds.from || key >= bounds.from) && (!bounds.to || key <= bounds.to);
+
+  const monthNet = [...byDay.entries()].reduce((acc, [key, d]) => {
+    const dt = new Date(`${key}T12:00:00`);
+    return dt.getFullYear() === cursor.getFullYear() && dt.getMonth() === cursor.getMonth()
+      ? acc + d.pl
+      : acc;
+  }, 0);
+
+  const step = (n) =>
+    setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + n, 1));
+
+  const navBtn = {
+    background: B.sunken,
+    border: `1px solid ${B.edge}`,
+    color: B.muted,
+    borderRadius: 8,
+    width: 30,
+    height: 30,
+    cursor: "pointer",
+    fontFamily: B.mono,
+    fontSize: 13,
+    lineHeight: 1,
+  };
+
+  return (
+    <div
+      style={{
+        background: B.surface,
+        border: `1px solid ${B.edge}`,
+        borderRadius: 16,
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          padding: "18px 22px",
+          borderBottom: `1px solid ${B.edge}`,
+          flexWrap: "wrap",
+        }}
+      >
+        <button
+          onClick={() => {
+            const now = etNow();
+            setCursor(new Date(now.getFullYear(), now.getMonth(), 1));
+          }}
+          style={{ ...navBtn, width: "auto", padding: "0 14px" }}
+        >
+          Today
+        </button>
+        <button onClick={() => step(-1)} style={navBtn} aria-label="Previous month">
+          ‹
+        </button>
+        <button onClick={() => step(1)} style={navBtn} aria-label="Next month">
+          ›
+        </button>
+        <div style={{ fontSize: 17, fontWeight: 700, color: B.ink }}>
+          {cursor.toLocaleDateString("en-US", { month: "long", year: "numeric" })}
+        </div>
+        <div
+          style={{
+            fontFamily: B.mono,
+            fontSize: 15,
+            fontWeight: 600,
+            color: monthNet > 0 ? B.greenText : monthNet < 0 ? "oklch(0.75 0.18 25)" : B.dim,
+          }}
+        >
+          {usd(monthNet, { sign: true })}
+        </div>
+      </div>
+
+      <div style={{ overflowX: "auto" }}>
+        <div style={{ minWidth: 620, padding: 12 }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(7, 1fr) 84px",
+              gap: 6,
+              marginBottom: 6,
+            }}
+          >
+            {DOW.map((d) => (
+              <div
+                key={d}
+                style={{ ...eyebrow(B.faint, 10.5), letterSpacing: "0.1em", textAlign: "center" }}
+              >
+                {d}
+              </div>
+            ))}
+            <div />
+          </div>
+
+          {weeks.map((week, wi) => {
+            const weekDays = week
+              .map((d) => byDay.get(ymd(d)))
+              .filter((x, i) => x && inRange(ymd(week[i])));
+            const weekPl = weekDays.reduce((a, d) => a + d.pl, 0);
+            const weekN = weekDays.reduce((a, d) => a + d.n, 0);
+            return (
+              <div
+                key={wi}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(7, 1fr) 84px",
+                  gap: 6,
+                  marginBottom: 6,
+                }}
+              >
+                {week.map((d) => {
+                  const key = ymd(d);
+                  const cell = inRange(key) ? byDay.get(key) : null;
+                  const otherMonth = d.getMonth() !== cursor.getMonth();
+                  const win = cell && cell.pl > 0;
+                  const loss = cell && cell.pl < 0;
+                  return (
+                    <div
+                      key={key}
+                      style={{
+                        minHeight: 68,
+                        borderRadius: 10,
+                        padding: "8px 10px",
+                        opacity: otherMonth ? 0.35 : 1,
+                        background: win
+                          ? "oklch(0.72 0.15 155 / 0.16)"
+                          : loss
+                          ? "oklch(0.68 0.19 25 / 0.16)"
+                          : B.sunken,
+                        border: `1px solid ${
+                          win
+                            ? "oklch(0.72 0.15 155 / 0.4)"
+                            : loss
+                            ? "oklch(0.68 0.19 25 / 0.4)"
+                            : B.edge
+                        }`,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 4,
+                      }}
+                    >
+                      <div
+                        style={{
+                          fontFamily: B.mono,
+                          fontSize: 12,
+                          color: B.dim,
+                          textAlign: "right",
+                        }}
+                      >
+                        {d.getDate()}
+                      </div>
+                      {cell && (
+                        <>
+                          <div
+                            style={{
+                              fontSize: 14,
+                              fontWeight: 700,
+                              letterSpacing: "-0.01em",
+                              color: win ? B.greenText : "oklch(0.75 0.18 25)",
+                            }}
+                          >
+                            {usd(cell.pl, { sign: true })}
+                          </div>
+                          <div style={{ fontFamily: B.mono, fontSize: 11, color: B.faint }}>
+                            {cell.n} {cell.n === 1 ? "Trade" : "Trades"}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+                <div
+                  style={{
+                    borderRadius: 10,
+                    padding: "8px 10px",
+                    background: "transparent",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 4,
+                    justifyContent: "center",
+                  }}
+                >
+                  {weekN > 0 && (
+                    <>
+                      <div
+                        style={{
+                          fontFamily: B.mono,
+                          fontSize: 13,
+                          fontWeight: 600,
+                          color: weekPl > 0 ? B.greenText : weekPl < 0 ? "oklch(0.75 0.18 25)" : B.dim,
+                        }}
+                      >
+                        {usd(weekPl, { sign: true })}
+                      </div>
+                      <div style={{ fontFamily: B.mono, fontSize: 11, color: B.faint }}>
+                        {weekN} {weekN === 1 ? "Trade" : "Trades"}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- AI feedback panel ----------
+// Renders the `trade_feedback` row the routine writes. Same four-part shape the
+// Journal tab's copy/paste coach flow asks claude.ai for, so either source
+// produces something this can display.
+function FeedbackList({ label, items, color }) {
+  if (!items || items.length === 0) return null;
+  return (
+    <div>
+      <div style={{ ...eyebrow(color, 10.5), letterSpacing: "0.1em", marginBottom: 10 }}>
+        {label}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        {items.map((t, i) => (
+          <div key={i} style={{ display: "flex", gap: 10 }}>
+            <span
+              style={{
+                width: 5,
+                height: 5,
+                borderRadius: "50%",
+                background: color,
+                marginTop: 7,
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ fontSize: 13.5, lineHeight: 1.5, color: B.body }}>{t}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AiFeedbackPanel({ fb }) {
+  const stale = fb && !isSameDay(new Date(fb.generated_at), new Date());
+  return (
+    <div
+      style={{
+        background: B.surface,
+        border: `1px solid ${B.edge}`,
+        borderRadius: 16,
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          padding: "18px 22px",
+          borderBottom: `1px solid ${B.edge}`,
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          gap: 10,
+          flexWrap: "wrap",
+        }}
+      >
+        <div style={{ fontSize: 17, fontWeight: 700, color: B.ink }}>AI Feedback</div>
+        {fb && (
+          <div
+            style={{
+              fontFamily: B.mono,
+              fontSize: 11,
+              color: stale ? B.amber : B.faint,
+            }}
+          >
+            {fb.trades_reviewed} trades ·{" "}
+            {new Date(fb.generated_at).toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+            })}
+          </div>
+        )}
+      </div>
+
+      {!fb ? (
+        <div style={{ padding: 22, fontFamily: B.mono, fontSize: 12, color: B.faint }}>
+          Awaiting run — the daily routine writes this after reviewing the journal.
+        </div>
+      ) : (
+        <div
+          style={{
+            padding: 22,
+            display: "flex",
+            flexDirection: "column",
+            gap: 20,
+            flex: 1,
+          }}
+        >
+          <FeedbackList label="OBSERVATIONS" items={fb.observations} color={B.blue} />
+          <FeedbackList label="STRENGTHS" items={fb.strengths} color={B.green} />
+          <FeedbackList label="RISKS" items={fb.risks} color={B.red} />
+          {fb.focus && (
+            <div
+              style={{
+                marginTop: "auto",
+                background: B.sunken,
+                borderRadius: 10,
+                padding: "14px 16px",
+              }}
+            >
+              <div
+                style={{ ...eyebrow(B.amber, 10.5), letterSpacing: "0.1em", marginBottom: 6 }}
+              >
+                FOCUS
+              </div>
+              <div style={{ fontSize: 13.5, lineHeight: 1.55, color: B.muted }}>
+                {fb.focus}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- cumulative P&L chart ----------
+// sRGB equivalents of the B tokens: lightweight-charts hands these straight to
+// canvas, and canvas gradient stops are the one place oklch can silently fail.
+const CHART = {
+  green: "#42CB80",
+  greenStrong: "rgba(66, 203, 128, 0.45)",
+  greenFaint: "rgba(66, 203, 128, 0.02)",
+  red: "#FF6F69",
+  redStrong: "rgba(255, 111, 105, 0.45)",
+  redFaint: "rgba(255, 111, 105, 0.02)",
+  surface: "#121417",
+  edge: "#2C2E32",
+  dim: "#7D8086",
+};
+
+function EquityChart({ points }) {
+  const holder = useRef(null);
+  const chartRef = useRef(null);
+  const seriesRef = useRef(null);
+
+  useEffect(() => {
+    const container = holder.current;
+    if (!container) return;
+    const chart = createChart(container, {
+      width: container.clientWidth,
+      height: 340,
+      layout: {
+        background: { color: CHART.surface },
+        textColor: CHART.dim,
+        fontFamily: "'IBM Plex Mono', monospace",
+        fontSize: 11,
+      },
+      grid: {
+        vertLines: { visible: false },
+        horzLines: { color: CHART.edge },
+      },
+      rightPriceScale: { borderColor: CHART.edge },
+      timeScale: { borderColor: CHART.edge, fixLeftEdge: true, fixRightEdge: true },
+      crosshair: { mode: 0 },
+      localization: {
+        priceFormatter: (p) =>
+          `${p < 0 ? "-" : ""}$${Math.abs(p).toLocaleString("en-US", {
+            maximumFractionDigits: 0,
+          })}`,
+      },
+    });
+    // Baseline rather than area: the series splits at zero on its own, so the
+    // curve is green while cumulative P&L is in profit and red while it's
+    // underwater, switching mid-segment on the exact crossing rather than
+    // per-day. The `1`/`2` fill stops run outward from the baseline, so the
+    // faint end of each gradient is the one that meets zero.
+    const series = chart.addSeries(BaselineSeries, {
+      baseValue: { type: "price", price: 0 },
+      topLineColor: CHART.green,
+      topFillColor1: CHART.greenStrong,
+      topFillColor2: CHART.greenFaint,
+      bottomLineColor: CHART.red,
+      bottomFillColor1: CHART.redFaint,
+      bottomFillColor2: CHART.redStrong,
+      lineWidth: 2,
+      priceLineVisible: false,
+    });
+    // breakeven reference — the fill already implies it, but a curve that
+    // never crosses zero needs the axis to show how far from it it sits
+    series.createPriceLine({
+      price: 0,
+      color: CHART.edge,
+      lineWidth: 1,
+      lineStyle: 2,
+      axisLabelVisible: false,
+    });
+    chartRef.current = chart;
+    seriesRef.current = series;
+
+    const ro = new ResizeObserver(() => {
+      chart.applyOptions({ width: container.clientWidth });
+    });
+    ro.observe(container);
+    return () => {
+      ro.disconnect();
+      chart.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!seriesRef.current) return;
+    seriesRef.current.setData(points);
+    if (points.length) chartRef.current.timeScale().fitContent();
+  }, [points]);
+
+  return <div ref={holder} style={{ width: "100%" }} />;
+}
+
+// ---------- dashboard ----------
+function DateFilter({ preset, setPreset, custom, setCustom }) {
+  const btn = (active) => ({
+    background: active ? "oklch(0.72 0.15 55 / 0.16)" : B.sunken,
+    border: `1px solid ${active ? B.amber : B.edge}`,
+    color: active ? B.amberBright : B.dim,
+    borderRadius: 8,
+    padding: "7px 14px",
+    fontFamily: B.mono,
+    fontSize: 12,
+    fontWeight: 600,
+    letterSpacing: "0.04em",
+    cursor: "pointer",
+  });
+  const dateInput = {
+    background: B.sunken,
+    border: `1px solid ${B.edge}`,
+    borderRadius: 8,
+    color: B.body,
+    fontFamily: B.mono,
+    fontSize: 12,
+    padding: "6px 10px",
+    outline: "none",
+    colorScheme: "dark",
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <span style={{ ...eyebrow(B.faint, 10.5), letterSpacing: "0.1em", marginRight: 4 }}>
+        RANGE
+      </span>
+      {RANGES.map((r) => (
+        <button key={r} onClick={() => setPreset(r)} style={btn(preset === r)}>
+          {r}
+        </button>
+      ))}
+      {preset === "Custom" && (
+        <>
+          <input
+            type="date"
+            value={custom.from}
+            onChange={(e) => setCustom({ ...custom, from: e.target.value })}
+            style={dateInput}
+          />
+          <span style={{ color: B.faint, fontFamily: B.mono, fontSize: 12 }}>to</span>
+          <input
+            type="date"
+            value={custom.to}
+            onChange={(e) => setCustom({ ...custom, to: e.target.value })}
+            style={dateInput}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+function DashboardTab() {
+  const [entries, setEntries] = useState([]);
+  const [feedback, setFeedback] = useState(null);
+  const [loadState, setLoadState] = useState("loading");
+  const [error, setError] = useState(null);
+  const [preset, setPreset] = useState("All");
+  const [custom, setCustom] = useState({ from: "", to: "" });
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const rows = await fetchAllRows("journal_entries", {
+          select: "date,direction,result,setup",
+          orderBy: "date",
+        });
+        setEntries(rows);
+      } catch (e) {
+        setError(e.message);
+      }
+      // separate from the journal load: missing feedback is an empty state,
+      // not an error, and must not blank out the rest of the dashboard
+      const { data } = await supabase
+        .from("trade_feedback")
+        .select("*")
+        .maybeSingle();
+      if (data) setFeedback(data);
+      setLoadState("ready");
+    })();
+  }, []);
+
+  const bounds = useMemo(() => rangeBounds(preset, custom), [preset, custom]);
+  const s = useMemo(() => computeStats(entries, bounds), [entries, bounds]);
+
+  if (loadState === "loading") {
+    return (
+      <div style={{ fontFamily: B.mono, fontSize: 12, color: B.faint }}>Loading…</div>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        fontFamily: B.sans,
+        color: B.ink,
+        display: "flex",
+        flexDirection: "column",
+        gap: 24,
+      }}
+    >
+      {error && <div style={{ fontSize: 12, color: B.red }}>{error}</div>}
+
+      <DateFilter
+        preset={preset}
+        setPreset={setPreset}
+        custom={custom}
+        setCustom={setCustom}
+      />
+
+      <KpiGrid s={s} />
+
+      {s.skipped > 0 && (
+        <div style={{ fontFamily: B.mono, fontSize: 11, color: B.faint }}>
+          {s.skipped} journal {s.skipped === 1 ? "entry has" : "entries have"} no
+          numeric result and {s.skipped === 1 ? "is" : "are"} excluded from every
+          figure above.
+        </div>
+      )}
+
+      {/* flex rather than grid so the two panels keep a ~3:1 split when there's
+          room and stack cleanly when there isn't — the calendar has a hard
+          minimum width it can't compress below */}
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "stretch" }}>
+        <div style={{ flex: "3 1 640px", minWidth: 0 }}>
+          <PnlCalendar byDay={s.byDay} bounds={bounds} />
+        </div>
+        <div style={{ flex: "1 1 300px", minWidth: 0, display: "flex" }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <AiFeedbackPanel fb={feedback} />
+          </div>
+        </div>
+      </div>
+
+      <div
+        style={{
+          background: B.surface,
+          border: `1px solid ${B.edge}`,
+          borderRadius: 16,
+          overflow: "hidden",
+        }}
+      >
+        <div style={{ padding: "22px 24px 16px", borderBottom: `1px solid ${B.edge}` }}>
+          <div style={{ fontSize: 17, fontWeight: 700, color: B.ink }}>
+            Cumulative P&amp;L
+          </div>
+          <div style={{ fontSize: 13, color: B.dim, marginTop: 4 }}>
+            Showing P&amp;L performance for {rangeLabel(preset, bounds)} — {s.trades}{" "}
+            {s.trades === 1 ? "trade" : "trades"} across {s.tradingDays}{" "}
+            {s.tradingDays === 1 ? "day" : "days"}
+          </div>
+        </div>
+        {s.curve.length ? (
+          <EquityChart points={s.curve} />
+        ) : (
+          <div style={{ padding: 24, fontFamily: B.mono, fontSize: 12, color: B.faint }}>
+            No trades in this range
+          </div>
+        )}
       </div>
     </div>
   );
@@ -3464,17 +4560,31 @@ function rulesHold(features, rules) {
   return rules.every((r) => ruleHolds(features, r));
 }
 
-// Every bar whose conditions hold produces a signal — deliberately no position
-// state, matching the PineScript, which plots a marker on each qualifying bar
-// rather than tracking an open trade.
+// Edge-triggered, matching markers.pine: a signal is emitted on the bar where
+// a rule list BECOMES true, not on every bar it stays true. The rule lists are
+// state predicates ("in an uptrend"), so evaluating them per-bar marked 43% of
+// a session long and 98% exit. Still no position state on either side — this
+// answers "where could you have entered", not "are you in a trade".
+//
+// `bars` is one session, so a condition already true on the first bar of the
+// day fires there. Pine's [1] reaches into the prior session instead; the
+// divergence is one bar at the open and is the same class of known difference
+// as the feature recomputation noted above.
 function deriveSignals(bars, rules) {
   if (!rules) return [];
   const out = [];
+  let prev = { exit: false, long: false, short: false };
   for (const b of bars) {
     const f = b.features;
-    if (rulesHold(f, rules.exit)) out.push({ kind: "exit", bar: b });
-    if (rulesHold(f, rules.long_entry)) out.push({ kind: "long", bar: b });
-    if (rulesHold(f, rules.short_entry)) out.push({ kind: "short", bar: b });
+    const now = {
+      exit: rulesHold(f, rules.exit),
+      long: rulesHold(f, rules.long_entry),
+      short: rulesHold(f, rules.short_entry),
+    };
+    if (now.exit && !prev.exit) out.push({ kind: "exit", bar: b });
+    if (now.long && !prev.long) out.push({ kind: "long", bar: b });
+    if (now.short && !prev.short) out.push({ kind: "short", bar: b });
+    prev = now;
   }
   return out;
 }
@@ -4097,6 +5207,7 @@ function ModelTab() {
 // only ever matches leaves.
 const NAV = [
   { label: "Morning Brief" },
+  { label: "Dashboard" },
   { label: "Journal" },
   { label: "Modeling", children: ["Charts", "Training Data", "Indicator"] },
   { label: "Resources" },
@@ -4155,43 +5266,18 @@ export default function Smaug() {
         @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
       `}</style>
 
-      {/* header: logo top-left (absolute, doesn't affect row height), centered wordmark, sign out */}
+      {/* header: just the sign-out button. The logo and wordmark used to live
+          here — the logo absolutely positioned so it could overhang into the
+          sidebar, the wordmark centered — which cost ~94px of full-width page
+          height. Both now stack at the top of the sidebar column instead, so
+          content starts at the very top of the page. */}
         <div
           style={{
-            position: "relative",
             display: "flex",
             justifyContent: "flex-end",
-            minHeight: 74,
-            marginBottom: 20,
+            marginBottom: 10,
           }}
         >
-          <img
-            src={LOGO}
-            alt="Smaug logo"
-            width={200}
-            height={200}
-            style={{ display: "block", position: "absolute", left: 0, top: 0 }}
-          />
-          <div
-            style={{
-              position: "absolute",
-              left: "50%",
-              top: 14,
-              transform: "translateX(-50%)",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
-            }}
-          >
-            <img
-              src={WORDMARK}
-              alt="SMAUG"
-              style={{ display: "block", height: 48, width: "auto" }}
-            />
-            <div
-              style={{ width: 130, height: 2, background: T.amber, margin: "7px 0 0" }}
-            />
-          </div>
           {session && (
             <button
               onClick={() => supabase.auth.signOut()}
@@ -4203,7 +5289,7 @@ export default function Smaug() {
         </div>
 
         <div style={{ display: "flex", gap: 28, alignItems: "flex-start" }}>
-          {/* left sidebar: date, session strip, nav — starts below the absolute logo above */}
+          {/* left sidebar: brand, date, session strip, nav */}
           <div
             style={{
               display: "flex",
@@ -4213,8 +5299,28 @@ export default function Smaug() {
               flexShrink: 0,
             }}
           >
-            {/* clears the 200px logo, which is absolutely positioned in the header row above */}
-            <div style={{ marginTop: 106 }} />
+            <img
+              src={LOGO}
+              alt="Smaug logo"
+              width={200}
+              height={200}
+              style={{ display: "block" }}
+            />
+            {/* sized to the logo's width rather than a fixed height, so the
+                wordmark and the dragon share one left and right edge */}
+            <img
+              src={WORDMARK}
+              alt="SMAUG"
+              style={{ display: "block", width: "100%", height: "auto" }}
+            />
+            <div
+              style={{
+                width: "100%",
+                height: 2,
+                background: T.amber,
+                margin: "7px 0 14px",
+              }}
+            />
             <div
               style={{
                 fontSize: 13,
@@ -4313,6 +5419,7 @@ export default function Smaug() {
         {tab === "Morning Brief" && (
           <MorningBriefTab panels={panels} lastRun={lastRun} />
         )}
+        {tab === "Dashboard" && <DashboardTab />}
         {tab === "Journal" && <JournalTab />}
         {tab === "Charts" && (
           <div style={{ maxWidth: 1100, margin: "0 auto" }}>
