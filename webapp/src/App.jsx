@@ -1371,7 +1371,7 @@ function monthWeeks(cursor) {
   return weeks;
 }
 
-function PnlCalendar({ byDay, bounds, selected, onSelect }) {
+function PnlCalendar({ byDay, selected, onSelect }) {
   // Opens on the most recent month that actually has trades, not on today —
   // logging lags the market, and landing on an empty August when every trade
   // is in July reads as "the dashboard is broken".
@@ -1382,8 +1382,6 @@ function PnlCalendar({ byDay, bounds, selected, onSelect }) {
   });
 
   const weeks = monthWeeks(cursor);
-  const inRange = (key) =>
-    (!bounds.from || key >= bounds.from) && (!bounds.to || key <= bounds.to);
 
   const monthNet = [...byDay.entries()].reduce((acc, [key, d]) => {
     const dt = new Date(`${key}T12:00:00`);
@@ -1483,9 +1481,7 @@ function PnlCalendar({ byDay, bounds, selected, onSelect }) {
           </div>
 
           {weeks.map((week, wi) => {
-            const weekDays = week
-              .map((d) => byDay.get(ymd(d)))
-              .filter((x, i) => x && inRange(ymd(week[i])));
+            const weekDays = week.map((d) => byDay.get(ymd(d))).filter(Boolean);
             const weekPl = weekDays.reduce((a, d) => a + d.pl, 0);
             const weekN = weekDays.reduce((a, d) => a + d.n, 0);
             return (
@@ -1500,7 +1496,7 @@ function PnlCalendar({ byDay, bounds, selected, onSelect }) {
               >
                 {week.map((d) => {
                   const key = ymd(d);
-                  const cell = inRange(key) ? byDay.get(key) : null;
+                  const cell = byDay.get(key);
                   const otherMonth = d.getMonth() !== cursor.getMonth();
                   const win = cell && cell.pl > 0;
                   const loss = cell && cell.pl < 0;
@@ -2022,7 +2018,7 @@ function DashboardTab() {
   const [feedback, setFeedback] = useState(null);
   const [loadState, setLoadState] = useState("loading");
   const [error, setError] = useState(null);
-  const [preset, setPreset] = useState("All");
+  const [preset, setPreset] = useState("MTD");
   const [custom, setCustom] = useState({ from: "", to: "" });
 
   useEffect(() => {
@@ -2049,6 +2045,13 @@ function DashboardTab() {
 
   const bounds = useMemo(() => rangeBounds(preset, custom), [preset, custom]);
   const s = useMemo(() => computeStats(entries, bounds), [entries, bounds]);
+  // The calendar is deliberately NOT filtered: it's a browsable record you
+  // page through by month, so narrowing the range shouldn't blank out days
+  // you can still see. The filter drives the KPIs and the curve only.
+  const allDays = useMemo(
+    () => computeStats(entries, { from: null, to: null }).byDay,
+    [entries]
+  );
 
   // The feedback panel is capped to whatever the calendar happens to be —
   // 5 vs 6 week rows changes that, so it's measured rather than guessed.
@@ -2065,7 +2068,7 @@ function DashboardTab() {
   }, [loadState]);
 
   // a day selected under one range filter may not exist under the next
-  const selected = selectedDay && s.byDay.has(selectedDay) ? selectedDay : null;
+  const selected = selectedDay && allDays.has(selectedDay) ? selectedDay : null;
 
   if (loadState === "loading") {
     return (
@@ -2110,12 +2113,7 @@ function DashboardTab() {
           it with empty weeks. */}
       <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
         <div ref={calRef} style={{ flex: "3 1 640px", minWidth: 0, display: "flex" }}>
-          <PnlCalendar
-            byDay={s.byDay}
-            bounds={bounds}
-            selected={selected}
-            onSelect={setSelectedDay}
-          />
+          <PnlCalendar byDay={allDays} selected={selected} onSelect={setSelectedDay} />
         </div>
         <div
           style={{
@@ -2128,7 +2126,7 @@ function DashboardTab() {
           {selected ? (
             <DayDetail
               dayKey={selected}
-              day={s.byDay.get(selected)}
+              day={allDays.get(selected)}
               onClose={() => setSelectedDay(null)}
             />
           ) : (
