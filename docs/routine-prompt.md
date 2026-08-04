@@ -1,12 +1,36 @@
 # Smaug daily routine — prompt
 
-Paste this as the scheduled routine's prompt. It is deliberately a *task list*
-that fetches its specification at run time rather than embedding it, so editing
-`docs/smaug-project-knowledge.md` and committing is enough to change routine
-behavior — nothing needs re-pasting. Keep this file and the routine in sync if
-you edit one by hand.
+## What to actually paste into the routine
+
+Paste **only this**, once. It fetches everything else at run time, so editing
+this file or the spec and committing is enough to change routine behavior —
+there is nothing to re-paste, ever:
+
+```
+You are the Smaug daily routine.
+
+Fetch https://raw.githubusercontent.com/mdmeck/Smaug/main/docs/routine-prompt.md
+and carry out the task list under the "Task list" heading, in order, exactly as
+written. That document is the instructions; this message only points at them.
+
+If the fetch fails, STOP and report it. Do not improvise the routine from
+memory — writing to the wrong tables is worse than not running.
+```
+
+### Why the bootstrap exists
+
+The task list below used to be pasted in full, with only the *spec* fetched at
+run time. That fixed spec staleness but not task staleness: on 2026-08-04 the
+routine wrote `daily_briefs` and `entry_models` normally while `trade_feedback`
+sat empty, because PART 3 had been added to this file a few days earlier and
+the pasted copy predated it. Reads and most writes looked healthy, so nothing
+surfaced the gap — the same asymmetric failure as the `user_id` bug. Now the
+only thing that can go stale is the one paragraph above, which contains no
+task-specific detail at all.
 
 ---
+
+## Task list
 
 === PART 0: LOAD THE SPEC ===
 
@@ -17,7 +41,7 @@ That document is the authoritative specification for everything below — table 
 
 If the fetch fails, STOP and report it. Do not proceed from memory or from a cached copy — this spec changes regularly, and running against a stale reading has previously written broken data and silently failed for days.
 
-**Critical, and the single most common failure:** your Supabase connector authenticates as the `postgres` role, so `auth.uid()` evaluates to NULL. Reads work fine (RLS is bypassed), but every INSERT into `daily_briefs`, `entry_models`, or `training_examples` must pass `user_id` explicitly or it fails a NOT NULL violation:
+**Critical, and the single most common failure:** your Supabase connector authenticates as the `postgres` role, so `auth.uid()` evaluates to NULL. Reads work fine (RLS is bypassed), but every INSERT into `daily_briefs`, `entry_models`, `trade_feedback`, or `training_examples` must pass `user_id` explicitly or it fails a NOT NULL violation:
 
 ```
 user_id = c0b48756-5f94-4862-886a-8ecdb7099ef6
@@ -108,3 +132,5 @@ Never write into `notes` — that field is the trader's own reasoning and is gro
 === FINALLY ===
 
 Report what you actually did: which tables you wrote, the row counts, and any step that failed or was skipped. If a write errored, say so plainly with the error — do not report success you did not verify.
+
+Name all four of `daily_briefs`, `entry_models`, `trade_feedback`, and `training_examples.analysis_notes` explicitly, each with what you wrote or why you didn't. A part that was silently skipped looks identical to a part that succeeded unless you list them one by one — this is how `trade_feedback` stayed empty for days without anyone noticing.
