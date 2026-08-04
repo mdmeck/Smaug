@@ -44,6 +44,14 @@ RTH_ONLY = True                 # keep regular trading hours only (9:30-16:00 ET
 TEST_FRACTION = 0.25            # most recent 25% of data held out for testing
 MIN_ROWS = 500                  # refuse to run analysis on less than this
 RETENTION_DAYS = 60             # prune bars older than this so the table stays bounded
+# Swing-pivot window for the market-structure features. A pivot must be the
+# extreme of a (LEFT + RIGHT + 1) bar window, and is only *knowable* RIGHT bars
+# after it forms — that lag is load-bearing, see compute_features(). At 5/5 on
+# 1-minute bars a swing is the extreme of 11 minutes, confirmed 5 minutes late,
+# which registers a ~5-minute pullback but not a 2-minute wiggle. Raising these
+# means fewer, cleaner swings confirmed later; lowering them approaches noise.
+SWING_LEFT = 5
+SWING_RIGHT = 5
 SUPABASE_PAGE_SIZE = 1000       # PostgREST's default max rows per request
 SUPABASE_BATCH_SIZE = 500       # rows per upsert request
 
@@ -434,6 +442,89 @@ def compute_features(df):
     cum_v = v.where(rth_mask).groupby(day).cumsum().replace(0, np.nan)
     out["dist_vwap_bps"] = (c - cum_pv / cum_v) / c * 10_000
 
+    # --- market structure: swing pivots, break of structure, change of
+    # character. Everything above measures distance to a level that is fixed
+    # once set (opening range, prev day, premarket) or to a running average.
+    # These measure distance to a level that *moves* as new swings form, which
+    # is what "broke the prior swing high" actually requires.
+    #
+    # CAUSALITY, and the whole reason this is fiddly: a pivot is not knowable
+    # until SWING_RIGHT bars after it forms — you cannot tell a bar was the
+    # local high until enough bars after it have failed to exceed it. The
+    # .shift(SWING_RIGHT) below is what enforces that; without it every
+    # structure feature silently sees the future.
+    rth_h = h.where(rth_mask)
+    rth_l = l.where(rth_mask)
+
+    def _confirmed_pivots(series, is_high):
+        back = pd.concat(
+            [series.shift(k) for k in range(1, SWING_LEFT + 1)], axis=1
+        ).agg("max" if is_high else "min", axis=1)
+        fwd = pd.concat(
+            [series.shift(-k) for k in range(1, SWING_RIGHT + 1)], axis=1
+        ).agg("max" if is_high else "min", axis=1)
+        # strict against the past, non-strict against the future, so a flat
+        # double top confirms on the first of the two rather than neither
+        is_piv = (series > back) & (series >= fwd) if is_high else (
+            (series < back) & (series <= fwd)
+        )
+        # value becomes available SWING_RIGHT bars later, then carries forward
+        # — but only within the session, so yesterday's swings never leak in
+        conf = series.where(is_piv).shift(SWING_RIGHT)
+        last = conf.groupby(day).ffill()
+        # the previous *distinct* pivot: shifting by bar would just re-read the
+        # same one, so drop to the pivot-only series first and shift there
+        prev = conf.dropna().shift(1).reindex(conf.index).groupby(day).ffill()
+        return last, prev
+
+    last_ph, prev_ph = _confirmed_pivots(rth_h, is_high=True)
+    last_pl, prev_pl = _confirmed_pivots(rth_l, is_high=False)
+
+    out["dist_swing_high_bps"] = (c - last_ph) / c * 10_000
+    out["dist_swing_low_bps"] = (c - last_pl) / c * 10_000
+
+    # trend by classic structure: higher highs AND higher lows, or lower both.
+    # Anything else (HH with LL, or a pivot still unknown) is 0 = no read.
+    higher_h, higher_l = last_ph > prev_ph, last_pl > prev_pl
+    lower_h, lower_l = last_ph < prev_ph, last_pl < prev_pl
+    known = last_ph.notna() & last_pl.notna() & prev_ph.notna() & prev_pl.notna()
+    structure_dir = pd.Series(
+        np.where(higher_h & higher_l, 1.0, np.where(lower_h & lower_l, -1.0, 0.0)),
+        index=df.index,
+    ).where(known)
+    out["structure_dir"] = structure_dir
+
+    # A break is the same event either way; what separates BOS from CHoCH is
+    # whether it goes *with* the established trend (continuation) or *against*
+    # it (reversal). Ternary rather than two binaries so one feature carries
+    # direction and rules can say `choch >= 1` / `choch <= -1`.
+    # Latched, not instantaneous: structure that has been broken stays broken
+    # until a *new* pivot forms. Testing `close > last_ph` bar by bar instead
+    # made `bos` flicker 0/1 every time price oscillated around the level —
+    # 15-25 transitions a session, which is the over-signalling problem again.
+    # Latching by pivot level gives one break per level, which is also how a
+    # trader reads it: structure doesn't un-break on a pullback.
+    ph_id = last_ph.ne(last_ph.shift()).cumsum()
+    pl_id = last_pl.ne(last_pl.shift()).cumsum()
+    broke_up = last_ph.notna() & (c > last_ph).groupby(ph_id).cummax().astype(bool)
+    broke_down = last_pl.notna() & (c < last_pl).groupby(pl_id).cummax().astype(bool)
+    sd = structure_dir.fillna(0)
+    out["bos"] = pd.Series(
+        np.where(broke_up & (sd >= 0), 1.0, np.where(broke_down & (sd <= 0), -1.0, 0.0)),
+        index=df.index,
+    ).where(last_ph.notna() | last_pl.notna())
+    out["choch"] = pd.Series(
+        np.where(broke_up & (sd < 0), 1.0, np.where(broke_down & (sd > 0), -1.0, 0.0)),
+        index=df.index,
+    ).where(last_ph.notna() | last_pl.notna())
+
+    # opening-range width — day-type context for the ORB rules. A break out of
+    # a 3 bps range is a different event from a break out of a 30 bps range.
+    or15_forming = rth_min_since_open < 15
+    or15_h = h.where(rth_mask & or15_forming).groupby(day).transform("max")
+    or15_l = l.where(rth_mask & or15_forming).groupby(day).transform("min")
+    out["or15_width_bps"] = (or15_h - or15_l) / c * 10_000
+
     # only meaningful during RTH — blank these out for pre/post-market bars
     out.loc[~rth_mask, [
         "dist_prev_day_high_bps", "dist_prev_day_low_bps",
@@ -441,6 +532,8 @@ def compute_features(df):
         "dist_or5_high_bps", "dist_or5_low_bps",
         "dist_or15_high_bps", "dist_or15_low_bps",
         "dist_vwap_bps",
+        "dist_swing_high_bps", "dist_swing_low_bps",
+        "structure_dir", "bos", "choch", "or15_width_bps",
     ]] = np.nan
 
     return out

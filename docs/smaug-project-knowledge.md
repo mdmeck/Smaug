@@ -94,8 +94,14 @@ So do not fit rules to the exact minute or the exact price. Concretely:
 | `dist_or5_high_bps` / `dist_or5_low_bps` | distance of close from the 5-minute opening-range high/low (first 5 min of RTH), in bps |
 | `dist_or15_high_bps` / `dist_or15_low_bps` | distance of close from the 15-minute opening-range high/low, in bps |
 | `dist_vwap_bps` | distance of close from the session VWAP, in bps. Anchored at the 9:30 RTH open and reset daily; premarket volume is excluded from the anchor |
+| `or15_width_bps` | width of the 15-minute opening range, in bps of close. Day-type context — a break out of a 5 bps range is a different event from a break out of a 40 bps one |
+| `dist_swing_high_bps` | distance of close from the most recent **confirmed** swing high, in bps. `> 0` means structure is broken to the upside |
+| `dist_swing_low_bps` | distance of close from the most recent confirmed swing low, in bps. `< 0` means structure is broken to the downside |
+| `structure_dir` | `+1` uptrend (higher high **and** higher low), `-1` downtrend (lower high **and** lower low), `0` mixed. Null until two of each pivot have confirmed |
+| `bos` | break of structure: `+1` broke the swing high with an up/neutral trend, `-1` broke the swing low with a down/neutral trend, else `0` |
+| `choch` | change of character: `+1` broke the swing high **while** `structure_dir` was negative, `-1` broke the swing low while it was positive, else `0` |
 
-All `dist_*`/`ret_*`/`range_bps`/`ema_spread_bps` features are causal — computed only from information available at or before that bar (no lookahead). Opening-range features use a running high/low while the window is still forming, then hold the finalized value for the rest of the session. VWAP accumulates through the current bar only, so it likewise never sees the future.
+All `dist_*`/`ret_*`/`range_bps`/`ema_spread_bps` features are causal — computed only from information available at or before that bar (no lookahead). Opening-range features use a running high/low while the window is still forming, then hold the finalized value for the rest of the session. VWAP accumulates through the current bar only, so it likewise never sees the future. Swing pivots are the subtlest case: a bar cannot be known to be a local high until `SWING_RIGHT` later bars have failed to exceed it, so the confirmed pivot is deliberately delayed by that many bars before it becomes visible to any feature.
 
 ## Targets
 | target | meaning |
@@ -115,6 +121,8 @@ Every entry-model run also produces a complete TradingView Pine Script v5 indica
   - `dist_vwap_bps` — `ta.vwap` (session-anchored and daily-reset by default in Pine, matching the Python anchor), then `(close - ta.vwap) / close * 10000`. One of the few features that translates exactly rather than approximately, provided the chart is set to regular-hours data — extended-hours charts fold premarket volume into the anchor and will drift from the Python value.
   - `vol_z` — exact minute-of-day historical mean/std isn't practical in Pine; approximate with a rolling z-score (e.g. `(volume - ta.sma(volume, 20)) / ta.stdev(volume, 20)`) and add a comment noting it's an approximation, not an exact match to the Python calc.
   - `dist_premkt_*` — only replicate if the chart has extended-hours data available; otherwise add a comment noting the limitation rather than guessing.
+  - `or15_width_bps` — `(orHigh - orLow) / close * 10000`, reusing the same opening-range `var`s as `dist_or15_*`.
+  - `dist_swing_high_bps`, `dist_swing_low_bps`, `structure_dir`, `bos`, `choch` — **do not recompute these.** `pinescript/structure.pine` (fragment #6) already defines them as `st_distSwingHighBps`, `st_distSwingLowBps`, `st_structureDir`, `st_bos`, `st_choch`. Reference those names directly. Pivot confirmation lag is a silent-lookahead trap and the fragment is the version that has been verified against the Python; re-deriving it in generated code is how that gets quietly broken.
 - Self-contained — no external requests beyond `request.security` for prior-session levels.
 - No `alertcondition()` calls — visual-only indicator, not wired to TradingView alerts.
 

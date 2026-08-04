@@ -1,0 +1,71 @@
+// Market structure (swing pivots, BOS, CHoCH) — static fragment, fetched
+// verbatim by the daily routine. This is deterministic math, not something to
+// regenerate daily: getting the pivot confirmation lag wrong is a silent
+// lookahead bug, so it lives here rather than in the generated rules block.
+//
+// The generated block CONSUMES these names — it must not recompute them, and
+// must not wrap them in its own `not [1]` guard (markers.pine already edge-
+// triggers, and a second guard would require two transitions at once).
+//
+// Mirrors compute_features() in smaug_pipeline.py. ta.pivothigh/pivotlow
+// already return their value `right` bars after the pivot forms, which is the
+// same lag as the .shift(SWING_RIGHT) on the Python side.
+st_left = input.int(5, title="Swing left", group="Market structure")
+st_right = input.int(5, title="Swing right", group="Market structure")
+
+// structure is session-scoped, like the opening range and VWAP — an overnight
+// gap must never register as a break of yesterday's swing
+st_newSession = ta.change(time("D")) != 0
+
+var float st_lastPH = na
+var float st_prevPH = na
+var float st_lastPL = na
+var float st_prevPL = na
+var bool st_brokeUp = false
+var bool st_brokeDown = false
+
+if st_newSession
+    st_lastPH := na
+    st_prevPH := na
+    st_lastPL := na
+    st_prevPL := na
+    st_brokeUp := false
+    st_brokeDown := false
+
+st_ph = ta.pivothigh(high, st_left, st_right)
+st_pl = ta.pivotlow(low, st_left, st_right)
+
+// a new pivot both shifts the sequence and re-arms the break latch
+if not na(st_ph)
+    st_prevPH := st_lastPH
+    st_lastPH := st_ph
+    st_brokeUp := false
+if not na(st_pl)
+    st_prevPL := st_lastPL
+    st_lastPL := st_pl
+    st_brokeDown := false
+
+// latched: structure that has been broken stays broken until a new pivot
+// forms. Testing close > st_lastPH bar by bar instead makes this flicker every
+// time price oscillates around the level.
+if not na(st_lastPH) and close > st_lastPH
+    st_brokeUp := true
+if not na(st_lastPL) and close < st_lastPL
+    st_brokeDown := true
+
+st_distSwingHighBps = na(st_lastPH) ? na : (close - st_lastPH) / close * 10000
+st_distSwingLowBps = na(st_lastPL) ? na : (close - st_lastPL) / close * 10000
+
+st_known = not na(st_lastPH) and not na(st_prevPH) and not na(st_lastPL) and not na(st_prevPL)
+st_structureDir = not st_known ? na : (st_lastPH > st_prevPH and st_lastPL > st_prevPL ? 1 : st_lastPH < st_prevPH and st_lastPL < st_prevPL ? -1 : 0)
+
+// BOS breaks with the trend (continuation), CHoCH breaks against it (reversal)
+st_sd = na(st_structureDir) ? 0 : st_structureDir
+st_bos = st_brokeUp and st_sd >= 0 ? 1 : st_brokeDown and st_sd <= 0 ? -1 : 0
+st_choch = st_brokeUp and st_sd < 0 ? 1 : st_brokeDown and st_sd > 0 ? -1 : 0
+
+// The swing levels themselves, so the structure the rules reason about is
+// visible on the chart. Stepped lines in muted blue/purple — deliberately not
+// the green/red/orange of the L/S/X markers, which mean "take a trade".
+plot(st_lastPH, title="Swing high", color=color.new(color.blue, 40), style=plot.style_stepline, linewidth=1)
+plot(st_lastPL, title="Swing low", color=color.new(color.purple, 40), style=plot.style_stepline, linewidth=1)
