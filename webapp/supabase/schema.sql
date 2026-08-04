@@ -10,6 +10,11 @@ create table if not exists journal_entries (
   direction text not null check (direction in ('Long', 'Short')),
   setup text default '',
   result text default '',
+  -- capital deployed to open the position (premium paid + fees), in dollars.
+  -- Nullable — unknown on hand-entered rows. Lets a day be read as return on
+  -- capital, sum(result)/sum(cost_basis), rather than raw P&L: two $100
+  -- positions returning $20 is 10%, which $20 alone doesn't tell you.
+  cost_basis double precision,
   notes text default '',
   created_at timestamptz not null default now()
 );

@@ -1243,12 +1243,25 @@ function computeStats(entries, { from, to }) {
     used.push({ ...e, pl });
   }
 
+  // `cost` sums only the trades that recorded one, and `costN` counts them,
+  // so a day where half the positions have no cost basis reports a percentage
+  // over the half it can actually see rather than silently understating it
   const byDay = new Map();
   for (const t of used) {
-    const d = byDay.get(t.date) || { pl: 0, n: 0 };
+    const d = byDay.get(t.date) || { pl: 0, n: 0, cost: 0, costN: 0, rows: [] };
     d.pl += t.pl;
     d.n += 1;
+    if (Number.isFinite(t.cost_basis) && t.cost_basis > 0) {
+      d.cost += t.cost_basis;
+      d.costN += 1;
+    }
+    d.rows.push(t);
     byDay.set(t.date, d);
+  }
+  for (const d of byDay.values()) {
+    d.pct = d.cost > 0 ? (d.pl / d.cost) * 100 : null;
+    d.partial = d.costN > 0 && d.costN < d.n;
+    d.rows.sort((a, b) => b.pl - a.pl);
   }
 
   const wins = used.filter((t) => t.pl > 0).map((t) => t.pl);
@@ -1369,7 +1382,7 @@ function monthWeeks(cursor) {
   return weeks;
 }
 
-function PnlCalendar({ byDay, bounds }) {
+function PnlCalendar({ byDay, bounds, selected, onSelect }) {
   // Opens on the most recent month that actually has trades, not on today —
   // logging lags the market, and landing on an empty August when every trade
   // is in July reads as "the dashboard is broken".
@@ -1502,14 +1515,20 @@ function PnlCalendar({ byDay, bounds }) {
                   const otherMonth = d.getMonth() !== cursor.getMonth();
                   const win = cell && cell.pl > 0;
                   const loss = cell && cell.pl < 0;
+                  const isSel = cell && selected === key;
                   return (
                     <div
                       key={key}
+                      onClick={cell ? () => onSelect(isSel ? null : key) : undefined}
+                      title={cell ? "Show this day's trades" : undefined}
                       style={{
                         minHeight: 68,
                         borderRadius: 10,
                         padding: "8px 10px",
                         opacity: otherMonth ? 0.35 : 1,
+                        cursor: cell ? "pointer" : "default",
+                        outline: isSel ? `2px solid ${B.amber}` : "none",
+                        outlineOffset: -1,
                         background: win
                           ? "oklch(0.72 0.15 155 / 0.16)"
                           : loss
@@ -1549,8 +1568,25 @@ function PnlCalendar({ byDay, bounds }) {
                           >
                             {usd(cell.pl, { sign: true })}
                           </div>
-                          <div style={{ fontFamily: B.mono, fontSize: 11, color: B.faint }}>
-                            {cell.n} {cell.n === 1 ? "Trade" : "Trades"}
+                          <div
+                            style={{
+                              fontFamily: B.mono,
+                              fontSize: 11,
+                              color: B.faint,
+                              display: "flex",
+                              justifyContent: "space-between",
+                              gap: 6,
+                            }}
+                          >
+                            <span>
+                              {cell.n} {cell.n === 1 ? "Trade" : "Trades"}
+                            </span>
+                            {cell.pct !== null && (
+                              <span style={{ color: win ? B.greenText : "oklch(0.75 0.18 25)" }}>
+                                {cell.pct > 0 ? "+" : ""}
+                                {cell.pct.toFixed(1)}%
+                              </span>
+                            )}
                           </div>
                         </>
                       )}
@@ -1711,6 +1747,195 @@ function AiFeedbackPanel({ fb }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------- day detail ----------
+// Shown in place of the AI Feedback panel when a calendar day is clicked.
+// Reuses that column rather than opening a modal or pushing a row in below,
+// so selecting a day never shifts the rest of the dashboard around.
+function DayDetail({ dayKey, day, onClose }) {
+  const d = new Date(`${dayKey}T12:00:00`);
+  const pos = day.pl > 0;
+  const money = (n, sign) => usd(n, { sign });
+
+  return (
+    <div
+      style={{
+        background: B.surface,
+        border: `1px solid ${B.edge}`,
+        borderRadius: 16,
+        display: "flex",
+        flexDirection: "column",
+        overflow: "hidden",
+        flex: 1,
+        minWidth: 0,
+      }}
+    >
+      <div
+        style={{
+          padding: "18px 22px",
+          borderBottom: `1px solid ${B.edge}`,
+          display: "flex",
+          alignItems: "flex-start",
+          justifyContent: "space-between",
+          gap: 10,
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 17, fontWeight: 700, color: B.ink }}>
+            {d.toLocaleDateString("en-US", {
+              weekday: "short",
+              month: "short",
+              day: "numeric",
+            })}
+          </div>
+          <div style={{ fontFamily: B.mono, fontSize: 11, color: B.faint, marginTop: 4 }}>
+            {day.n} {day.n === 1 ? "trade" : "trades"}
+            {day.cost > 0 && ` · ${money(day.cost)} deployed`}
+          </div>
+        </div>
+        <button
+          onClick={onClose}
+          style={{
+            background: B.sunken,
+            border: `1px solid ${B.edge}`,
+            color: B.dim,
+            borderRadius: 8,
+            padding: "4px 10px",
+            fontFamily: B.mono,
+            fontSize: 11,
+            cursor: "pointer",
+            flexShrink: 0,
+          }}
+        >
+          Close
+        </button>
+      </div>
+
+      <div
+        style={{
+          padding: "18px 22px",
+          borderBottom: `1px solid ${B.edgeSoft}`,
+          display: "flex",
+          alignItems: "baseline",
+          gap: 14,
+          flexWrap: "wrap",
+        }}
+      >
+        <div
+          style={{
+            fontSize: 26,
+            fontWeight: 700,
+            letterSpacing: "-0.02em",
+            color: pos ? B.greenText : "oklch(0.75 0.18 25)",
+          }}
+        >
+          {money(day.pl, true)}
+        </div>
+        {day.pct !== null && (
+          <div
+            style={{
+              fontFamily: B.mono,
+              fontSize: 16,
+              fontWeight: 600,
+              color: pos ? B.greenText : "oklch(0.75 0.18 25)",
+            }}
+          >
+            {day.pct > 0 ? "+" : ""}
+            {day.pct.toFixed(2)}%
+          </div>
+        )}
+      </div>
+
+      {day.partial && (
+        <div
+          style={{
+            padding: "10px 22px",
+            fontFamily: B.mono,
+            fontSize: 10.5,
+            color: B.amber,
+            borderBottom: `1px solid ${B.edgeSoft}`,
+          }}
+        >
+          % covers {day.costN} of {day.n} trades — the rest have no cost basis
+        </div>
+      )}
+
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "8px 0" }}>
+        {day.rows.map((t, i) => {
+          const win = t.pl > 0;
+          const tPct =
+            Number.isFinite(t.cost_basis) && t.cost_basis > 0
+              ? (t.pl / t.cost_basis) * 100
+              : null;
+          return (
+            <div
+              key={i}
+              style={{
+                padding: "10px 22px",
+                borderTop: i === 0 ? "none" : `1px solid ${B.edgeSoft}`,
+                display: "flex",
+                flexDirection: "column",
+                gap: 4,
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+                <span
+                  style={{
+                    fontFamily: B.mono,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    color: t.direction === "Long" ? B.blue : B.amberBright,
+                    minWidth: 38,
+                  }}
+                >
+                  {t.direction === "Long" ? "LONG" : "SHORT"}
+                </span>
+                <span
+                  style={{
+                    fontFamily: B.mono,
+                    fontSize: 13,
+                    fontWeight: 700,
+                    color: win ? B.greenText : "oklch(0.75 0.18 25)",
+                    marginLeft: "auto",
+                  }}
+                >
+                  {money(t.pl, true)}
+                </span>
+                {tPct !== null && (
+                  <span
+                    style={{
+                      fontFamily: B.mono,
+                      fontSize: 11,
+                      color: B.faint,
+                      minWidth: 52,
+                      textAlign: "right",
+                    }}
+                  >
+                    {tPct > 0 ? "+" : ""}
+                    {tPct.toFixed(1)}%
+                  </span>
+                )}
+              </div>
+              {(t.setup || t.notes) && (
+                <div
+                  style={{
+                    fontSize: 12,
+                    lineHeight: 1.4,
+                    color: B.dim,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {t.setup || t.notes.split(" · imported")[0]}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -1878,7 +2103,7 @@ function DashboardTab() {
     (async () => {
       try {
         const rows = await fetchAllRows("journal_entries", {
-          select: "date,direction,result,setup",
+          select: "date,direction,result,setup,notes,ticker,cost_basis",
           orderBy: "date",
         });
         setEntries(rows);
@@ -1901,6 +2126,7 @@ function DashboardTab() {
 
   // The feedback panel is capped to whatever the calendar happens to be —
   // 5 vs 6 week rows changes that, so it's measured rather than guessed.
+  const [selectedDay, setSelectedDay] = useState(null);
   const calRef = useRef(null);
   const [calHeight, setCalHeight] = useState(null);
   useEffect(() => {
@@ -1911,6 +2137,9 @@ function DashboardTab() {
     setCalHeight(el.offsetHeight);
     return () => ro.disconnect();
   }, [loadState]);
+
+  // a day selected under one range filter may not exist under the next
+  const selected = selectedDay && s.byDay.has(selectedDay) ? selectedDay : null;
 
   if (loadState === "loading") {
     return (
@@ -1955,7 +2184,12 @@ function DashboardTab() {
           it with empty weeks. */}
       <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
         <div ref={calRef} style={{ flex: "3 1 640px", minWidth: 0, display: "flex" }}>
-          <PnlCalendar byDay={s.byDay} bounds={bounds} />
+          <PnlCalendar
+            byDay={s.byDay}
+            bounds={bounds}
+            selected={selected}
+            onSelect={setSelectedDay}
+          />
         </div>
         <div
           style={{
@@ -1965,7 +2199,15 @@ function DashboardTab() {
             maxHeight: calHeight || undefined,
           }}
         >
-          <AiFeedbackPanel fb={feedback} />
+          {selected ? (
+            <DayDetail
+              dayKey={selected}
+              day={s.byDay.get(selected)}
+              onClose={() => setSelectedDay(null)}
+            />
+          ) : (
+            <AiFeedbackPanel fb={feedback} />
+          )}
         </div>
       </div>
 
@@ -2147,7 +2389,16 @@ const emptyEntry = () => ({
   direction: "Long",
   setup: "",
   result: "",
+  cost_basis: "",
   notes: "",
+});
+
+// insert()/update() pass the form object straight through, so the numeric
+// column has to leave the form as a number or null — "" would be rejected,
+// and 0 would claim the position cost nothing rather than "not recorded".
+const journalPayload = (f) => ({
+  ...f,
+  cost_basis: f.cost_basis === "" || f.cost_basis === null ? null : Number(f.cost_basis),
 });
 
 function JournalTab() {
@@ -2207,7 +2458,7 @@ function JournalTab() {
     setSaveError(null);
     const { data, error } = await supabase
       .from("journal_entries")
-      .insert(form)
+      .insert(journalPayload(form))
       .select()
       .single();
     if (error) {
@@ -2237,6 +2488,7 @@ function JournalTab() {
       ticker: e.ticker,
       direction: e.direction,
       result: e.result,
+      cost_basis: e.cost_basis === null || e.cost_basis === undefined ? "" : String(e.cost_basis),
       setup: e.setup,
       notes: e.notes,
     });
@@ -2251,7 +2503,7 @@ function JournalTab() {
     setSaveError(null);
     const { data, error } = await supabase
       .from("journal_entries")
-      .update(editForm)
+      .update(journalPayload(editForm))
       .eq("id", editingId)
       .select()
       .single();
@@ -2329,6 +2581,17 @@ function JournalTab() {
               value={f.result}
               onChange={(e) => setF({ ...f, result: e.target.value })}
               placeholder="+120 / -0.5R"
+              style={{ ...inputStyle, fontFamily: T.mono }}
+            />
+          )}
+          {field(
+            "COST BASIS ($)",
+            <input
+              type="number"
+              step="0.01"
+              value={f.cost_basis}
+              onChange={(e) => setF({ ...f, cost_basis: e.target.value })}
+              placeholder="premium paid"
               style={{ ...inputStyle, fontFamily: T.mono }}
             />
           )}
