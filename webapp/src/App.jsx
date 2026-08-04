@@ -1243,26 +1243,15 @@ function computeStats(entries, { from, to }) {
     used.push({ ...e, pl });
   }
 
-  // `cost` sums only the trades that recorded one, and `costN` counts them,
-  // so a day where half the positions have no cost basis reports a percentage
-  // over the half it can actually see rather than silently understating it
   const byDay = new Map();
   for (const t of used) {
-    const d = byDay.get(t.date) || { pl: 0, n: 0, cost: 0, costN: 0, rows: [] };
+    const d = byDay.get(t.date) || { pl: 0, n: 0, rows: [] };
     d.pl += t.pl;
     d.n += 1;
-    if (Number.isFinite(t.cost_basis) && t.cost_basis > 0) {
-      d.cost += t.cost_basis;
-      d.costN += 1;
-    }
     d.rows.push(t);
     byDay.set(t.date, d);
   }
-  for (const d of byDay.values()) {
-    d.pct = d.cost > 0 ? (d.pl / d.cost) * 100 : null;
-    d.partial = d.costN > 0 && d.costN < d.n;
-    d.rows.sort((a, b) => b.pl - a.pl);
-  }
+  for (const d of byDay.values()) d.rows.sort((a, b) => b.pl - a.pl);
 
   const wins = used.filter((t) => t.pl > 0).map((t) => t.pl);
   const losses = used.filter((t) => t.pl < 0).map((t) => t.pl);
@@ -1568,25 +1557,8 @@ function PnlCalendar({ byDay, bounds, selected, onSelect }) {
                           >
                             {usd(cell.pl, { sign: true })}
                           </div>
-                          <div
-                            style={{
-                              fontFamily: B.mono,
-                              fontSize: 11,
-                              color: B.faint,
-                              display: "flex",
-                              justifyContent: "space-between",
-                              gap: 6,
-                            }}
-                          >
-                            <span>
-                              {cell.n} {cell.n === 1 ? "Trade" : "Trades"}
-                            </span>
-                            {cell.pct !== null && (
-                              <span style={{ color: win ? B.greenText : "oklch(0.75 0.18 25)" }}>
-                                {cell.pct > 0 ? "+" : ""}
-                                {cell.pct.toFixed(1)}%
-                              </span>
-                            )}
+                          <div style={{ fontFamily: B.mono, fontSize: 11, color: B.faint }}>
+                            {cell.n} {cell.n === 1 ? "Trade" : "Trades"}
                           </div>
                         </>
                       )}
@@ -1793,7 +1765,6 @@ function DayDetail({ dayKey, day, onClose }) {
           </div>
           <div style={{ fontFamily: B.mono, fontSize: 11, color: B.faint, marginTop: 4 }}>
             {day.n} {day.n === 1 ? "trade" : "trades"}
-            {day.cost > 0 && ` · ${money(day.cost)} deployed`}
           </div>
         </div>
         <button
@@ -1834,42 +1805,11 @@ function DayDetail({ dayKey, day, onClose }) {
         >
           {money(day.pl, true)}
         </div>
-        {day.pct !== null && (
-          <div
-            style={{
-              fontFamily: B.mono,
-              fontSize: 16,
-              fontWeight: 600,
-              color: pos ? B.greenText : "oklch(0.75 0.18 25)",
-            }}
-          >
-            {day.pct > 0 ? "+" : ""}
-            {day.pct.toFixed(2)}%
-          </div>
-        )}
       </div>
-
-      {day.partial && (
-        <div
-          style={{
-            padding: "10px 22px",
-            fontFamily: B.mono,
-            fontSize: 10.5,
-            color: B.amber,
-            borderBottom: `1px solid ${B.edgeSoft}`,
-          }}
-        >
-          % covers {day.costN} of {day.n} trades — the rest have no cost basis
-        </div>
-      )}
 
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "8px 0" }}>
         {day.rows.map((t, i) => {
           const win = t.pl > 0;
-          const tPct =
-            Number.isFinite(t.cost_basis) && t.cost_basis > 0
-              ? (t.pl / t.cost_basis) * 100
-              : null;
           return (
             <div
               key={i}
@@ -1904,20 +1844,6 @@ function DayDetail({ dayKey, day, onClose }) {
                 >
                   {money(t.pl, true)}
                 </span>
-                {tPct !== null && (
-                  <span
-                    style={{
-                      fontFamily: B.mono,
-                      fontSize: 11,
-                      color: B.faint,
-                      minWidth: 52,
-                      textAlign: "right",
-                    }}
-                  >
-                    {tPct > 0 ? "+" : ""}
-                    {tPct.toFixed(1)}%
-                  </span>
-                )}
               </div>
               {(t.setup || t.notes) && (
                 <div
@@ -2103,7 +2029,7 @@ function DashboardTab() {
     (async () => {
       try {
         const rows = await fetchAllRows("journal_entries", {
-          select: "date,direction,result,setup,notes,ticker,cost_basis",
+          select: "date,direction,result,setup,notes,ticker",
           orderBy: "date",
         });
         setEntries(rows);
