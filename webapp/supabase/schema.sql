@@ -56,6 +56,16 @@ create table if not exists training_examples (
   created_at timestamptz not null default now()
 );
 
+-- One example per entry moment per direction. This is what lets the Indicator
+-- Preview upsert instead of insert: re-labeling a signal after a page reload
+-- updates the quality rather than filing a second row. Without it the preview's
+-- `saved` state (component-local, empty on every mount) silently produced
+-- duplicates, which the routine then counted twice when deriving rules.
+-- Direction is in the key so an entry and a reversal at the same minute stay
+-- distinct; quality deliberately is NOT, since changing Good→Bad must overwrite.
+create unique index if not exists training_examples_user_entry_dir_key
+  on training_examples (user_id, entry_at, direction);
+
 alter table training_examples enable row level security;
 
 create policy "training_examples_owner_all"

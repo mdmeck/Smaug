@@ -4934,6 +4934,11 @@ const SIGNAL_STYLE = {
   exit: { text: "X", position: "inBar", color: T.amber, shape: "circle" },
 };
 
+// Identifies a signal across the chart, the list, and training_examples.
+// Normalised to epoch ms so a `bars.ts` string and a `training_examples.entry_at`
+// string for the same minute always produce the same key.
+const sigKey = (kind, ts) => `${kind}:${new Date(ts).getTime()}`;
+
 function etTime(ts) {
   return new Date(ts).toLocaleTimeString("en-US", {
     timeZone: "America/New_York",
@@ -4969,6 +4974,7 @@ function IndicatorPreview({ model }) {
   const [note, setNote] = useState("");
   const [saved, setSaved] = useState({}); // key -> quality, for inline feedback
   const [copied, setCopied] = useState(false);
+  const [showHidden, setShowHidden] = useState(false); // reveal Bad-tagged signals
   const rowRefs = useRef({}); // key -> row node, so a marker click can scroll to it
 
   // day list first (ts only — cheap), then the selected day's bars with
@@ -5013,8 +5019,41 @@ function IndicatorPreview({ model }) {
     };
   }, [day]);
 
+  // Hydrated from training_examples, not just from what was clicked this mount.
+  // `saved` used to be mount-local, so a reload showed every already-labeled
+  // signal as unlabeled and a second click filed a duplicate row.
+  useEffect(() => {
+    if (!day) return;
+    let cancelled = false;
+    (async () => {
+      const { data, error: err } = await supabase
+        .from("training_examples")
+        .select("entry_at,direction,quality")
+        .gte("entry_at", `${day}T00:00:00Z`)
+        .lt("entry_at", `${day}T23:59:59.999Z`);
+      if (cancelled || err) return;
+      setSaved(
+        Object.fromEntries(
+          data.map((r) => [sigKey(r.direction === "Short" ? "short" : "long", r.entry_at), r.quality])
+        )
+      );
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [day]);
+
   const rules = model && model.rules;
   const signals = useMemo(() => deriveSignals(bars, rules), [bars, rules]);
+
+  // A signal already judged Bad is hidden: you've made the call, so it stops
+  // competing for attention. Filtered for display only — `signals` stays whole
+  // so pairedExit() still walks the model's real sequence.
+  const visibleSignals = useMemo(
+    () => signals.filter((s) => showHidden || saved[sigKey(s.kind, s.bar.ts)] !== "Bad"),
+    [signals, saved, showHidden]
+  );
+  const hiddenCount = signals.length - visibleSignals.length;
 
   const chartData = useMemo(
     () =>
@@ -5032,16 +5071,15 @@ function IndicatorPreview({ model }) {
   // see EXIT_FEEDBACK below for why exits deliberately don't.
   const markers = useMemo(
     () =>
-      signals.map((s) => ({
+      visibleSignals.map((s) => ({
         time: Math.floor(new Date(s.bar.ts).getTime() / 1000),
         ...SIGNAL_STYLE[s.kind],
-        ...(s.kind === "exit" ? {} : { id: `${s.kind}:${s.bar.ts}` }),
+        ...(s.kind === "exit" ? {} : { id: sigKey(s.kind, s.bar.ts) }),
       })),
-    [signals]
+    [visibleSignals]
   );
 
   function openLabeler(key) {
-    if (saved[key]) return;
     setLabeling(key);
     setNote("");
     const row = rowRefs.current[key];
@@ -5053,20 +5091,44 @@ function IndicatorPreview({ model }) {
     // exit signal has no honest row shape here — writing one would set
     // entry_at to the moment the model wanted OUT. See EXIT_FEEDBACK.
     if (signal.kind === "exit") return;
-    const key = `${signal.kind}:${signal.bar.ts}`;
+    const key = sigKey(signal.kind, signal.bar.ts);
     // Bad = the model should not have signaled here at all, so there is no
     // exit to pair — see exitISO() in the Training Data tab.
     const exitBar = quality === "Bad" ? null : pairedExit(signals, signal, bars);
-    const { error: err } = await supabase.from("training_examples").insert({
-      entry_at: signal.bar.ts,
-      exit_at: exitBar ? exitBar.ts : null,
-      ticker: "SPY",
-      direction: signal.kind === "short" ? "Short" : "Long",
-      quality,
-      notes: note
-        ? `${note} [from preview of model ${model.generated_at}]`
-        : `from preview of model ${model.generated_at}`,
-    });
+    const direction = signal.kind === "short" ? "Short" : "Long";
+    const tagged = note
+      ? `${note} [from preview of model ${model.generated_at}]`
+      : `from preview of model ${model.generated_at}`;
+
+    // Re-labeling patches the existing row rather than upserting the whole
+    // payload. The row may have been entered by hand with a strategy, a
+    // key_level, and a note the trader wrote — an upsert would blank the note
+    // and replace a real exit with the model's guessed pairing. Only what this
+    // click actually decided gets written.
+    const err = saved[key]
+      ? (
+          await supabase
+            .from("training_examples")
+            .update({
+              quality,
+              // Bad has no exit by definition; Good leaves any existing exit
+              // alone, since a hand-entered one beats a derived pairing
+              ...(quality === "Bad" ? { exit_at: null } : {}),
+              ...(note ? { notes: tagged } : {}),
+            })
+            .eq("entry_at", signal.bar.ts)
+            .eq("direction", direction)
+        ).error
+      : (
+          await supabase.from("training_examples").insert({
+            entry_at: signal.bar.ts,
+            exit_at: exitBar ? exitBar.ts : null,
+            ticker: "SPY",
+            direction,
+            quality,
+            notes: tagged,
+          })
+        ).error;
     if (err) {
       setError(err.message);
       return;
@@ -5122,7 +5184,7 @@ function IndicatorPreview({ model }) {
     return <div style={{ fontSize: 12, color: T.dim }}>No bars stored yet.</div>;
   }
 
-  const counts = signals.reduce((acc, s) => {
+  const counts = visibleSignals.reduce((acc, s) => {
     acc[s.kind] = (acc[s.kind] || 0) + 1;
     return acc;
   }, {});
@@ -5196,14 +5258,31 @@ function IndicatorPreview({ model }) {
           }}
         >
           SIGNALS {loading ? "· loading…" : ""}
+          {hiddenCount > 0 && (
+            <button
+              onClick={() => setShowHidden((v) => !v)}
+              style={{
+                ...retryBtn,
+                padding: "1px 8px",
+                marginLeft: 10,
+                fontSize: 10,
+                letterSpacing: "0.08em",
+                color: T.faint,
+              }}
+            >
+              {showHidden ? "hide" : "show"} {hiddenCount} tagged bad
+            </button>
+          )}
         </div>
-        {signals.length === 0 && !loading && (
+        {visibleSignals.length === 0 && !loading && (
           <div style={{ fontSize: 12, color: T.dim }}>
-            No signals fired this session — the rules never all held at once.
+            {signals.length === 0
+              ? "No signals fired this session — the rules never all held at once."
+              : `All ${signals.length} signals this session are tagged Bad.`}
           </div>
         )}
-        {signals.map((s) => {
-          const key = `${s.kind}:${s.bar.ts}`;
+        {visibleSignals.map((s) => {
+          const key = sigKey(s.kind, s.bar.ts);
           const style = SIGNAL_STYLE[s.kind];
           const isLabeling = labeling === key;
           return (
