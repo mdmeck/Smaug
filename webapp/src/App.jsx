@@ -3449,11 +3449,101 @@ function aggregateBars(bars, minutes) {
   return out;
 }
 
-function CandleChart({ data, markers }) {
+// ET wall-clock minutes for a chart time (unix seconds). Resolved in market
+// time rather than the browser's, so the session boundary lands correctly for
+// a trader whose machine isn't on ET.
+function etMinuteOfDay(unixSeconds) {
+  const [h, m] = new Date(unixSeconds * 1000)
+    .toLocaleTimeString("en-US", {
+      timeZone: "America/New_York",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    })
+    .split(":")
+    .map(Number);
+  return h * 60 + m;
+}
+
+const RTH_OPEN_MIN = 9 * 60 + 30;
+
+// First bar at or after 9:30 ET; everything before it is premarket. `bars`
+// spans premarket through the RTH close only — the pipeline drops post-market
+// (smaug_pipeline.py, prepost filtering) — so there is no trailing
+// after-hours block to shade, and none is drawn.
+function rthOpenTime(data) {
+  const first = data.find((d) => etMinuteOfDay(d.time) >= RTH_OPEN_MIN);
+  return first ? first.time : null;
+}
+
+const PREMARKET_FILL = "rgba(255, 255, 255, 0.035)";
+const OPEN_LINE = "rgba(169, 169, 169, 0.45)";
+
+// Shades premarket and rules a line at the 9:30 open. A v5 series primitive
+// drawing on the background layer: a histogram series faking a band would
+// distort the price scale, and an absolutely-positioned div drifts out of
+// alignment as soon as you pan or zoom.
+class SessionShade {
+  constructor() {
+    this._chart = null;
+    this._openTime = null;
+    this._paneView = {
+      zOrder: () => "bottom",
+      // `draw` must exist even though everything happens in `drawBackground`:
+      // the library calls renderer.draw() unguarded but drawBackground?.() with
+      // optional chaining, so omitting it throws on every paint.
+      renderer: () => ({
+        draw: () => {},
+        drawBackground: (target) => this._draw(target),
+      }),
+    };
+  }
+  attached({ chart }) {
+    this._chart = chart;
+  }
+  detached() {
+    this._chart = null;
+  }
+  paneViews() {
+    return [this._paneView];
+  }
+  updateAllViews() {}
+  setOpenTime(t) {
+    this._openTime = t;
+  }
+  _draw(target) {
+    if (!this._chart || this._openTime == null) return;
+    const scale = this._chart.timeScale();
+    const x = scale.timeToCoordinate(this._openTime);
+    if (x == null) return;
+    // timeToCoordinate gives the centre of the 9:30 bar; back off half a bar
+    // so the shading stops at that bar's left edge instead of splitting it
+    const edge = x - scale.options().barSpacing / 2;
+    if (edge <= 0) return;
+    target.useBitmapCoordinateSpace(({ context: ctx, horizontalPixelRatio, bitmapSize }) => {
+      const px = edge * horizontalPixelRatio;
+      // premarket is always the leftmost data (one session per chart), so the
+      // band needs no left boundary of its own
+      ctx.fillStyle = PREMARKET_FILL;
+      ctx.fillRect(0, 0, px, bitmapSize.height);
+      ctx.fillStyle = OPEN_LINE;
+      ctx.fillRect(px, 0, Math.max(1, Math.round(horizontalPixelRatio)), bitmapSize.height);
+    });
+  }
+}
+
+function CandleChart({ data, markers, onMarkerClick }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
   const seriesRef = useRef(null);
   const markersRef = useRef(null);
+  const shadeRef = useRef(null);
+  // held in a ref so the click subscription — registered once, with the chart —
+  // always reaches the current handler without re-subscribing every render
+  const clickRef = useRef(onMarkerClick);
+  useEffect(() => {
+    clickRef.current = onMarkerClick;
+  }, [onMarkerClick]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -3507,6 +3597,25 @@ function CandleChart({ data, markers }) {
     // and fed via setMarkers below (the v4 series.setMarkers() no longer exists)
     markersRef.current = createSeriesMarkers(series, []);
 
+    const shade = new SessionShade();
+    series.attachPrimitive(shade);
+    shadeRef.current = shade;
+
+    // A marker is clickable exactly when it was given an `id`. Markers without
+    // one (exits) never resolve to anything here, so excluding them from the
+    // click path is a property of the data, not a special case in this handler.
+    const objectId = (param) =>
+      param.hoveredInfo ? param.hoveredInfo.objectId : param.hoveredObjectId;
+    const onClick = (param) => {
+      const id = objectId(param);
+      if (id && clickRef.current) clickRef.current(id);
+    };
+    const onMove = (param) => {
+      container.style.cursor = objectId(param) && clickRef.current ? "pointer" : "default";
+    };
+    chart.subscribeClick(onClick);
+    chart.subscribeCrosshairMove(onMove);
+
     const ro = new ResizeObserver(() => {
       if (containerRef.current) {
         chart.applyOptions({ width: containerRef.current.clientWidth });
@@ -3516,12 +3625,16 @@ function CandleChart({ data, markers }) {
 
     return () => {
       ro.disconnect();
+      chart.unsubscribeClick(onClick);
+      chart.unsubscribeCrosshairMove(onMove);
       chart.remove();
     };
   }, []);
 
   useEffect(() => {
     if (seriesRef.current) {
+      // set before the data so the first paint already has the boundary
+      if (shadeRef.current) shadeRef.current.setOpenTime(rthOpenTime(data));
       seriesRef.current.setData(data);
       chartRef.current.timeScale().fitContent();
     }
@@ -4834,6 +4947,18 @@ function etTime(ts) {
 // Replays one model's rules over a single session's stored bars so the trader
 // can see where it would have fired, scroll day to day, and label any signal
 // straight into training_examples for the next routine run to learn from.
+// EXIT_FEEDBACK — why X markers are inert.
+//
+// `training_examples` describes a round trip from the trader's point of view:
+// entry_at, an optional exit_at, and a Good/Bad quality that judges the TRADE.
+// There is no shape in it for "the model exited, and that exit was wrong" —
+// the useful critique of an exit is that it came too soon or too late, which
+// is a signed distance, not a boolean. Labeling an X through the entry path
+// would file a Long example whose entry is the exit bar, which reads as a
+// real observation to the routine and is not one.
+//
+// So exits are shown but not labelable until the schema can carry that. When
+// it can, the natural home is this same flow.
 function IndicatorPreview({ model }) {
   const [days, setDays] = useState(null);
   const [dayIndex, setDayIndex] = useState(0);
@@ -4844,6 +4969,7 @@ function IndicatorPreview({ model }) {
   const [note, setNote] = useState("");
   const [saved, setSaved] = useState({}); // key -> quality, for inline feedback
   const [copied, setCopied] = useState(false);
+  const rowRefs = useRef({}); // key -> row node, so a marker click can scroll to it
 
   // day list first (ts only — cheap), then the selected day's bars with
   // features on demand, so we never pull ~10k feature blobs at once
@@ -4902,16 +5028,31 @@ function IndicatorPreview({ model }) {
     [bars]
   );
 
+  // Only entry markers carry an `id`, which is what makes them clickable —
+  // see EXIT_FEEDBACK below for why exits deliberately don't.
   const markers = useMemo(
     () =>
       signals.map((s) => ({
         time: Math.floor(new Date(s.bar.ts).getTime() / 1000),
         ...SIGNAL_STYLE[s.kind],
+        ...(s.kind === "exit" ? {} : { id: `${s.kind}:${s.bar.ts}` }),
       })),
     [signals]
   );
 
+  function openLabeler(key) {
+    if (saved[key]) return;
+    setLabeling(key);
+    setNote("");
+    const row = rowRefs.current[key];
+    if (row) row.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
   async function label(signal, quality) {
+    // Guarded rather than assumed: `training_examples` is entry-centric, so an
+    // exit signal has no honest row shape here — writing one would set
+    // entry_at to the moment the model wanted OUT. See EXIT_FEEDBACK.
+    if (signal.kind === "exit") return;
     const key = `${signal.kind}:${signal.bar.ts}`;
     // Bad = the model should not have signaled here at all, so there is no
     // exit to pair — see exitISO() in the Training Data tab.
@@ -5042,7 +5183,7 @@ function IndicatorPreview({ model }) {
         <div style={{ fontSize: 12, color: T.red, marginBottom: 10 }}>{error}</div>
       )}
 
-      <CandleChart data={chartData} markers={markers} />
+      <CandleChart data={chartData} markers={markers} onMarkerClick={openLabeler} />
 
       <div style={{ marginTop: 14 }}>
         <div
@@ -5068,6 +5209,9 @@ function IndicatorPreview({ model }) {
           return (
             <div
               key={key}
+              ref={(el) => {
+                rowRefs.current[key] = el;
+              }}
               style={{
                 display: "flex",
                 flexWrap: "wrap",
@@ -5076,6 +5220,8 @@ function IndicatorPreview({ model }) {
                 padding: "6px 0",
                 borderBottom: `1px solid ${T.panelEdge}`,
                 fontSize: 12,
+                // the row a marker click just opened, so the eye lands on it
+                background: isLabeling ? T.panelEdge : "transparent",
               }}
             >
               <span
@@ -5104,6 +5250,10 @@ function IndicatorPreview({ model }) {
                   }}
                 >
                   saved as {saved[key]}
+                </span>
+              ) : s.kind === "exit" ? (
+                <span style={{ fontFamily: T.mono, fontSize: 11, color: T.faint }}>
+                  exit — not labelable yet
                 </span>
               ) : isLabeling ? (
                 <>
