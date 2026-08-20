@@ -294,6 +294,43 @@ const isSameDay = (a, b) =>
   a.getMonth() === b.getMonth() &&
   a.getDate() === b.getDate();
 
+// The brief's jsonb columns are written by the AI routine, so their *outer*
+// shape drifts the same way their inner fields do: the spec pins `econ` and
+// `earnings` as bare arrays, but runs have also wrapped them in an object keyed
+// `events`/`earnings`. Reading only the wrapper is what emptied this grid on
+// 2026-08-20 — a full brief sat in the row, FOMC minutes and all, while every
+// day rendered "no events". Accept either, and anything unrecognized as empty.
+function briefRows(value, ...keys) {
+  if (Array.isArray(value)) return value;
+  if (value && typeof value === "object") {
+    for (const k of keys) if (Array.isArray(value[k])) return value[k];
+    // a lone array under some other key name is still unambiguous
+    const arrays = Object.values(value).filter(Array.isArray);
+    if (arrays.length === 1) return arrays[0];
+  }
+  return [];
+}
+
+// Rows bucket into the week by three-letter weekday, so "Wednesday", "wed" and
+// "WED " all have to land on Wed rather than silently dropping out of the grid.
+// Anything that isn't a weekday still drops, as before.
+function dayKey(value) {
+  const s = String(value || "").trim();
+  return s ? s[0].toUpperCase() + s.slice(1, 3).toLowerCase() : "";
+}
+
+// Earnings order pre-market first, after-close last. The spec calls `time`
+// descriptive ("before open" / "after close"); earlier rows used the BMO/AMC
+// abbreviations. Both vocabularies have to sort the same, and the tag column is
+// too narrow for the prose form, so the abbreviation is what gets displayed.
+function earnSlot(time) {
+  const s = String(time || "").toLowerCase();
+  if (s.includes("bmo") || s.includes("before") || s.includes("pre")) return "BMO";
+  if (s.includes("amc") || s.includes("after") || s.includes("close") || s.includes("post"))
+    return "AMC";
+  return "";
+}
+
 // Flattens one day into a single ordered timeline instead of the three
 // separately-bordered groups this used to render: pre-market earnings, then
 // the session's econ prints, then after-close earnings. Same ordering as
@@ -301,12 +338,12 @@ const isSameDay = (a, b) =>
 // clock time — but expressed as one sequence, which is what lets the dot rail
 // in TimelineItem read as a day unfolding.
 function dayTimeline(econEvents, earnRows, label) {
-  const dayEcon = econEvents.filter((e) => e.day === label);
-  const dayEarn = earnRows.filter((e) => e.day === label);
-  const at = (t) => dayEarn.filter((e) => (e.time || "").toUpperCase() === t);
+  const dayEcon = econEvents.filter((e) => dayKey(e.day) === label);
+  const dayEarn = earnRows.filter((e) => dayKey(e.day) === label);
+  const at = (slot) => dayEarn.filter((e) => earnSlot(e.time) === slot);
   const bmo = at("BMO");
   const amc = at("AMC");
-  const other = dayEarn.filter((e) => !bmo.includes(e) && !amc.includes(e));
+  const other = at("");
 
   const asEarnings = (e) => ({
     emoji: "💸",
@@ -314,7 +351,7 @@ function dayTimeline(econEvents, earnRows, label) {
     ticker: e.ticker,
     name: e.company || "",
     weight: 450,
-    tag: e.time,
+    tag: earnSlot(e.time) || e.time || "",
     time: "",
     sub: "",
     title: e.note || e.company || "",
@@ -470,9 +507,12 @@ function TimelineItem({ item, last }) {
 
 function WeekCalendar({ econ, earnings, lastRun }) {
   const week = tradingWeek();
-  const econEvents = (econ && econ.events) || [];
-  const earnRows = (earnings && earnings.earnings) || [];
-  const nothingYet = !econ && !earnings;
+  const econEvents = briefRows(econ, "events", "econ", "calendar");
+  const earnRows = briefRows(earnings, "earnings", "events");
+  // Only a brief that has never run gets "Awaiting run" — once one exists, show
+  // the grid even if it's sparse, so an empty week reads as an empty week and
+  // not as a missing brief.
+  const nothingYet = !lastRun && !econEvents.length && !earnRows.length;
   // date, not just time: a brief that stopped refreshing days ago used to look
   // identical to one written this morning
   const stale = lastRun && !isSameDay(lastRun, new Date());
