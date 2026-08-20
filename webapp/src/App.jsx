@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, Component } from "react";
 import { createChart, CandlestickSeries, BaselineSeries, createSeriesMarkers } from "lightweight-charts";
 import { supabase } from "./supabaseClient.js";
 
@@ -846,7 +846,7 @@ function BriefPanel({ title, right, hasData, flush = false, children }) {
             ...(flush ? { marginTop: 20 } : { padding: "24px 30px 28px", gap: 24 }),
           }}
         >
-          {children}
+          <PanelBoundary>{children}</PanelBoundary>
         </div>
       ) : (
         <div
@@ -870,16 +870,89 @@ const TONE = {
   neutral: { dot: B.amber, text: B.amberBright, wash: "oklch(0.72 0.15 55 / 0.14)" },
 };
 
-// The routine writes fear_greed as free text like "39 — Fear" or "62 - Greed".
+// Brief fields are whatever the AI routine last decided to write — they are
+// data, not code, so a shape change ships straight to production without a build
+// ever seeing it. The routine has written these as free text ("39 — Fear",
+// "+0.16%") and as nested objects ({value, label}, {dow, spx, nasdaq100}); on
+// 2026-08-20 the object form reached `tile()` and React error #31 took down the
+// whole SPA, not just this card. Everything below coerces rather than trusts.
+const FUTURES_LABELS = {
+  spx: "SPX",
+  es: "ES",
+  nasdaq100: "NDX",
+  ndx: "NDX",
+  nasdaq: "NDX",
+  dow: "DOW",
+  rut: "RUT",
+};
+
+// Any scalar renders as itself; any object renders as "SPX +0.16% · NDX +0.42%".
+// `labels` both prettifies the keys and fixes their order, so the tile reads the
+// same day to day no matter what key order the routine emitted.
+function asText(value, labels) {
+  if (value === null || value === undefined || value === "") return "";
+  if (Array.isArray(value))
+    return value.map((v) => asText(v, labels)).filter(Boolean).join(" · ");
+  if (typeof value === "object") {
+    const order = labels ? Object.keys(labels) : [];
+    const rank = (k) => (order.indexOf(k) < 0 ? order.length : order.indexOf(k));
+    return Object.keys(value)
+      .sort((a, b) => rank(a) - rank(b))
+      .map((k) => {
+        const t = asText(value[k], labels);
+        return t ? `${(labels && labels[k]) || k.toUpperCase()} ${t}` : "";
+      })
+      .filter(Boolean)
+      .join(" · ");
+  }
+  return String(value);
+}
+
 // The leading integer is the needle position; anything unparseable just means
 // no gauge, since a needle at a guessed value would be worse than none.
-function fearGreedValue(text) {
-  const n = parseInt(String(text || "").trim(), 10);
+function fearGreedValue(v) {
+  const raw = v && typeof v === "object" ? v.value : v;
+  const n = parseInt(String(raw ?? "").trim(), 10);
   return Number.isFinite(n) && n >= 0 && n <= 100 ? n : null;
 }
 
+// "56 — Greed" from either the string form or {value: 56, label: "Greed"}.
+function fearGreedText(v) {
+  if (v && typeof v === "object")
+    return [v.value, v.label]
+      .filter((x) => x !== null && x !== undefined && x !== "")
+      .join(" — ");
+  return asText(v);
+}
+
+// Last line of defense for the same class of failure: a panel whose data drifted
+// into a shape its component cannot render collapses to "Unavailable" instead of
+// unmounting the app. Without this, one bad field costs the trader every tab.
+class PanelBoundary extends Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  componentDidCatch(err) {
+    console.error("[brief] panel failed to render", err);
+  }
+  render() {
+    if (this.state.failed)
+      return (
+        <div style={{ fontFamily: B.mono, fontSize: 12, color: B.faint }}>
+          Unavailable — this section's data is in an unexpected shape.
+        </div>
+      );
+    return this.props.children;
+  }
+}
+
 function TonePill({ tone }) {
-  const c = TONE[tone] || TONE.neutral;
+  const key = typeof tone === "string" ? tone : "";
+  const c = TONE[key] || TONE.neutral;
   return (
     <div
       style={{
@@ -909,7 +982,7 @@ function TonePill({ tone }) {
           color: c.text,
         }}
       >
-        {(tone || "neutral").toUpperCase()}
+        {(key || "neutral").toUpperCase()}
       </span>
     </div>
   );
@@ -955,7 +1028,7 @@ function SentimentBody({ data }) {
               FEAR &amp; GREED
             </span>
             <span style={{ fontSize: 15, fontWeight: 700, color: B.amber }}>
-              {data.fear_greed}
+              {fearGreedText(data.fear_greed)}
             </span>
           </div>
           <div
@@ -989,17 +1062,17 @@ function SentimentBody({ data }) {
           gap: 16,
         }}
       >
-        {tile("ES FUTURES", data.futures)}
-        {tile("VIX", data.vix)}
+        {tile("ES FUTURES", asText(data.futures, FUTURES_LABELS))}
+        {tile("VIX", asText(data.vix))}
       </div>
 
-      {data.overnight && (
+      {asText(data.overnight || data.overnight_summary) && (
         <div>
           <div style={{ ...eyebrow(B.faint), letterSpacing: "0.07em", marginBottom: 8 }}>
             OVERNIGHT
           </div>
           <div style={{ fontSize: 14.5, lineHeight: 1.6, color: "oklch(0.88 0.005 260)" }}>
-            {data.overnight}
+            {asText(data.overnight || data.overnight_summary)}
           </div>
         </div>
       )}
@@ -1014,7 +1087,7 @@ function SentimentBody({ data }) {
             borderTop: `1px solid ${B.edgeSoft}`,
           }}
         >
-          {data.summary}
+          {asText(data.summary)}
         </div>
       )}
     </>
@@ -1098,7 +1171,7 @@ function CasesBody({ data }) {
           >
             WATCH
           </span>
-          <span style={{ color: B.muted }}>{data.watch}</span>
+          <span style={{ color: B.muted }}>{asText(data.watch)}</span>
         </div>
       )}
     </>
