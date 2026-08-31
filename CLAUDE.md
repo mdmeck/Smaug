@@ -74,6 +74,17 @@ Key invariants:
 - Assembled output must contain exactly one `^//@version=` line and exactly one `^indicator(` line; if not, omit `pinescript` from the row rather than storing a broken script.
 - Known non-bug: RSI plots on the price scale because the indicator is `overlay=true`. Pine can't mix panes in one script; the trader drags it out once in TradingView.
 
+## Logging trades into `journal_entries`
+
+The trader pastes broker order history and asks for it to be logged. Conventions:
+
+- **Use the `Net Prc` column, never `Price`.** In thinkorswim order history `Price` is the order's *limit* and `Amount` is just limit × 100 — neither is what filled. `Net Prc` is the actual average fill. Price improvement of a cent or two per leg is routine and compounds: on 2026-08-10 four legs' worth turned a +$1 day into a logged −$4 before it was caught. Older plain-text exports have no `Net Prc` column at all — log the limit, but say so in `notes` so the row is auditable, and re-check it against the order-history view if the day doesn't tie out.
+- **Reconcile the day's sum against the broker's daily P/L before reporting it done.** That check is what catches the wrong-column error.
+- One row per round trip (open → close), pairing fills by strike in time order. `direction` is Long for calls, Short for puts. `result` is the dollar P/L as a signed string; `cost_basis` is the premium paid to open. Both are **gross of fees** on hand-entered rows.
+- CANCELED orders are not trades. Note them on the neighboring row if they show intent (a re-entry that never filled), but don't log them.
+- `notes` format follows the existing rows: `SPY 774C 0DTE · 1x · in 1.00 / out 1.10. Entry 10:09:49, exit 10:11:04.` plus a price-source clause.
+- The routine's connector runs as `postgres`, so **pass `user_id` explicitly** — see the RLS invariant above.
+
 ## Webapp notes
 
 - `webapp/src/App.jsx` is one ~3700-line file holding every component, the theme object `T`, and all Supabase access. Follow the existing inline-style-object convention rather than introducing CSS files.

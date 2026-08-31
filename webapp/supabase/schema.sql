@@ -113,8 +113,15 @@ create table if not exists daily_briefs (
   earnings jsonb,
   sentiment jsonb,
   cases jsonb,
+  -- outsized market-wide options flow, shown on the Dashboard rather than the
+  -- brief. Added after the table existed, so it needs the alter below too:
+  -- `create table if not exists` is a no-op on an already-created table and
+  -- would silently skip the new column.
+  whales jsonb,
   created_at timestamptz not null default now()
 );
+
+alter table daily_briefs add column if not exists whales jsonb;
 
 alter table daily_briefs enable row level security;
 

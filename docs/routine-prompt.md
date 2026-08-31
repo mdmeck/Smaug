@@ -57,6 +57,17 @@ Determine today's date and the current/upcoming trading week (Mon-Fri) yourself.
 2. **EARNINGS**: Major companies reporting earnings this week, with special focus on tech and semiconductor companies plus any mega-caps that move the S&P 500. Max 12 across the week, empty array if nothing major. Always include the ticker symbol, not just the company name.
 3. **SENTIMENT**: Current pre-market / overnight US market sentiment for today — S&P 500 futures direction and %, VIX level, CNN Fear & Greed index, and any major overnight headlines moving markets.
 4. **BULL/BEAR CASE**: Latest news and analyst commentary relevant to SPY / the S&P 500 today. Build a same-day bull case and bear case, each point under 15 words.
+5. **WHALE ACTION**: Where outsized options activity showed up in the last session, across the whole market — not just SPY. Fetch these two, in this order; they were checked and are the free, no-login, non-JavaScript sources that actually return data to a fetch:
+   - `https://www.marketbeat.com/market-data/unusual-call-options-volume/` — bullish side
+   - `https://www.marketbeat.com/market-data/unusual-put-options-volume/` — bearish side
+
+   Each is a dated table of ticker, current price, option volume, average volume, and percent increase. **Record the date printed on the page** — it is the session the numbers describe, and on a Monday it is the previous Friday. That date goes in `as_of` on every row you take from that page, and it is what the panel displays; do not substitute today's date, and do not leave it out because the run date is "close enough". **Take the rows as ranked and published — no market-cap or price filter.** A $0.40 stock at 900% of average is what the source flagged, and second-guessing the screen means the panel stops matching a table the trader can check. Take up to 8 names total across the two pages. Copy `volume` and `avg_volume` as numbers, exactly as printed — do not convert the percent increase into a multiple yourself; the panel does that.
+
+   Then fetch `https://www.cboe.com/us/options/market_statistics/daily/` for the session's market-wide put/call ratios (total, index, equity) and call vs put volume. That's exchange-primary data and is the lean each name should be read against — use it to write the `note` fields, and say so when a name's flow runs opposite the tape.
+
+   Optionally search the web for news on a name to explain *why* the volume showed up (earnings, guidance, M&A, an analyst move) and put that in `note`. If you find nothing, leave `note` empty — never invent a catalyst, and never write a dollar premium figure: no free source publishes per-print premium, and an estimate here is a number the trader would act on.
+
+   If both MarketBeat pages fail, write `whales` as an empty array and say so in your final report. Do not substitute a paid or JavaScript-only scanner, and do not reconstruct the list from memory.
 
 Using your Supabase connector, upsert into `daily_briefs` with conflict target `user_id` (the unique constraint is in place, so `on_conflict=user_id` resolves correctly):
 
@@ -65,6 +76,7 @@ Using your Supabase connector, upsert into `daily_briefs` with conflict target `
 - `earnings`: `{"earnings": [{"day": "Mon|Tue|Wed|Thu|Fri", "ticker": "e.g. AAPL", "company": "name", "time": "BMO|AMC", "note": "why it matters, under 8 words"}]}`
 - `sentiment`: `{"tone": "bullish|bearish|neutral", "futures": "e.g. ES +0.3%", "vix": "e.g. 18.6", "fear_greed": "e.g. 62 - Greed", "overnight": "one line on overnight action", "summary": "2 sentences max on the tape's tone"}`
 - `cases`: `{"bull": ["point 1", "point 2", "point 3"], "bear": ["point 1", "point 2", "point 3"], "watch": "single most important thing to watch today, one line"}`
+- `whales`: a **bare array** (not wrapped in an object) — `[{"ticker": "AFRM", "lean": "bullish|bearish|mixed", "volume": 34696, "avg_volume": 18557, "as_of": "2026-08-28", "flow": "one sentence on what the volume was", "note": "why it matters, or empty"}]`. `volume`/`avg_volume` are numbers, not strings; `as_of` is `YYYY-MM-DD`, the date printed on the source page, not the date of this run. Empty array `[]` if the sources were unreachable or nothing was unusual. This renders on the Dashboard's Whale Action panel, not on the Morning Brief.
 - `generated_at`: current timestamp — this is when the brief was last refreshed, not the row's original insert time
 
 This table holds exactly one row, overwritten each run. No history is kept.
@@ -133,4 +145,4 @@ Never write into `notes` — that field is the trader's own reasoning and is gro
 
 Report what you actually did: which tables you wrote, the row counts, and any step that failed or was skipped. If a write errored, say so plainly with the error — do not report success you did not verify.
 
-Name all four of `daily_briefs`, `entry_models`, `trade_feedback`, and `training_examples.analysis_notes` explicitly, each with what you wrote or why you didn't. A part that was silently skipped looks identical to a part that succeeded unless you list them one by one — this is how `trade_feedback` stayed empty for days without anyone noticing.
+Name all four of `daily_briefs`, `entry_models`, `trade_feedback`, and `training_examples.analysis_notes` explicitly, each with what you wrote or why you didn't. For `daily_briefs`, state the `whales` count separately — it is the newest column and the easiest one to silently skip while the rest of the brief looks healthy. A part that was silently skipped looks identical to a part that succeeded unless you list them one by one — this is how `trade_feedback` stayed empty for days without anyone noticing.

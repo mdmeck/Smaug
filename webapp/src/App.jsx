@@ -1832,6 +1832,309 @@ function AiFeedbackPanel({ fb }) {
   );
 }
 
+// ---------- whale action ----------
+// Outsized options flow across the whole market, written by the morning routine
+// into `daily_briefs.whales` alongside the rest of the brief. These are
+// ticker-level reads, not contract prints: the routine researches flow, it has
+// no tape feed, so the panel deliberately shows a lean and a sentence rather
+// than pretending to strike-level precision it can't source.
+//
+// Same hazard as every other brief column — this is data the routine writes, so
+// a shape change ships to production without a build ever seeing it. Everything
+// below coerces (see asText) and the panel renders inside a PanelBoundary.
+
+const LEAN_ALIAS = {
+  bull: "bullish",
+  bullish: "bullish",
+  long: "bullish",
+  calls: "bullish",
+  bear: "bearish",
+  bearish: "bearish",
+  short: "bearish",
+  puts: "bearish",
+  mixed: "mixed",
+  neutral: "neutral",
+};
+
+// "mixed" is a real answer and keeps its own label, but has no TONE entry, so it
+// borrows neutral amber. Anything unrecognized lands on neutral outright rather
+// than being dropped — a lean we can't read is not a reason to hide the flow.
+const leanKey = (v) => LEAN_ALIAS[asText(v).trim().toLowerCase()] || "neutral";
+
+// Contract counts, not dollars. No free, fetchable source publishes per-print
+// premium — the ones that do are all behind a subscription — so the panel is
+// built on what MarketBeat's unusual-volume screens actually give: the session's
+// option volume against that name's average. A dollar figure here would have to
+// be estimated by the routine, and an invented "$42M" is exactly the number a
+// trader would act on.
+//
+// "34,696", "34.7K", 34696 -> a number. -1 when unreadable, so an item whose
+// size we can't parse never outranks one we can.
+function countValue(raw) {
+  const s = asText(raw).replace(/[,\s]/g, "").toLowerCase().replace(/^[^\d]*/, "");
+  const m = s.match(/^(\d+(?:\.\d+)?)(k|m|thousand|million)?/);
+  if (!m) return -1;
+  const mult = { k: 1e3, thousand: 1e3, m: 1e6, million: 1e6 };
+  return parseFloat(m[1]) * (mult[m[2]] || 1);
+}
+
+// 34696 -> "34.7K". Contract counts run five to six figures, which is unreadable
+// at tile size in full.
+function countText(n) {
+  if (!(n >= 0)) return "";
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e4) return `${(n / 1e3).toFixed(1)}K`;
+  return n.toLocaleString("en-US");
+}
+
+// "2026-08-28" -> "Aug 28". Parsed at noon like every other date in this file,
+// so a bare YYYY-MM-DD can't shift a day backward through a timezone. Anything
+// unparseable is shown verbatim rather than dropped — a date we can't format is
+// still a date the trader can read.
+function dayLabel(ymdStr) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymdStr)) return ymdStr;
+  const d = new Date(`${ymdStr}T12:00:00`);
+  return Number.isNaN(d.getTime())
+    ? ymdStr
+    : d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+// Calendar days old, or null if unreadable. The staleness threshold that uses
+// it is deliberately loose: this data is always at least one session behind, and
+// a Monday looking at Friday's tape is normal, not stale.
+function daysOld(ymdStr) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(ymdStr)) return null;
+  const d = new Date(`${ymdStr}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return null;
+  return (Date.now() - d.getTime()) / 86400000;
+}
+
+// The contract is a bare array of objects; the wrapper forms and the key
+// aliases are the same defensive read the week calendar had to grow after the
+// 2026-08-20 run (see docs/smaug-project-knowledge.md).
+function whaleItems(whales) {
+  const raw = Array.isArray(whales)
+    ? whales
+    : whales && typeof whales === "object"
+    ? whales.items || whales.whales || whales.flow || []
+    : [];
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((w) => (w && typeof w === "object" ? w : { flow: asText(w) }))
+    .map((w) => {
+      const vol = countValue(w.volume ?? w.option_volume ?? w.call_volume ?? w.put_volume);
+      const avg = countValue(w.avg_volume ?? w.average_volume ?? w.avg_vol);
+      // The multiple is computed here rather than read from the row: the source
+      // publishes a percent increase, the tile shows a multiple, and letting the
+      // routine convert between them is one more place to be quietly wrong.
+      const mult = vol > 0 && avg > 0 ? vol / avg : null;
+      return {
+        ticker: asText(w.ticker ?? w.symbol).trim().toUpperCase(),
+        lean: leanKey(w.lean ?? w.bias ?? w.sentiment ?? w.direction),
+        vol,
+        mult,
+        // Built from the two raw numbers; a prose size the routine wrote itself
+        // is the fallback, so an older or hand-written row still shows something.
+        size:
+          [countText(vol), mult ? `${mult.toFixed(1)}\u00d7 avg` : ""]
+            .filter(Boolean)
+            .join(" \u00b7 ") || asText(w.size ?? w.premium),
+        flow: asText(w.flow ?? w.description ?? w.summary),
+        note: asText(w.note ?? w.read ?? w.why),
+        // The session the numbers describe, which is NOT when the routine ran:
+        // a Monday brief reports Friday's tape. Stamping the panel with
+        // `generated_at` alone reads as "this is today's flow", which it isn't.
+        asOf: asText(w.as_of ?? w.date ?? w.session).trim(),
+      };
+    })
+    .filter((w) => w.ticker || w.flow)
+    // Ranked the way the source ranks it — by how far above normal the volume
+    // is, not by raw size, so a mega-cap's ordinary million contracts doesn't
+    // outrank the name that actually did something unusual.
+    .sort((a, b) => (b.mult ?? -1) - (a.mult ?? -1) || b.vol - a.vol);
+}
+
+// Compact cousin of TonePill — same 14% wash and dot, sized to sit inline with
+// a ticker rather than to head a card.
+function LeanTag({ lean }) {
+  const c = TONE[lean] || TONE.neutral;
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 5,
+        padding: "3px 9px",
+        borderRadius: 20,
+        background: c.wash,
+        flexShrink: 0,
+      }}
+    >
+      <span style={{ width: 5, height: 5, borderRadius: "50%", background: c.dot }} />
+      <span
+        style={{
+          fontFamily: B.mono,
+          fontSize: 10,
+          fontWeight: 700,
+          letterSpacing: "0.08em",
+          color: c.text,
+        }}
+      >
+        {lean.toUpperCase()}
+      </span>
+    </span>
+  );
+}
+
+function WhaleActionPanel({ whales, generatedAt }) {
+  const items = useMemo(() => whaleItems(whales), [whales]);
+
+  // Prefer the session the data is from over the time the routine ran. They are
+  // different questions and only one of them tells you whether the panel is
+  // worth reading. When the rows disagree, the header stops claiming a single
+  // date and each tile carries its own instead.
+  const dates = [...new Set(items.map((w) => w.asOf).filter(Boolean))];
+  const oneDate = dates.length === 1 ? dates[0] : null;
+  const mixedDates = dates.length > 1;
+  // > 4 days covers a long weekend without crying stale every Monday.
+  const stale = oneDate
+    ? daysOld(oneDate) > 4
+    : !oneDate && !mixedDates && generatedAt
+    ? !isSameDay(generatedAt, new Date())
+    : false;
+  const stamp = oneDate
+    ? `session ${dayLabel(oneDate)}`
+    : mixedDates
+    ? "mixed sessions"
+    : generatedAt
+    ? generatedAt.toLocaleDateString("en-US", { month: "short", day: "numeric" })
+    : null;
+
+  return (
+    <div
+      style={{
+        background: B.surface,
+        border: `1px solid ${B.edge}`,
+        borderRadius: 16,
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          padding: "22px 24px 16px",
+          borderBottom: `1px solid ${B.edge}`,
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          gap: 10,
+          flexWrap: "wrap",
+        }}
+      >
+        <div>
+          <div style={{ fontSize: 17, fontWeight: 700, color: B.ink }}>Whale Action</div>
+          <div style={{ fontSize: 13, color: B.dim, marginTop: 4 }}>
+            Unusual options volume across the market, most abnormal first
+          </div>
+        </div>
+        {stamp && (
+          <div
+            style={{ fontFamily: B.mono, fontSize: 11, color: stale ? B.amber : B.faint }}
+          >
+            {items.length} {items.length === 1 ? "name" : "names"} · {stamp}
+          </div>
+        )}
+      </div>
+
+      {items.length === 0 ? (
+        <div style={{ padding: 24, fontFamily: B.mono, fontSize: 12, color: B.faint }}>
+          Awaiting run — the morning routine writes this alongside the brief.
+        </div>
+      ) : (
+        <div
+          style={{
+            padding: 24,
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+            gap: 16,
+          }}
+        >
+          {items.map((w, i) => (
+            <div
+              key={`${w.ticker}-${i}`}
+              style={{ background: B.sunken, borderRadius: 10, padding: "14px 16px" }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 10,
+                  marginBottom: w.flow || w.note ? 9 : 0,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+                  <span
+                    style={{
+                      fontFamily: B.mono,
+                      fontSize: 15,
+                      fontWeight: 700,
+                      color: B.blue,
+                    }}
+                  >
+                    {w.ticker || "—"}
+                  </span>
+                  <LeanTag lean={w.lean} />
+                </div>
+                {w.size && (
+                  <span
+                    style={{
+                      fontFamily: B.mono,
+                      fontSize: 12.5,
+                      fontWeight: 600,
+                      color: B.muted,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {w.size}
+                  </span>
+                )}
+              </div>
+              {w.flow && (
+                <div style={{ fontSize: 13.5, lineHeight: 1.5, color: B.muted }}>
+                  {w.flow}
+                </div>
+              )}
+              {w.note && (
+                <div
+                  style={{ fontSize: 12.5, lineHeight: 1.45, color: B.dim, marginTop: 7 }}
+                >
+                  {w.note}
+                </div>
+              )}
+              {/* only when the header can't speak for every row — one date in
+                  two places is noise, one date standing for two sessions is a
+                  lie */}
+              {mixedDates && w.asOf && (
+                <div
+                  style={{
+                    fontFamily: B.mono,
+                    fontSize: 10.5,
+                    letterSpacing: "0.07em",
+                    color: B.ghost,
+                    marginTop: 8,
+                  }}
+                >
+                  {dayLabel(w.asOf).toUpperCase()}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- day detail ----------
 // Shown in place of the AI Feedback panel when a calendar day is clicked.
 // Reuses that column rather than opening a modal or pushing a row in below,
@@ -2126,7 +2429,7 @@ function DateFilter({ preset, setPreset, custom, setCustom }) {
   );
 }
 
-function DashboardTab() {
+function DashboardTab({ whales, briefAt }) {
   const [entries, setEntries] = useState([]);
   const [feedback, setFeedback] = useState(null);
   const [loadState, setLoadState] = useState("loading");
@@ -2274,6 +2577,13 @@ function DashboardTab() {
           </div>
         )}
       </div>
+
+      {/* Market context, below the trader's own numbers on purpose: the tab
+          should still open on P&L. Boundaried like the brief panels because the
+          content is routine-written jsonb. */}
+      <PanelBoundary>
+        <WhaleActionPanel whales={whales} generatedAt={briefAt} />
+      </PanelBoundary>
     </div>
   );
 }
@@ -5782,6 +6092,7 @@ export default function Smaug() {
     earnings: null,
     sentiment: null,
     cases: null,
+    whales: null,
   });
   const [lastRun, setLastRun] = useState(null);
 
@@ -5800,6 +6111,7 @@ export default function Smaug() {
           earnings: data.earnings || null,
           sentiment: data.sentiment || null,
           cases: data.cases || null,
+          whales: data.whales || null,
         });
         setLastRun(new Date(data.generated_at));
       }
@@ -5977,7 +6289,9 @@ export default function Smaug() {
         {tab === "Morning Brief" && (
           <MorningBriefTab panels={panels} lastRun={lastRun} />
         )}
-        {tab === "Dashboard" && <DashboardTab />}
+        {tab === "Dashboard" && (
+          <DashboardTab whales={panels.whales} briefAt={lastRun} />
+        )}
         {tab === "Journal" && <JournalTab />}
         {tab === "Charts" && (
           <div style={{ maxWidth: 1100, margin: "0 auto" }}>
