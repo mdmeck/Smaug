@@ -118,10 +118,16 @@ create table if not exists daily_briefs (
   -- `create table if not exists` is a no-op on an already-created table and
   -- would silently skip the new column.
   whales jsonb,
+  -- heavily shorted names that could squeeze, also Dashboard-side. Same
+  -- after-the-fact caveat as `whales`: needs the alter below, because
+  -- `create table if not exists` is a no-op against the live table and would
+  -- silently skip the column.
+  squeezes jsonb,
   created_at timestamptz not null default now()
 );
 
 alter table daily_briefs add column if not exists whales jsonb;
+alter table daily_briefs add column if not exists squeezes jsonb;
 
 alter table daily_briefs enable row level security;
 
