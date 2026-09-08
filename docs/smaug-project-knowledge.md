@@ -117,8 +117,21 @@ All `dist_*`/`ret_*`/`range_bps`/`ema_spread_bps` features are causal — comput
 ## Targets
 | target | meaning |
 |---|---|
-| `fwd_5m_bps` / `fwd_10m_bps` / `fwd_15m_bps` | forward return N minutes ahead, in bps, same-session only |
-| `mfe_10m_bps` | max favorable excursion (long side) over the next 10 minutes, in bps |
+| `fwd_5m_bps` / `fwd_10m_bps` / `fwd_15m_bps` | forward return N minutes ahead, in bps, same-session only. **Path-blind** — see the barrier targets below |
+| `fwd_max_10m_bps` / `fwd_min_10m_bps` | the best and worst price reached over the next 10 minutes, in bps from the current close. Deliberately **direction-neutral**: for a long, `fwd_max` is the favorable excursion and `fwd_min` the adverse one; for a short they swap and flip sign, so one pair serves both. `fwd_max` is always ≥ 0 and `fwd_min` ≤ 0. Replaces the old long-only `mfe_10m_bps`, which was the same number under a name that presumed a direction — `analysis_runs` rows written before 2026-09-07 still carry `mfe_10m_bps` |
+| `barrier_long_10m` / `barrier_short_10m` | **first-touch (triple-barrier) label**: `+1` the profit target was touched first, `-1` the stop was, `0` neither inside the window. `+1` always means *this trade won*, for both directions. Barriers are ATR-scaled — target `BARRIER_TARGET_ATR` (3.0) and stop `BARRIER_STOP_ATR` (1.5) multiples of a 14-period ATR on 1-minute bars, i.e. 2:1 reward:risk — so a label means the same thing in a quiet tape as a fast one |
+
+### Why the barrier targets exist
+
+A forward return says where price ended up and nothing about how it got there. An entry that bled 8 bps against you before running 20 bps in your favor scores **identically** to one that ran straight there — but the first one stops you out and the second is the trade. The barrier labels are the only targets that know a trade can be stopped out before it is right, which makes them the ones to model against for entry timing.
+
+Three things to know when reading them:
+
+- **They are categorical, not a move in bps.** Each target in `analysis_runs` now carries a `kind` field, `"bps"` or `"label"`. For a `label` target the decile table's `avg_move_bps` key is the mean label — roughly (win rate − loss rate) — not a basis-point figure, and the OLS `r2` is a linear probability model, so read the `outcome` block instead.
+- **`outcome`** (present only on label targets) reports `wins`/`losses`/`timeouts`, `win_rate` (of *resolved* bars, excluding timeouts), `resolved_rate`, `expectancy_r` (average outcome in units of the stop, timeouts scored flat), and `breakeven_win_rate`. Compare `win_rate` against `breakeven_win_rate` — at 2:1 the breakeven is 0.333, and beating it is the whole question. `expectancy_r` ignores commissions, slippage, and the option-premium path, so treat it as a ranking statistic between setups, never as a P&L forecast.
+- **Ties inside one bar resolve to the stop.** When a single bar's range spans both barriers, OHLC cannot say which came first, so the label is made pessimistic for the trade being modeled. Resolving the other way would inflate every win rate the pipeline reports.
+
+**The stop multiple has a floor.** ATR here is the average range of a *single* 1-minute bar (~4–5 bps on SPY), so a stop under about 1× ATR sits inside one bar's own noise and gets touched by nearly every bar. At 1.0/0.5 the labels resolve 99.9% of the time and the win rate reads ~0.40 against a 0.333 breakeven purely from intrabar granularity — that looks like edge and is not. The 3.0/1.5 defaults converge on the driftless 1/(1+RR) value on random-walk data, which is the sign the labels are measuring the tape rather than the bar size. Widen the two together to keep the 2:1 ratio `expectancy_r` assumes.
 
 ## PineScript generation
 Every entry-model run also produces a complete TradingView Pine Script v5 indicator implementing the same `long_entry`/`short_entry`/`exit` rules, so the trader can paste it straight into TradingView. Requirements:

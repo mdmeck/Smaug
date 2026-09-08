@@ -39,7 +39,29 @@ REPORT_TXT = "smaug_report.txt"
 BARS_JSON = "smaug_bars.json"
 TICKER = "SPY"
 HORIZONS = [5, 10, 15]          # minutes ahead for forward return targets
-MFE_HORIZON = 10                # minutes for max-favorable-excursion target
+EXCURSION_HORIZON = 10          # minutes for the forward max/min excursion targets
+# Triple-barrier labelling. A forward return says where price ended up; it says
+# nothing about the path taken to get there, so an entry that bled 8 bps against
+# you before running 20 bps in your favour scores identically to one that ran
+# straight there. The second one is tradeable and the first one stops you out.
+# The barrier labels fix that by asking which of a profit target, a stop, or a
+# time limit is touched *first*. Widths are ATR-scaled rather than fixed bps so
+# a label means the same thing in a quiet tape as in a fast one, which matches
+# the trader's own ATR-based stops.
+BARRIER_HORIZON = 10            # minutes before the time barrier closes the trade
+BARRIER_TARGET_ATR = 3.0        # profit target, in ATR multiples
+BARRIER_STOP_ATR = 1.5          # stop distance, in ATR multiples (2:1 reward:risk)
+ATR_LEN = 14                    # Wilder ATR period used to scale the barriers
+# The stop multiple has a floor that is not obvious. ATR here is the average
+# range of a *single* 1-minute bar (~4-5 bps on SPY), so a stop under about
+# 1x ATR sits inside one bar's own noise and is touched by essentially every
+# bar: at 1.0/0.5 the labels resolve 99.9% of the time and the win rate reads
+# ~0.40 against a 0.33 breakeven purely from intrabar granularity, which looks
+# like edge and is not. By 3.0/1.5 the win rate converges on the driftless
+# 1/(1+RR) value, which is the sign the labels are measuring the tape rather
+# than the bar size. These defaults are ~13 bps target / ~6.7 bps stop, close
+# to the trader's own scale, and leave ~25% of bars unresolved at the time
+# barrier. Widen them together to keep the 2:1 ratio the expectancy assumes.
 RTH_ONLY = True                 # keep regular trading hours only (9:30-16:00 ET)
 TEST_FRACTION = 0.25            # most recent 25% of data held out for testing
 MIN_ROWS = 500                  # refuse to run analysis on less than this
@@ -329,11 +351,15 @@ def synthetic_bars(days=6):
     rng = np.random.default_rng(42)
     frames = []
     price = 620.0
-    base = pd.Timestamp("2026-06-26 09:30", tz="America/New_York")
-    for d in range(days):
-        day_start = base + pd.Timedelta(days=d)
-        if day_start.weekday() >= 5:
-            day_start += pd.Timedelta(days=2)
+    # Walk a business-day cursor. Offsetting a fixed base by `d` days and then
+    # nudging weekends forward collided instead: with a Friday base, Saturday
+    # and the following Monday both landed on that Monday, so the frame carried
+    # duplicate timestamps and anything doing an index reindex (the swing-pivot
+    # helper in compute_features) raised rather than ran.
+    day_start = pd.Timestamp("2026-06-26 09:30", tz="America/New_York")
+    for _ in range(days):
+        while day_start.weekday() >= 5:
+            day_start += pd.Timedelta(days=1)
         idx = pd.date_range(day_start, periods=390, freq="1min")
         rets = rng.normal(0, 0.0004, 390)
         # plant a weak, learnable effect: mild mean reversion
@@ -354,6 +380,7 @@ def synthetic_bars(days=6):
             index=idx,
         )
         frames.append(df)
+        day_start += pd.Timedelta(days=1)
     return pd.concat(frames)
 
 
@@ -366,6 +393,81 @@ def rsi(series, length=14):
     loss = (-delta.clip(upper=0)).ewm(alpha=1 / length, adjust=False).mean()
     rs = gain / loss.replace(0, np.nan)
     return 100 - 100 / (1 + rs)
+
+
+def atr(df, length=ATR_LEN):
+    """Wilder's ATR in price units, used to scale the barrier widths.
+
+    True range normally reaches back to the previous close, which across a
+    session boundary is the overnight gap rather than anything the intraday
+    tape did — that would inflate ATR for the first `length` bars of every
+    session, exactly the window the trader is most active in. So the previous
+    close is dropped on each session's first bar and TR falls back to
+    high - low there.
+
+    Known limitation: premarket bars still feed the average, and they are
+    quieter than RTH, so the ATR at 9:30 runs a little tight and the barriers
+    with it. It washes out within `length` bars of the open.
+    """
+    h, l = df["high"], df["low"]
+    sess = pd.Series(df.index.date, index=df.index)
+    prev_close = df["close"].shift(1).where(sess.eq(sess.shift(1)))
+    tr = pd.concat(
+        [h - l, (h - prev_close).abs(), (l - prev_close).abs()], axis=1
+    ).max(axis=1)
+    out = tr.ewm(alpha=1 / length, adjust=False).mean()
+    out.iloc[:length] = np.nan          # ewm emits values before it is warm
+    return out
+
+
+def _first_touch(df, horizon, up_bps, dn_bps, tie):
+    """Which of two barriers is touched first within `horizon` bars.
+
+    `up_bps` / `dn_bps` are per-bar positive distances in bps above and below
+    the current close. Returns +1 when the upper barrier is touched first, -1
+    when the lower one is, 0 when neither is touched inside the window (the
+    time barrier), and NaN when the window would cross a session boundary or a
+    barrier width is unknown.
+
+    `tie` names which side wins when a single bar's range spans both barriers.
+    OHLC cannot say which came first inside that bar, so the caller passes the
+    side that makes the label pessimistic for the trade being modelled — the
+    stop. Resolving ties the other way would quietly inflate every win rate
+    this pipeline reports.
+    """
+    n = len(df)
+    c = df["close"].to_numpy(dtype=float)
+    hi = df["high"].to_numpy(dtype=float)
+    lo = df["low"].to_numpy(dtype=float)
+    up_lvl = c * (1.0 + np.asarray(up_bps, dtype=float) / 10_000.0)
+    dn_lvl = c * (1.0 - np.asarray(dn_bps, dtype=float) / 10_000.0)
+
+    up_hit = np.zeros((n, horizon), dtype=bool)
+    dn_hit = np.zeros((n, horizon), dtype=bool)
+    for k in range(1, horizon + 1):
+        fh = np.full(n, np.nan)
+        fl = np.full(n, np.nan)
+        fh[: n - k] = hi[k:]
+        fl[: n - k] = lo[k:]
+        with np.errstate(invalid="ignore"):
+            up_hit[:, k - 1] = fh >= up_lvl      # NaN compares False, as wanted
+            dn_hit[:, k - 1] = fl <= dn_lvl
+
+    first = np.argmax(up_hit | dn_hit, axis=1)
+    rows = np.arange(n)
+    u, d = up_hit[rows, first], dn_hit[rows, first]
+    if tie == "down":
+        lab = np.where(d, -1.0, np.where(u, 1.0, 0.0))
+    else:
+        lab = np.where(u, 1.0, np.where(d, -1.0, 0.0))
+
+    day = pd.Series(df.index.date, index=df.index)
+    valid = (
+        (day.shift(-horizon) == day).to_numpy()
+        & np.isfinite(up_lvl)
+        & np.isfinite(dn_lvl)
+    )
+    return np.where(valid, lab, np.nan)
 
 
 def compute_features(df):
@@ -539,21 +641,72 @@ def compute_features(df):
     return out
 
 
+# Targets are either a signed move in bps or a categorical first-touch label.
+# The two want different summaries — a mean bps figure is meaningless for a
+# label, and a win rate is meaningless for a move — so each target declares
+# which it is and run_analysis()/write_report() branch on it.
+TARGET_KIND_BPS = "bps"
+TARGET_KIND_LABEL = "label"
+
+
+def target_kind(tcol):
+    return TARGET_KIND_LABEL if tcol.startswith("barrier_") else TARGET_KIND_BPS
+
+
 def compute_targets(df):
-    """Forward moves in bps. Only valid within the same session —
-    rows whose horizon crosses a day boundary are dropped later."""
+    """Forward outcomes. Only valid within the same session — rows whose
+    horizon crosses a day boundary are NaN and get dropped later.
+
+    Three families, in increasing order of how much they resemble a trade:
+
+    - `fwd_*_bps`      where price ended up N minutes later. Path-blind.
+    - `fwd_max/min_*`  the best and worst it got to along the way. Direction
+                       neutral on purpose: for a long the max is the favourable
+                       excursion and the min is the adverse one, and for a short
+                       they swap, so one pair of columns serves both sides.
+    - `barrier_*`      which of a profit target, a stop, or the time limit was
+                       touched first. This is the only one that knows a trade
+                       can be stopped out before it is right.
+    """
     out = pd.DataFrame(index=df.index)
-    c, h = df["close"], df["high"]
+    c, h, l = df["close"], df["high"], df["low"]
     day = pd.Series(df.index.date, index=df.index)
+
     for hz in HORIZONS:
         fwd = c.shift(-hz) / c - 1
         same_day = day.shift(-hz) == day
         out[f"fwd_{hz}m_bps"] = np.where(same_day, fwd * 10_000, np.nan)
-    # max favorable excursion (long side): best high within window
-    fwd_max = h.rolling(MFE_HORIZON).max().shift(-MFE_HORIZON)
-    same_day = day.shift(-MFE_HORIZON) == day
-    out[f"mfe_{MFE_HORIZON}m_bps"] = np.where(
+
+    # Forward excursion envelope. `fwd_max` is the old mfe_10m_bps under a name
+    # that does not presume a direction; `fwd_min` is its missing counterpart,
+    # and is what tells you an entry was underwater before it worked.
+    hz = EXCURSION_HORIZON
+    same_day = day.shift(-hz) == day
+    fwd_max = h.rolling(hz).max().shift(-hz)
+    fwd_min = l.rolling(hz).min().shift(-hz)
+    out[f"fwd_max_{hz}m_bps"] = np.where(
         same_day, (fwd_max / c - 1) * 10_000, np.nan
+    )
+    out[f"fwd_min_{hz}m_bps"] = np.where(
+        same_day, (fwd_min / c - 1) * 10_000, np.nan
+    )
+
+    # Triple-barrier labels, +1 the target was hit first, -1 the stop was,
+    # 0 neither inside the window. Widths are ATR-scaled, so `tgt_bps`/`stp_bps`
+    # vary bar to bar with realised volatility.
+    atr_bps = (atr(df) / c) * 10_000
+    tgt_bps = atr_bps * BARRIER_TARGET_ATR
+    stp_bps = atr_bps * BARRIER_STOP_ATR
+    hz = BARRIER_HORIZON
+    # A long targets the upside and is stopped on the downside; a short is the
+    # mirror image. Ties inside one bar go to the stop in both cases, which is
+    # the `tie` side below, and the short label is negated so that +1 always
+    # means "this trade won" rather than "price went up".
+    out[f"barrier_long_{hz}m"] = _first_touch(
+        df, hz, up_bps=tgt_bps, dn_bps=stp_bps, tie="down"
+    )
+    out[f"barrier_short_{hz}m"] = -_first_touch(
+        df, hz, up_bps=stp_bps, dn_bps=tgt_bps, tie="up"
     )
     return out
 
@@ -574,6 +727,36 @@ def ols(X, y):
         return 1 - ss_res / ss_tot if ss_tot > 0 else np.nan
 
     return coef, r2
+
+
+def outcome_summary(y):
+    """Win/loss/timeout breakdown for a first-touch label target.
+
+    `win_rate` deliberately excludes timeouts — it answers "when this resolved,
+    how often was it right", which is the number a stop/target pair is chosen
+    against. `resolved_rate` is reported alongside it so a flattering win rate
+    on a handful of resolved bars cannot pass unnoticed.
+
+    `expectancy_r` is the average outcome in units of the stop: a win pays the
+    reward:risk ratio, a loss costs 1, a timeout is scored flat. It ignores
+    commissions, slippage, and the option-premium path, so treat it as a
+    ranking statistic between setups rather than as a P&L forecast.
+    """
+    wins = int((y > 0).sum())
+    losses = int((y < 0).sum())
+    timeouts = int((y == 0).sum())
+    resolved = wins + losses
+    rr = BARRIER_TARGET_ATR / BARRIER_STOP_ATR
+    return {
+        "wins": wins,
+        "losses": losses,
+        "timeouts": timeouts,
+        "reward_risk": round(rr, 3),
+        "win_rate": round(wins / resolved, 4) if resolved else None,
+        "resolved_rate": round(resolved / len(y), 4) if len(y) else None,
+        "expectancy_r": round((wins * rr - losses) / len(y), 4) if len(y) else None,
+        "breakeven_win_rate": round(1 / (1 + rr), 4),
+    }
 
 
 def decile_table(feature, target, n=10):
@@ -664,6 +847,8 @@ def run_analysis(bars):
 
         results["targets"][tcol] = {
             "n": len(sub),
+            "kind": target_kind(tcol),
+            "outcome": outcome_summary(y) if target_kind(tcol) == TARGET_KIND_LABEL else None,
             "correlations": ranked,
             "regression": {
                 "intercept_bps": round(float(coef[0]), 3),
@@ -691,7 +876,25 @@ def write_report(results):
         "",
     ]
     for tcol, t in results["targets"].items():
+        is_label = t.get("kind") == TARGET_KIND_LABEL
+        unit = "" if is_label else " bps"
         lines.append(f"=== TARGET: {tcol} (n={t['n']}) ===")
+        o = t.get("outcome")
+        if o:
+            lines.append(
+                f"  Outcome: {o['wins']} win / {o['losses']} loss /"
+                f" {o['timeouts']} timeout   (resolved"
+                f" {(o['resolved_rate'] or 0) * 100:.1f}% of bars)"
+            )
+            wr = o["win_rate"]
+            lines.append(
+                f"  Win rate {wr:.4f}" if wr is not None else "  Win rate n/a"
+            )
+            lines.append(
+                f"  vs breakeven {o['breakeven_win_rate']:.4f}"
+                f" at {o['reward_risk']:.2f}:1   |   expectancy"
+                f" {o['expectancy_r']:+.4f}R per bar"
+            )
         reg = t["regression"]
         lines.append(
             f"  R2 train {reg['r2_train']:.4f} | R2 TEST {reg['r2_test']:.4f}"
@@ -700,14 +903,18 @@ def write_report(results):
         lines.append("  Correlations (|r| ranked):")
         for f, r in t["correlations"]:
             lines.append(f"    {f:>18}: {r:+.4f}" if r is not None else f"    {f:>18}:      n/a")
-        lines.append("  Std. coefficients (bps per 1-sigma of feature):")
+        lines.append(
+            "  Std. coefficients ("
+            + ("label units" if is_label else "bps")
+            + " per 1-sigma of feature):"
+        )
         for f, c in reg["std_coefficients_bps"].items():
             lines.append(f"    {f:>18}: {c:+.3f}")
         for fname, tbl in t["deciles"].items():
             lines.append(f"  Deciles of {fname} -> avg {tcol}:")
             for row in tbl:
                 lines.append(
-                    f"    D{row['decile']:>2}: {row['avg_move_bps']:+7.2f} bps"
+                    f"    D{row['decile']:>2}: {row['avg_move_bps']:+7.2f}{unit}"
                     f"  (n={row['n']})"
                 )
         lines.append("")

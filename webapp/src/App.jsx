@@ -4588,8 +4588,19 @@ const TARGET_LABELS = {
   fwd_5m_bps: "Fwd 5 min",
   fwd_10m_bps: "Fwd 10 min",
   fwd_15m_bps: "Fwd 15 min",
+  fwd_max_10m_bps: "Fwd max 10 min",
+  fwd_min_10m_bps: "Fwd min 10 min",
+  barrier_long_10m: "Barrier · long 10 min",
+  barrier_short_10m: "Barrier · short 10 min",
+  // retired 2026-09-07 in favor of the direction-neutral fwd_max/fwd_min pair,
+  // but analysis_runs is append-only so older rows still select it
   mfe_10m_bps: "MFE 10 min",
 };
+
+// Targets are either a signed move in bps or a categorical first-touch label
+// (+1 target hit first / -1 stop first / 0 neither). Older analysis_runs rows
+// predate the `kind` field, and everything written back then was a bps move.
+const isLabelTarget = (t) => (t?.kind ?? "bps") === "label";
 
 const fLabel = (k) => FEATURE_LABELS[k] || k;
 const tLabel = (k) => TARGET_LABELS[k] || k;
@@ -4642,7 +4653,7 @@ function HBar({ label, value, maxAbs, format }) {
   );
 }
 
-function DecileChart({ feature, rows }) {
+function DecileChart({ feature, rows, unit = "bps" }) {
   const maxAbs = Math.max(...rows.map((r) => Math.abs(r.avg_move_bps)), 0.01);
   return (
     <div
@@ -4678,7 +4689,7 @@ function DecileChart({ feature, rows }) {
           return (
             <div
               key={r.decile}
-              title={`D${r.decile}: ${r.avg_move_bps > 0 ? "+" : ""}${r.avg_move_bps} bps (n=${r.n})`}
+              title={`D${r.decile}: ${r.avg_move_bps > 0 ? "+" : ""}${r.avg_move_bps}${unit ? " " + unit : ""} (n=${r.n})`}
               style={{
                 flex: 1,
                 display: "flex",
@@ -4882,13 +4893,19 @@ function TechnicalsTab() {
       target,
       n: t.n,
       date_range: results.date_range,
+      kind: t.kind ?? "bps",
+      outcome: t.outcome ?? null,
       correlations: t.correlations,
       r2_train: t.regression.r2_train,
       r2_test: t.regression.r2_test,
       std_coefficients_bps: t.regression.std_coefficients_bps,
       deciles: t.deciles,
     };
-    const prompt = `You are a quantitative trading analyst reviewing regression results from SPY 1-minute data. The trader is an intraday options scalper (break-and-retest methodology). Stats for target "${target}" (forward move in basis points):\n\n${JSON.stringify(
+    const prompt = `You are a quantitative trading analyst reviewing regression results from SPY 1-minute data. The trader is an intraday options scalper (break-and-retest methodology). Stats for target "${target}" (${
+      isLabelTarget(t)
+        ? "a first-touch barrier label: +1 the profit target was hit before the stop, -1 the stop was hit first, 0 neither inside the window. Judge it on outcome.win_rate against outcome.breakeven_win_rate, not on R2, and note deciles are mean label values rather than basis points"
+        : "forward move in basis points"
+    }):\n\n${JSON.stringify(
       payload
     )}\n\nInterpret honestly. Key context: at 1-min resolution |r| of 0.03-0.05 is meaningful, above 0.10 suggests leakage/bugs; negative test R2 means the fit failed out of sample; monotone decile patterns matter more than coefficients; watch for multicollinearity between EMA-distance features. Respond with ONLY compact JSON, no fences: {"read": ["key finding, under 20 words", "..."], "cautions": ["statistical concern, under 20 words"], "actionable": "one sentence: the single most usable takeaway, or say there isn't one yet"} Max 3 per array. Never invent findings the numbers don't support.`;
     setAi({ status: "awaiting-paste", data: null, prompt });
@@ -5243,6 +5260,74 @@ function TechnicalsTab() {
               >
                 REGRESSION · BPS PER 1σ OF FEATURE
               </div>
+              {isLabelTarget(t) && t.outcome && (
+                <div style={{ marginBottom: 12 }}>
+                  <div
+                    style={{
+                      display: "flex",
+                      flexWrap: "wrap",
+                      gap: 20,
+                      fontFamily: T.mono,
+                      fontSize: 12,
+                    }}
+                  >
+                    <span style={{ color: T.dim }}>
+                      Win rate{" "}
+                      <span
+                        style={{
+                          color:
+                            t.outcome.win_rate > t.outcome.breakeven_win_rate
+                              ? T.green
+                              : T.red,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {t.outcome.win_rate === null
+                          ? "n/a"
+                          : t.outcome.win_rate.toFixed(4)}
+                      </span>
+                    </span>
+                    <span style={{ color: T.dim }}>
+                      Breakeven{" "}
+                      <span style={{ color: T.ink }}>
+                        {t.outcome.breakeven_win_rate.toFixed(4)}
+                      </span>{" "}
+                      @ {t.outcome.reward_risk}:1
+                    </span>
+                    <span style={{ color: T.dim }}>
+                      Expectancy{" "}
+                      <span
+                        style={{
+                          color: t.outcome.expectancy_r > 0 ? T.green : T.red,
+                          fontWeight: 700,
+                        }}
+                      >
+                        {t.outcome.expectancy_r > 0 ? "+" : ""}
+                        {t.outcome.expectancy_r}R
+                      </span>
+                    </span>
+                    <span style={{ color: T.dim }}>
+                      {t.outcome.wins}W / {t.outcome.losses}L /{" "}
+                      {t.outcome.timeouts} timeout
+                    </span>
+                  </div>
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: T.faint,
+                      marginTop: 6,
+                      lineHeight: 1.4,
+                    }}
+                  >
+                    First-touch label: did the target or the stop get hit first.
+                    Win rate excludes timeouts (
+                    {((t.outcome.resolved_rate ?? 0) * 100).toFixed(1)}% of bars
+                    resolved). Expectancy is in units of the stop and ignores
+                    commissions, slippage, and option premium decay — rank
+                    setups with it, don't forecast P&L.
+                  </div>
+                </div>
+              )}
               <div
                 style={{
                   display: "flex",
@@ -5281,6 +5366,9 @@ function TechnicalsTab() {
                 >
                   Negative test R² — the fitted model did not generalize.
                   Treat coefficients as descriptive, not predictive.
+                  {isLabelTarget(t) &&
+                    " On a first-touch label the fit is a linear probability" +
+                      " model, so read the win rate above before the R²."}
                 </div>
               )}
               <div
@@ -5308,7 +5396,12 @@ function TechnicalsTab() {
             }}
           >
             {Object.entries(t.deciles || {}).map(([f, rows]) => (
-              <DecileChart key={f} feature={f} rows={rows} />
+              <DecileChart
+                key={f}
+                feature={f}
+                rows={rows}
+                unit={isLabelTarget(t) ? "" : "bps"}
+              />
             ))}
           </div>
         </>
