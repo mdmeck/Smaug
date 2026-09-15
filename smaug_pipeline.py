@@ -65,6 +65,7 @@ ATR_LEN = 14                    # Wilder ATR period used to scale the barriers
 RTH_ONLY = True                 # keep regular trading hours only (9:30-16:00 ET)
 TEST_FRACTION = 0.25            # most recent 25% of data held out for testing
 MIN_ROWS = 500                  # refuse to run analysis on less than this
+MIN_PATTERN_HITS = 30           # don't report a candlestick pattern that fired less often
 RETENTION_DAYS = 60             # prune bars older than this so the table stays bounded
 # Swing-pivot window for the market-structure features. A pivot must be the
 # extreme of a (LEFT + RIGHT + 1) bar window, and is only *knowable* RIGHT bars
@@ -627,6 +628,97 @@ def compute_features(df):
     or15_l = l.where(rth_mask & or15_forming).groupby(day).transform("min")
     out["or15_width_bps"] = (or15_h - or15_l) / c * 10_000
 
+    # --- candlestick patterns, as binary 0/1 event features.
+    #
+    # These are the one place the Python and the Pine have to agree character
+    # for character: every formula below is transcribed from
+    # pinescript/candles_1.pine / _2 / _3, which is what the indicator actually
+    # fires on. If the two definitions drift, the analysis scores an edge the
+    # chart never draws. Change one, change both.
+    #
+    # Kept as independent booleans rather than one categorical code: the
+    # if/else chain in the Pine only decides which *label* gets drawn when
+    # several match, and that precedence is a display concern. The underlying
+    # conditions are independent, and rules reference them one at a time.
+    #
+    # Multi-candle patterns are masked where the lookback would cross a session
+    # boundary — c[1] at 9:30 is yesterday's 15:59 close, and an "engulfing"
+    # built across the overnight gap is not a pattern, it is an artifact.
+    o = df["open"]
+    bar_range = h - l
+    up_wick = h - pd.concat([c, o], axis=1).max(axis=1)
+    dn_wick = pd.concat([c, o], axis=1).min(axis=1) - l
+    body_hi = pd.concat([o, c], axis=1).max(axis=1)
+    body_lo = pd.concat([o, c], axis=1).min(axis=1)
+    bull, bear = c > o, c < o
+    same_1 = day == day.shift(1)
+    same_2 = same_1 & (day == day.shift(2))
+
+    def _pat(cond, mask=None):
+        """Binary feature: 1.0 fired, 0.0 didn't, NaN unknowable (the lookback
+        crosses a session boundary). NaN rather than 0 so 'no prior bar' never
+        reads as 'checked and absent' in the correlations."""
+        v = cond.astype(float)
+        return v if mask is None else v.where(mask)
+
+    # 1-candle
+    out["pat_doji"] = _pat((bar_range > 0) & (body <= bar_range * 0.1))
+    out["pat_marubozu_bull"] = _pat(
+        bull & (up_wick <= body * 0.05) & (dn_wick <= body * 0.05)
+    )
+    out["pat_marubozu_bear"] = _pat(
+        bear & (up_wick <= body * 0.05) & (dn_wick <= body * 0.05)
+    )
+    out["pat_hammer"] = _pat(
+        (bar_range > 0) & (dn_wick >= body * 2) & (up_wick <= body * 0.5)
+        & (body <= bar_range * 0.4)
+    )
+    out["pat_shooting_star"] = _pat(
+        (bar_range > 0) & (up_wick >= body * 2) & (dn_wick <= body * 0.5)
+        & (body <= bar_range * 0.4)
+    )
+
+    # 2-candle
+    bull_1 = bull.shift(1, fill_value=False)
+    bear_1 = bear.shift(1, fill_value=False)
+    body_hi_1, body_lo_1 = body_hi.shift(1), body_lo.shift(1)
+    engulfs = (body_lo <= body_lo_1) & (body_hi >= body_hi_1)
+    inside = (body_hi <= body_hi_1) & (body_lo >= body_lo_1)
+    out["pat_bull_engulf"] = _pat(bear_1 & bull & engulfs, same_1)
+    out["pat_bear_engulf"] = _pat(bull_1 & bear & engulfs, same_1)
+    out["pat_bull_harami"] = _pat(bear_1 & bull & inside, same_1)
+    out["pat_bear_harami"] = _pat(bull_1 & bear & inside, same_1)
+
+    # 3-candle. The star patterns are the gap-free approximation the Pine
+    # fragment uses — classic morning/evening stars need an overnight gap
+    # between candles, which a continuous 1-minute RTH chart never produces.
+    body_1, body_2 = body.shift(1), body.shift(2)
+    bull_2 = bull.shift(2, fill_value=False)
+    bear_2 = bear.shift(2, fill_value=False)
+    mid_2 = (o.shift(2) + c.shift(2)) / 2
+    out["pat_morning_star"] = _pat(
+        bear_2 & (body_1 <= body_2 * 0.4) & bull & (body > body_1) & (c > mid_2),
+        same_2,
+    )
+    out["pat_evening_star"] = _pat(
+        bull_2 & (body_1 <= body_2 * 0.4) & bear & (body > body_1) & (c < mid_2),
+        same_2,
+    )
+    out["pat_three_soldiers"] = _pat(
+        bull_2 & bull_1 & bull
+        & (c > c.shift(1)) & (c.shift(1) > c.shift(2))
+        & (o > o.shift(1)) & (o.shift(1) > o.shift(2))
+        & (o <= c.shift(1)) & (o.shift(1) <= c.shift(2)),
+        same_2,
+    )
+    out["pat_three_crows"] = _pat(
+        bear_2 & bear_1 & bear
+        & (c < c.shift(1)) & (c.shift(1) < c.shift(2))
+        & (o < o.shift(1)) & (o.shift(1) < o.shift(2))
+        & (o >= c.shift(1)) & (o.shift(1) >= c.shift(2)),
+        same_2,
+    )
+
     # only meaningful during RTH — blank these out for pre/post-market bars
     out.loc[~rth_mask, [
         "dist_prev_day_high_bps", "dist_prev_day_low_bps",
@@ -770,6 +862,52 @@ def decile_table(feature, target, n=10):
     ]
 
 
+PATTERN_PREFIX = "pat_"
+
+
+def pattern_features(cols):
+    return [c for c in cols if c.startswith(PATTERN_PREFIX)]
+
+
+def pattern_stats(sub, y, tcol):
+    """Per-pattern hit rates. Binary event features need their own summary:
+    `decile_table` can't split a mostly-zero column (qcut collapses it to one
+    or two buckets), and a correlation over a pattern that fires on 0.3% of
+    bars is noise with a decimal point. What reads instead is the thing a
+    trader would ask — how often did it fire, and what happened when it did
+    versus every other bar.
+
+    Patterns that fired fewer than MIN_PATTERN_HITS times are dropped rather
+    than reported with a wide error bar, since the routine treats whatever
+    appears here as evidence.
+    """
+    is_label = target_kind(tcol) == TARGET_KIND_LABEL
+    stats = {}
+    for f in pattern_features(sub.columns):
+        fired = sub[f] == 1
+        n = int(fired.sum())
+        if n < MIN_PATTERN_HITS:
+            continue
+        hit, rest = y[fired], y[~fired]
+        entry = {
+            "n": n,
+            "base_rate": round(n / len(sub), 5),
+        }
+        if is_label:
+            entry["outcome"] = outcome_summary(hit)
+            entry["baseline"] = outcome_summary(rest)
+        else:
+            # _json_safe for the same reason safe_corr() exists: an all-NaN
+            # slice would otherwise put a bare `NaN` token in the payload
+            entry["avg_move_bps"] = _json_safe(round(float(hit.mean()), 2))
+            entry["baseline_bps"] = _json_safe(round(float(rest.mean()), 2))
+            entry["edge_bps"] = _json_safe(
+                round(float(hit.mean() - rest.mean()), 2)
+            )
+        stats[f] = entry
+    return stats
+
+
 def run_analysis(bars):
     feats = compute_features(bars)
     targs = compute_targets(bars)
@@ -841,7 +979,12 @@ def run_analysis(bars):
         # decile tables for the 3 strongest features (skip anything with no
         # correlation at all — e.g. a feature that's still all-missing)
         deciles = {}
-        top3 = [f for f, corr in ranked if corr is not None][:3]
+        # patterns are excluded here and summarized separately — see
+        # pattern_stats(); a binary column has no deciles to speak of
+        top3 = [
+            f for f, corr in ranked
+            if corr is not None and not f.startswith(PATTERN_PREFIX)
+        ][:3]
         for fname in top3:
             deciles[fname] = decile_table(sub[fname], y)
 
@@ -860,6 +1003,7 @@ def run_analysis(bars):
                 "r2_test": round(float(r2_test), 5),
             },
             "deciles": deciles,
+            "patterns": pattern_stats(sub, y, tcol),
         }
 
     return results
@@ -917,6 +1061,33 @@ def write_report(results):
                     f"    D{row['decile']:>2}: {row['avg_move_bps']:+7.2f}{unit}"
                     f"  (n={row['n']})"
                 )
+        pats = t.get("patterns") or {}
+        if pats:
+            lines.append(
+                "  Candlestick patterns (fired vs. every other bar):"
+            )
+            for fname, ps in sorted(
+                pats.items(), key=lambda kv: -kv[1]["n"]
+            ):
+                if is_label:
+                    hit, base = ps["outcome"], ps["baseline"]
+                    wr = hit["win_rate"]
+                    bwr = base["win_rate"]
+                    shown = f"{wr:.4f}" if wr is not None else "n/a"
+                    vs = f"{bwr:.4f}" if bwr is not None else "n/a"
+                    lines.append(
+                        f"    {fname:>20}: n={ps['n']:<5} win {shown}"
+                        f"  vs {vs} baseline"
+                        f"  |  expectancy {hit['expectancy_r']:+.4f}R"
+                    )
+                else:
+                    num = lambda x: f"{x:+7.2f}" if x is not None else "    n/a"
+                    lines.append(
+                        f"    {fname:>20}: n={ps['n']:<5}"
+                        f" {num(ps['avg_move_bps'])} bps"
+                        f"  vs {num(ps['baseline_bps'])} baseline"
+                        f"  (edge {num(ps['edge_bps']).strip()})"
+                    )
         lines.append("")
     if results["notes"]:
         lines.append("Notes:")

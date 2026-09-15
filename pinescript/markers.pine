@@ -9,9 +9,18 @@
 // drawn only on the bar where a condition BECOMES true: one sustained move
 // produces one signal instead of one per bar. Edge detection lives here rather
 // than in the generated block so it cannot be regressed at generation time.
-mk_long = longEntry and not longEntry[1]
-mk_short = shortEntry and not shortEntry[1]
-mk_exit = exitSignal and not exitSignal[1]
+//
+// CLOSED BARS ONLY. The rules block is re-evaluated on every tick of the
+// forming candle, so without the isconfirmed gate a marker appears, slides and
+// vanishes as the bar develops — there is nothing stable to act on. Pine sets
+// barstate.isconfirmed on a bar's final tick only, so a signal prints once,
+// when the candle closes, and never un-prints. Every historical bar is
+// confirmed, so chart history is unchanged by this. The trade-off is explicit
+// and intended: the marker describes the last CLOSED candle, which means the
+// fill is the next bar's open.
+mk_long = longEntry and not longEntry[1] and barstate.isconfirmed
+mk_short = shortEntry and not shortEntry[1] and barstate.isconfirmed
+mk_exit = exitSignal and not exitSignal[1] and barstate.isconfirmed
 plotchar(mk_long, title="Long Entry", char="L", location=location.belowbar, color=color.green, size=size.tiny)
 plotchar(mk_short, title="Short Entry", char="S", location=location.abovebar, color=color.red, size=size.tiny)
 plotchar(mk_exit ? close : na, title="Exit", char="X", location=location.absolute, color=color.orange, size=size.tiny)

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo, Component } from "react";
+import { useState, useEffect, useRef, useMemo, Component, Fragment } from "react";
 import { createChart, CandlestickSeries, BaselineSeries, createSeriesMarkers } from "lightweight-charts";
 import { supabase } from "./supabaseClient.js";
 
@@ -1221,7 +1221,7 @@ function CasesBody({ data }) {
 // ---------- Morning Brief tab ----------
 // Styled from the imported Claude Design system (`B` tokens, docs/design.md)
 // rather than the app-wide `T` — see the note on `B` for why the two coexist.
-function MorningBriefTab({ panels, lastRun }) {
+function MorningBriefTab({ panels, lastRun, ereborPanels, ereborRun, ereborError }) {
   return (
     <div
       style={{
@@ -1264,10 +1264,18 @@ function MorningBriefTab({ panels, lastRun }) {
           routine-written jsonb, so each gets its own boundary — a shape break
           in one must not take the other, or the rest of the brief, with it. */}
       <PanelBoundary>
-        <WhaleActionPanel whales={panels.whales} generatedAt={lastRun} />
+        <WhaleActionPanel
+          whales={ereborPanels.whales}
+          run={ereborRun}
+          error={ereborError}
+        />
       </PanelBoundary>
       <PanelBoundary>
-        <SqueezePanel squeezes={panels.squeezes} />
+        <SqueezePanel
+          squeezes={ereborPanels.squeezes}
+          run={ereborRun}
+          error={ereborError}
+        />
       </PanelBoundary>
 
       <div
@@ -1441,7 +1449,167 @@ function LeanTag({ lean }) {
   );
 }
 
-function WhaleActionPanel({ whales, generatedAt }) {
+// ---------- erebor -> panel adapters ----------
+// Whale Action and Roaring Kitty were written against `daily_briefs.whales` /
+// `.squeezes`, which were bare arrays of flat objects. Their data now arrives
+// as `erebor_candidates` rows, where the screen-specific figures live under
+// `metrics`. The panels are NOT rewritten for that: `whaleItems` and
+// `squeezeItems` below carry a lot of hard-won defensive reading — key
+// aliases, the buzz floor, the rule that a percentage is never silently
+// rescaled — and reshaping the row at the boundary keeps every bit of it.
+// These adapters are the only place that knows both shapes.
+//
+// Nothing is coerced here. That is the coercers' job, and doing any of it
+// twice is how two slightly different readings of the same field appear.
+
+function adaptWhale(row) {
+  const m = row.metrics && typeof row.metrics === "object" ? row.metrics : {};
+  return {
+    ticker: row.ticker,
+    lean: m.lean,
+    volume: m.volume,
+    avg_volume: m.avg_volume,
+    flow: m.flow,
+    note: row.note,
+    // the session the flow was seen in, not the day the scan ran
+    as_of: row.as_of,
+  };
+}
+
+function adaptSqueeze(row) {
+  const m = row.metrics && typeof row.metrics === "object" ? row.metrics : {};
+  return {
+    ticker: row.ticker,
+    company: row.company,
+    short_percent_float: m.short_percent_float,
+    days_to_cover: m.days_to_cover,
+    price: row.price,
+    note: row.note,
+    // Three vintages, three clocks — the settlement date, the quote's date and
+    // chatter's own date inside `buzz`. Passed through untouched so the panel
+    // can keep ageing them separately.
+    as_of: row.as_of,
+    price_as_of: row.price_as_of,
+    buzz: m.buzz,
+  };
+}
+
+// Rows arrive newest-first across every kind and every day. A screen's rows
+// all share one `as_of` (the settlement date, the session date), so the newest
+// day present for that kind is the current reading — and taking only that day
+// stops a fresh whale scan from dragging a stale squeeze list along beside it.
+//
+// Returns null when the kind is absent entirely, which is different from an
+// empty array: null means the scan wrote nothing for it, [] cannot occur here.
+// panelEmptyState reads that difference.
+function latestOfKind(rows, kind, adapt) {
+  if (!Array.isArray(rows)) return null;
+  const forKind = rows.filter((r) => r && r.kind === kind);
+  if (!forKind.length) return null;
+  const newest = forKind.reduce(
+    (a, r) => (String(r.as_of) > String(a) ? String(r.as_of) : a),
+    String(forKind[0].as_of),
+  );
+  return forKind.filter((r) => String(r.as_of) === newest).map(adapt);
+}
+
+// An empty panel has four different causes and they are not interchangeable.
+// Both panels used to render all four as "Awaiting run", which is only true
+// for one of them — on 2026-09-08 the brief ran at 12:27 UTC with `econ` and
+// `cases` populated and both of these columns written as `[]` because their
+// sources were unreachable, and the screen still said the routine had not run.
+// "Wait for it" and "your sources broke, go look manually" are opposite
+// instructions to a trader.
+//
+// The split into an Erebor routine bought one answer that was previously
+// unobtainable. `erebor_runs` records a per-source status, so an empty screen
+// can finally be told apart from a broken one:
+//   no run row              -> nothing has ever scanned; genuinely awaiting
+//   rows written, 0 readable-> the coercers dropped everything; shape changed
+//   every source ok, none   -> a real clean screen. Calm, not a warning.
+//   some source failed      -> named in the copy, and NOT a clean screen
+//   ran, no sources at all  -> the screen was skipped rather than attempted
+//
+// That last distinction matters as much as the others: a routine that never
+// reached a source and one that reached it and found nothing produce the same
+// empty list, and only the run row separates them.
+//
+// `tone` stays calm only for the two states that are genuinely fine (nothing
+// has run yet, or everything ran and the market is quiet). Every other case is
+// amber, because an empty panel the trader might act on is a problem.
+function panelEmptyState(raw, run, itemCount, label, error) {
+  // Checked before everything else: when the read itself failed we know
+  // nothing about the screen, and every message below would be a claim the
+  // data does not support.
+  if (error)
+    return {
+      text: `Could not read the Erebor screen — ${error}. This is a failed query, not an empty result.`,
+      tone: "warn",
+    };
+  if (!run)
+    return {
+      text: "Awaiting run — the Erebor routine writes this on its own schedule.",
+      tone: "quiet",
+    };
+  const ran = dayLabel(run.as_of) || String(run.as_of);
+  const n = Array.isArray(raw) ? raw.length : 0;
+
+  if (n > 0 && itemCount === 0)
+    return {
+      text: `Scan ran ${ran} and wrote ${n} ${n === 1 ? "row" : "rows"}, none readable — the shape changed.`,
+      tone: "warn",
+    };
+
+  // The one genuinely new answer. Before the split there was no way to tell a
+  // quiet market from a dead scraper, so the copy had to name both and tell
+  // the trader to go check. `erebor_runs.sources` settles it: if every source
+  // the routine touched reported ok and it still wrote nothing, the screen is
+  // actually clean — which is a useful, calm answer rather than a warning.
+  const sources = run.sources && typeof run.sources === "object" ? run.sources : {};
+  const bad = Object.entries(sources)
+    .filter(([, v]) => v === "failed" || v === "partial")
+    .map(([k]) => k);
+
+  if (!bad.length && Object.keys(sources).length)
+    return {
+      text: `Scan ran ${ran}, every source responded, and nothing qualified. Clean screen.`,
+      tone: "quiet",
+    };
+
+  if (bad.length)
+    return {
+      text: `Scan ran ${ran} but ${bad.join(", ")} did not respond — this is not a clean screen. Check manually.`,
+      tone: "warn",
+    };
+
+  // Ran, but recorded no source statuses at all: the routine skipped this
+  // screen rather than attempting and failing it. Distinct from both above.
+  return {
+    text: `Scan ran ${ran} but reported no sources for ${label} — the screen was skipped, not empty.`,
+    tone: "warn",
+  };
+}
+
+function PanelEmpty({ state }) {
+  return (
+    <div
+      style={{
+        padding: 24,
+        fontFamily: B.mono,
+        fontSize: 12,
+        lineHeight: 1.6,
+        color: state.tone === "warn" ? B.amber : B.faint,
+      }}
+    >
+      {state.text}
+    </div>
+  );
+}
+
+function WhaleActionPanel({ whales, run, error }) {
+  // The scan's own clock, not the brief's — these panels no longer ride on
+  // `daily_briefs` and must not borrow its freshness.
+  const generatedAt = run && run.ran_at ? new Date(run.ran_at) : null;
   const items = useMemo(() => whaleItems(whales), [whales]);
 
   // Prefer the session the data is from over the time the routine ran. They are
@@ -1501,9 +1669,9 @@ function WhaleActionPanel({ whales, generatedAt }) {
       </div>
 
       {items.length === 0 ? (
-        <div style={{ padding: 24, fontFamily: B.mono, fontSize: 12, color: B.faint }}>
-          Awaiting run — the morning routine writes this alongside the brief.
-        </div>
+        <PanelEmpty
+          state={panelEmptyState(whales, run, items.length, "whale flow", error)}
+        />
       ) : (
         <div
           style={{
@@ -1872,7 +2040,7 @@ const squeezeGrid = {
   gap: 16,
 };
 
-function SqueezePanel({ squeezes }) {
+function SqueezePanel({ squeezes, run, error }) {
   const items = useMemo(() => squeezeItems(squeezes), [squeezes]);
 
   // Fuel and spark. A heavily shorted name nobody is discussing is a setup; the
@@ -1972,9 +2140,9 @@ function SqueezePanel({ squeezes }) {
       </div>
 
       {items.length === 0 ? (
-        <div style={{ padding: 24, fontFamily: B.mono, fontSize: 12, color: B.faint }}>
-          Awaiting run — the morning routine writes this alongside the brief.
-        </div>
+        <PanelEmpty
+          state={panelEmptyState(squeezes, run, items.length, "squeeze setups", error)}
+        />
       ) : (
         <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 26 }}>
           {/* Loud first: it is the actionable half, and on most days it is
@@ -3147,15 +3315,42 @@ const emptyEntry = () => ({
   setup: "",
   result: "",
   cost_basis: "",
+  contracts: "",
+  fees: "",
   notes: "",
 });
 
+// Schwab charges a flat per-contract commission, not a percentage of premium —
+// confirmed on 2026-09-04, where 2 contracts cost $1.32 to buy and $1.33 to
+// sell while premium moved 0.91 -> 0.77. A percentage would have fallen with
+// the premium; it rose a cent instead. The extra cent is the regulatory piece
+// on the sell side, small enough to bury in the rate.
+const FEE_PER_CONTRACT_LEG = 0.66;
+
+// A round trip is two legs, so this is what one contract costs to open AND
+// close. Breakeven is therefore ~1.3 cents of premium per contract regardless
+// of size — size scales the dollars, not the hurdle.
+const feesForEntry = (e) => {
+  if (e.fees !== null && e.fees !== undefined && e.fees !== "") return Number(e.fees);
+  if (e.contracts === null || e.contracts === undefined || e.contracts === "") return null;
+  return Number(e.contracts) * 2 * FEE_PER_CONTRACT_LEG;
+};
+
+// True when every fee number in the set is estimated from contracts rather
+// than read off a transaction export — drives the "est" marker in the UI so an
+// estimate is never mistaken for the broker's actual figure.
+const feesAreEstimated = (list) =>
+  list.some((e) => e.contracts !== null && (e.fees === null || e.fees === undefined));
+
 // insert()/update() pass the form object straight through, so the numeric
-// column has to leave the form as a number or null — "" would be rejected,
+// columns have to leave the form as a number or null — "" would be rejected,
 // and 0 would claim the position cost nothing rather than "not recorded".
+const numOrNull = (v) => (v === "" || v === null || v === undefined ? null : Number(v));
 const journalPayload = (f) => ({
   ...f,
-  cost_basis: f.cost_basis === "" || f.cost_basis === null ? null : Number(f.cost_basis),
+  cost_basis: numOrNull(f.cost_basis),
+  contracts: numOrNull(f.contracts),
+  fees: numOrNull(f.fees),
 });
 
 function JournalTab() {
@@ -3246,6 +3441,8 @@ function JournalTab() {
       direction: e.direction,
       result: e.result,
       cost_basis: e.cost_basis === null || e.cost_basis === undefined ? "" : String(e.cost_basis),
+      contracts: e.contracts === null || e.contracts === undefined ? "" : String(e.contracts),
+      fees: e.fees === null || e.fees === undefined ? "" : String(e.fees),
       setup: e.setup,
       notes: e.notes,
     });
@@ -3352,6 +3549,32 @@ function JournalTab() {
               style={{ ...inputStyle, fontFamily: T.mono }}
             />
           )}
+          {field(
+            "CONTRACTS",
+            <input
+              type="number"
+              step="1"
+              value={f.contracts}
+              onChange={(e) => setF({ ...f, contracts: e.target.value })}
+              placeholder="qty per leg"
+              style={{ ...inputStyle, fontFamily: T.mono }}
+            />
+          )}
+          {field(
+            "FEES ($, OPTIONAL)",
+            <input
+              type="number"
+              step="0.01"
+              value={f.fees}
+              onChange={(e) => setF({ ...f, fees: e.target.value })}
+              placeholder={
+                f.contracts
+                  ? `est ${(Number(f.contracts) * 2 * FEE_PER_CONTRACT_LEG).toFixed(2)}`
+                  : "leave blank to estimate"
+              }
+              style={{ ...inputStyle, fontFamily: T.mono }}
+            />
+          )}
         </div>
         <div
           style={{
@@ -3387,9 +3610,31 @@ function JournalTab() {
   const numericResults = entries
     .map((e) => parseFloat(String(e.result).replace(/[$,+]/g, "")))
     .filter((n) => !isNaN(n));
-  const net = numericResults.reduce((a, b) => a + b, 0);
+  const gross = numericResults.reduce((a, b) => a + b, 0);
   const wins = numericResults.filter((n) => n > 0).length;
   const losses = numericResults.filter((n) => n < 0).length;
+  const totalFees = entries.reduce((a, e) => a + (feesForEntry(e) || 0), 0);
+  const netAfterFees = gross - totalFees;
+  const grossIsEstimated = feesAreEstimated(entries);
+
+  // Newest-first list grouped into days, preserving the order entries arrive in
+  // so the existing sort is the only thing deciding sequence.
+  const byDay = [];
+  for (const e of entries) {
+    const last = byDay[byDay.length - 1];
+    if (last && last.date === e.date) last.entries.push(e);
+    else byDay.push({ date: e.date, entries: [e] });
+  }
+  for (const d of byDay) {
+    const nums = d.entries
+      .map((e) => parseFloat(String(e.result).replace(/[$,+]/g, "")))
+      .filter((n) => !isNaN(n));
+    d.gross = nums.reduce((a, b) => a + b, 0);
+    d.fees = d.entries.reduce((a, e) => a + (feesForEntry(e) || 0), 0);
+    d.net = d.gross - d.fees;
+    d.estimated = feesAreEstimated(d.entries);
+    d.hasResults = nums.length > 0;
+  }
 
   return (
     <div>
@@ -3464,10 +3709,26 @@ function JournalTab() {
                 <span style={{ color: T.red }}>{losses}</span>
               </span>
               <span>
+                gross{" "}
+                <span style={{ color: gross >= 0 ? T.green : T.red }}>
+                  {gross >= 0 ? "+" : ""}
+                  {gross.toFixed(2)}
+                </span>
+              </span>
+              <span>
+                fees{" "}
+                <span style={{ color: T.amber }}>
+                  −{totalFees.toFixed(2)}
+                </span>
+                {grossIsEstimated && (
+                  <span style={{ color: T.faint, fontSize: 10 }}> est</span>
+                )}
+              </span>
+              <span>
                 net{" "}
-                <span style={{ color: net >= 0 ? T.green : T.red }}>
-                  {net >= 0 ? "+" : ""}
-                  {net.toFixed(2)}
+                <span style={{ color: netAfterFees >= 0 ? T.green : T.red }}>
+                  {netAfterFees >= 0 ? "+" : ""}
+                  {netAfterFees.toFixed(2)}
                 </span>
               </span>
             </>
@@ -3622,11 +3883,74 @@ function JournalTab() {
         </div>
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {entries.map((e) => {
+          {entries.map((e, i) => {
+            // Day rollup rides above the first entry of each date rather than
+            // in a wrapper element, so the flat list and its single gap stay
+            // exactly as they were.
+            const day =
+              i === 0 || entries[i - 1].date !== e.date
+                ? byDay.find((d) => d.date === e.date)
+                : null;
+            const dayHeader = day && day.hasResults && (
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  flexWrap: "wrap",
+                  gap: 10,
+                  padding: "10px 2px 0",
+                  borderTop:
+                    i === 0 ? "none" : `1px solid ${T.panelEdge}`,
+                  marginTop: i === 0 ? 0 : 6,
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: T.mono,
+                    fontSize: 11,
+                    letterSpacing: "0.1em",
+                    color: T.dim,
+                  }}
+                >
+                  {day.date}
+                </span>
+                {/* gross stays the headline — it is the number thinkorswim
+                    shows, so the journal has to agree with the platform */}
+                <span
+                  style={{
+                    fontFamily: T.mono,
+                    fontSize: 15,
+                    color: day.gross >= 0 ? T.green : T.red,
+                  }}
+                >
+                  {day.gross >= 0 ? "+" : ""}
+                  {day.gross.toFixed(2)}
+                </span>
+                <span
+                  style={{
+                    fontFamily: T.mono,
+                    fontSize: 11,
+                    color: T.faint,
+                  }}
+                >
+                  <span style={{ color: T.amber }}>
+                    −{day.fees.toFixed(2)}
+                  </span>{" "}
+                  fees{day.estimated ? " est" : ""} ·{" "}
+                  <span style={{ color: day.net >= 0 ? T.green : T.red }}>
+                    {day.net >= 0 ? "+" : ""}
+                    {day.net.toFixed(2)}
+                  </span>{" "}
+                  net · {day.entries.length} trade
+                  {day.entries.length === 1 ? "" : "s"}
+                </span>
+              </div>
+            );
             if (editingId === e.id) {
               return (
+                <Fragment key={e.id}>
+                {dayHeader}
                 <div
-                  key={e.id}
                   style={{
                     background: T.panel,
                     border: `1px solid ${T.amber}`,
@@ -3660,6 +3984,7 @@ function JournalTab() {
                     </button>
                   </div>
                 </div>
+                </Fragment>
               );
             }
             const n = parseFloat(String(e.result).replace(/[$,+]/g, ""));
@@ -3669,8 +3994,9 @@ function JournalTab() {
               ? T.green
               : T.red;
             return (
+              <Fragment key={e.id}>
+              {dayHeader}
               <div
-                key={e.id}
                 style={{
                   background: T.panel,
                   border: `1px solid ${T.panelEdge}`,
@@ -3748,6 +4074,7 @@ function JournalTab() {
                   </div>
                 )}
               </div>
+              </Fragment>
             );
           })}
         </div>
@@ -4582,6 +4909,26 @@ const FEATURE_LABELS = {
   dist_or5_low_bps: "Dist. from 5-min OR low",
   dist_or15_high_bps: "Dist. from 15-min OR high",
   dist_or15_low_bps: "Dist. from 15-min OR low",
+  dist_vwap_bps: "Dist. from VWAP",
+  or15_width_bps: "15-min OR width",
+  dist_swing_high_bps: "Dist. from swing high",
+  dist_swing_low_bps: "Dist. from swing low",
+  structure_dir: "Structure direction",
+  bos: "Break of structure",
+  choch: "Change of character",
+  pat_doji: "Doji",
+  pat_marubozu_bull: "Marubozu (bull)",
+  pat_marubozu_bear: "Marubozu (bear)",
+  pat_hammer: "Hammer",
+  pat_shooting_star: "Shooting star",
+  pat_bull_engulf: "Bullish engulfing",
+  pat_bear_engulf: "Bearish engulfing",
+  pat_bull_harami: "Bullish harami",
+  pat_bear_harami: "Bearish harami",
+  pat_morning_star: "Morning star",
+  pat_evening_star: "Evening star",
+  pat_three_soldiers: "Three white soldiers",
+  pat_three_crows: "Three black crows",
 };
 
 const TARGET_LABELS = {
@@ -6595,10 +6942,14 @@ export default function Smaug() {
     earnings: null,
     sentiment: null,
     cases: null,
-    whales: null,
-    squeezes: null,
   });
   const [lastRun, setLastRun] = useState(null);
+  // Erebor's own state, deliberately not folded into `panels`: these load from
+  // a different table on a different routine's schedule, and sharing one state
+  // object would let a missing brief read as missing screens.
+  const [ereborPanels, setEreborPanels] = useState({ whales: null, squeezes: null });
+  const [ereborRun, setEreborRun] = useState(null);
+  const [ereborError, setEreborError] = useState(null);
 
   useEffect(() => {
     if (!session) return;
@@ -6615,11 +6966,48 @@ export default function Smaug() {
           earnings: data.earnings || null,
           sentiment: data.sentiment || null,
           cases: data.cases || null,
-          whales: data.whales || null,
-          squeezes: data.squeezes || null,
         });
         setLastRun(new Date(data.generated_at));
       }
+    })();
+  }, [session]);
+
+  // Whale Action and Roaring Kitty moved out of `daily_briefs` and into
+  // Erebor's `erebor_candidates`, so they load separately from the brief and
+  // fail separately from it — which was the entire point of splitting them.
+  // The brief being fine no longer implies these are, and vice versa.
+  useEffect(() => {
+    if (!session) return;
+    (async () => {
+      // Two independent reads. `erebor_runs` is what says a scan happened at
+      // all: an empty candidates list means nothing on its own, and inferring
+      // "no data" from it is exactly the mistake these panels shipped with.
+      const [candidates, runs] = await Promise.all([
+        supabase
+          .from("erebor_candidates")
+          .select("*")
+          .in("kind", ["whale", "squeeze"])
+          .order("as_of", { ascending: false })
+          .limit(200),
+        supabase
+          .from("erebor_runs")
+          .select("*")
+          .order("as_of", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      ]);
+      // The error is read, not discarded. An earlier version destructured only
+      // `data`, so a query that failed outright — the tables not existing yet
+      // being the obvious case — produced `null` and rendered as "Awaiting
+      // run": a broken read wearing the same face as a quiet market, which is
+      // the exact confusion these panels were just rebuilt to end.
+      const err = candidates.error || runs.error;
+      setEreborError(err ? err.message || String(err) : null);
+      setEreborRun(runs.data || null);
+      setEreborPanels({
+        whales: latestOfKind(candidates.data, "whale", adaptWhale),
+        squeezes: latestOfKind(candidates.data, "squeeze", adaptSqueeze),
+      });
     })();
   }, [session]);
 
@@ -6792,7 +7180,13 @@ export default function Smaug() {
           {/* tab content */}
           <div style={{ flex: 1, minWidth: 0 }}>
         {tab === "Morning Brief" && (
-          <MorningBriefTab panels={panels} lastRun={lastRun} />
+          <MorningBriefTab
+            panels={panels}
+            lastRun={lastRun}
+            ereborPanels={ereborPanels}
+            ereborRun={ereborRun}
+            ereborError={ereborError}
+          />
         )}
         {tab === "Dashboard" && (
 <DashboardTab />
