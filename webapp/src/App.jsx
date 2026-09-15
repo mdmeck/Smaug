@@ -3105,7 +3105,10 @@ function DashboardTab() {
     (async () => {
       try {
         const rows = await fetchAllRows("journal_entries", {
-          select: "date,direction,result,setup,notes,ticker",
+          // contracts/fees are what the fee rollups read — an explicit column
+          // list silently returns undefined for anything omitted, which reads
+          // downstream as "no fees" rather than as a missing column
+          select: "date,direction,result,setup,notes,ticker,contracts,fees",
           orderBy: "date",
         });
         setEntries(rows);
