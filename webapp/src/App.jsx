@@ -6923,11 +6923,260 @@ function ModelTab() {
 // Sidebar nav. Items with `children` render as an expandable group; `tab`
 // always holds a leaf name, never a group name, so the content switch below
 // only ever matches leaves.
+// ---------- erebor: screen tab ----------
+// Erebor's own surface. The two Morning Brief panels show Erebor's routine-fed
+// screens because that is where the trader already looks in the morning; this
+// tab is the module's own view, and the only place merger-arb candidates
+// appear at all.
+//
+// Deliberately styled with `T`, not `B`. `B` is the Morning Brief / Dashboard
+// palette imported from the Claude Design project and is contracted by
+// docs/design.md; everything else in the app is `T`, and this is everything
+// else. The two are not blended per tab.
+
+const KIND_LABEL = {
+  merger_arb: "Merger arb",
+  squeeze: "Squeeze",
+  whale: "Whale flow",
+  sweep: "Sweep",
+};
+
+// Money is shown at the scale it is readable at, not at full precision: an
+// implied valuation carries maybe two significant figures of real information
+// once it is derived from a share count that was itself estimated.
+function usdCompact(n) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "";
+  const abs = Math.abs(n);
+  if (abs >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `$${(n / 1e6).toFixed(0)}M`;
+  if (abs >= 1e3) return `$${(n / 1e3).toFixed(0)}K`;
+  return `$${n.toFixed(2)}`;
+}
+
+// The multiple is the whole point of the merger-arb screen, so it gets the
+// color. Thresholds are deliberately wide and few: this is a "look at this"
+// signal, not a position size, and a finer gradient would imply a precision
+// the derived share count cannot support.
+function scoreTone(score) {
+  if (typeof score !== "number" || !Number.isFinite(score)) return T.faint;
+  if (score >= 2) return T.red;      // market pricing the combo at 2x+ the struck deal
+  if (score >= 1.25) return T.amber; // stretched
+  if (score < 0.98) return T.green;  // below the cash — the opposite trade
+  return T.dim;                      // converged on terms
+}
+
+function EreborRow({ c }) {
+  const m = c.metrics && typeof c.metrics === "object" ? c.metrics : {};
+  const score = typeof c.score === "number" ? c.score : null;
+  return (
+    <div
+      style={{
+        background: T.panel,
+        border: `1px solid ${T.panelEdge}`,
+        borderRadius: 8,
+        padding: "12px 14px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: T.display, fontSize: 20, letterSpacing: "0.04em", color: T.ink }}>
+          {c.ticker}
+        </span>
+        <span style={{ fontSize: 12, color: T.dim }}>{c.company}</span>
+        <span style={{ flex: 1 }} />
+        {score !== null && (
+          <span
+            style={{
+              fontFamily: T.mono,
+              fontSize: 15,
+              fontWeight: 700,
+              color: scoreTone(score),
+            }}
+          >
+            {score.toFixed(2)}x
+          </span>
+        )}
+      </div>
+
+      {c.note && (
+        <div style={{ fontSize: 12.5, color: T.dim, lineHeight: 1.5 }}>{c.note}</div>
+      )}
+
+      {c.kind === "merger_arb" && (
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fit, minmax(128px, 1fr))",
+            gap: 8,
+            fontFamily: T.mono,
+            fontSize: 11,
+          }}
+        >
+          <Metric label="PRICE" value={c.price != null ? `$${c.price.toFixed(2)}` : ""} />
+          <Metric
+            label="CASH/SH"
+            value={m.cash_per_share != null ? `$${Number(m.cash_per_share).toFixed(2)}` : ""}
+          />
+          <Metric
+            label="STUB/SH"
+            value={m.stub_per_share != null ? `$${Number(m.stub_per_share).toFixed(2)}` : ""}
+          />
+          <Metric
+            label="VS CASH"
+            value={
+              m.premium_to_cash_pct != null
+                ? `${Number(m.premium_to_cash_pct) >= 0 ? "+" : ""}${Number(m.premium_to_cash_pct).toFixed(1)}%`
+                : ""
+            }
+          />
+          <Metric label="IMPLIED" value={usdCompact(Number(m.implied_combined_value_usd))} />
+          <Metric label="STRUCK" value={usdCompact(Number(m.transaction_value_usd))} />
+        </div>
+      )}
+
+      {/* Two clocks, never one standing for the other — the same rule the
+          brief panels age their vintages by. */}
+      <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: "0.06em" }}>
+        {KIND_LABEL[c.kind] || c.kind}
+        {c.as_of ? ` · data ${c.as_of}` : ""}
+        {c.price_as_of ? ` · quote ${c.price_as_of}` : ""}
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value }) {
+  if (!value) return null;
+  return (
+    <div>
+      <div style={{ fontSize: 9, letterSpacing: "0.12em", color: T.faint }}>{label}</div>
+      <div style={{ fontSize: 12.5, color: T.ink, marginTop: 2 }}>{value}</div>
+    </div>
+  );
+}
+
+function EreborTab() {
+  const [rows, setRows] = useState([]);
+  const [run, setRun] = useState(null);
+  const [loadState, setLoadState] = useState("loading");
+  const [loadError, setLoadError] = useState(null);
+
+  useEffect(() => {
+    (async () => {
+      const [candidates, runs] = await Promise.all([
+        supabase
+          .from("erebor_candidates")
+          .select("*")
+          .order("as_of", { ascending: false })
+          .limit(200),
+        supabase
+          .from("erebor_runs")
+          .select("*")
+          .order("as_of", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+      ]);
+      // Read the error rather than discard it. An empty list and a failed
+      // query look identical otherwise, which is the confusion this whole
+      // module was reorganised to stop.
+      const err = candidates.error || runs.error;
+      if (err) setLoadError(err.message || String(err));
+      setRows(Array.isArray(candidates.data) ? candidates.data : []);
+      setRun(runs.data || null);
+      setLoadState("ready");
+    })();
+  }, []);
+
+  // Newest reading per (ticker, kind). Older days stay in the table and are
+  // what makes the screen scoreable later, but the tab is a "what is dislocated
+  // now" view, so it shows one row per name rather than a history.
+  const latest = useMemo(() => {
+    const seen = new Map();
+    for (const r of rows) {
+      const key = `${r.ticker}|${r.kind}`;
+      if (!seen.has(key)) seen.set(key, r); // rows arrive newest-first
+    }
+    return [...seen.values()].sort((a, b) => {
+      const as = typeof a.score === "number" ? a.score : -Infinity;
+      const bs = typeof b.score === "number" ? b.score : -Infinity;
+      return bs - as;
+    });
+  }, [rows]);
+
+  if (loadState === "loading") {
+    return <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 12 }}>Loading…</div>;
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: T.dim, marginBottom: 14, lineHeight: 1.6 }}>
+        Single-name event screening — separate from the SPY model. Merger arb is
+        computed by <code style={{ fontFamily: T.mono }}>erebor_scan.py</code> from
+        published deal terms; squeezes and whale flow come from the Erebor routine.
+        The multiple is what the tape implies the combined company is worth
+        against the price the deal was actually struck at.
+      </div>
+
+      {loadError && (
+        <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>
+          Could not read the screen — {loadError}. This is a failed query, not an
+          empty result.
+        </div>
+      )}
+
+      {run && (
+        <div
+          style={{
+            fontFamily: T.mono,
+            fontSize: 10.5,
+            color: T.faint,
+            letterSpacing: "0.06em",
+            marginBottom: 14,
+          }}
+        >
+          LAST SCAN {run.as_of} · {run.candidates_written}{" "}
+          {run.candidates_written === 1 ? "CANDIDATE" : "CANDIDATES"}
+          {run.sources && typeof run.sources === "object"
+            ? Object.entries(run.sources).map(([k, v]) => (
+                <span key={k} style={{ color: v === "ok" ? T.faint : T.amber }}>
+                  {" · "}
+                  {k} {String(v)}
+                </span>
+              ))
+            : null}
+        </div>
+      )}
+
+      {!latest.length ? (
+        <div style={{ color: T.dim, fontSize: 13 }}>
+          {loadError
+            ? "Nothing to show — the read above failed."
+            : run
+            ? "Scan ran and found nothing to flag."
+            : "No scan has run yet. Add a deal to erebor_deals, then run erebor_scan.py."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {latest.map((c) => (
+            <EreborRow key={`${c.ticker}-${c.kind}`} c={c} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 const NAV = [
   { label: "Morning Brief" },
   { label: "Dashboard" },
   { label: "Journal" },
   { label: "Modeling", children: ["Charts", "Training Data", "Indicator"] },
+  // Erebor is its own group, not a child of Modeling: it screens single names
+  // for event dislocations and has nothing to do with the SPY entry model.
+  { label: "Erebor", children: ["Screen"] },
   { label: "Resources" },
 ];
 
@@ -7199,6 +7448,7 @@ export default function Smaug() {
         )}
         {tab === "Training Data" && <TrainingDataTab />}
         {tab === "Indicator" && <ModelTab />}
+        {tab === "Screen" && <EreborTab />}
         {tab === "Resources" && <ResourcesTab />}
           </div>
         </div>

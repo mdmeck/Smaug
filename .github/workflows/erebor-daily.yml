@@ -1,0 +1,43 @@
+name: Erebor daily scan
+
+# Separate workflow from smaug-daily.yml on purpose. Erebor screens individual
+# equities; Smaug is SPY. Sharing a job would mean a yfinance hiccup on one
+# deal could fail the SPY pipeline, and a failed SPY fetch could take the
+# screen down with it — the exact coupling this module was split out to end.
+
+on:
+  schedule:
+    # 22:00 UTC = 6:00 PM EDT / 5:00 PM EST, half an hour after the Smaug
+    # pipeline. Deliberately staggered rather than concurrent: both hit
+    # yfinance, and a scan that ran while the pipeline was mid-fetch would
+    # make a rate-limit failure look like a screen failure.
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch: {}   # manual "Run workflow" button for testing
+
+jobs:
+  run-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # No pandas/numpy: the merger-arb screen is arithmetic over deal terms
+      # and yfinance already pulls what it needs. Kept minimal so a scan does
+      # not fail on a dependency it never uses.
+      - name: Install dependencies
+        run: pip install yfinance requests
+
+      - name: Run scan
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Only consulted when there are no deals at all and a run row still
+          # needs an owner — normally the id propagates from the deal row.
+          EREBOR_USER_ID: ${{ secrets.EREBOR_USER_ID }}
+        run: python erebor_scan.py
