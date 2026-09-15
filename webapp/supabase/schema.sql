@@ -10,11 +10,23 @@ create table if not exists journal_entries (
   direction text not null check (direction in ('Long', 'Short')),
   setup text default '',
   result text default '',
-  -- capital deployed to open the position (premium paid + fees), in dollars.
-  -- Nullable — unknown on hand-entered rows. Lets a day be read as return on
-  -- capital, sum(result)/sum(cost_basis), rather than raw P&L: two $100
-  -- positions returning $20 is 10%, which $20 alone doesn't tell you.
+  -- premium paid to open, in dollars, EXCLUDING fees (net fill price x 100 x
+  -- contracts). Nullable — unknown on hand-entered rows. Lets a day be read as
+  -- return on capital, sum(result)/sum(cost_basis), rather than raw P&L: two
+  -- $100 positions returning $20 is 10%, which $20 alone doesn't tell you.
+  -- Fees are deliberately NOT folded in here — they live in their own column
+  -- so gross (what thinkorswim shows) and net stay separable.
   cost_basis double precision,
+  -- contracts per leg on the round trip, straight from the qty column of the
+  -- broker paste. Nullable on hand-written rows with no fill behind them.
+  -- Drives the fee estimate, and is the only place size is queryable — it was
+  -- previously trapped in notes prose.
+  contracts integer,
+  -- actual commissions + regulatory for the round trip, when known from the
+  -- transaction export. Normally NULL: thinkorswim order history carries no
+  -- fee column, so the UI estimates from contracts instead. Set this to
+  -- override that estimate with the real figure.
+  fees double precision,
   notes text default '',
   created_at timestamptz not null default now()
 );
@@ -207,3 +219,218 @@ create policy "analysis_runs_public_read"
   on analysis_runs
   for select
   using (true);
+
+
+-- =====================================================================
+-- Erebor — single-name event screening
+-- =====================================================================
+-- Deliberately a separate module from everything above. Smaug is intraday
+-- SPY options scalping; Erebor screens individual equities for event-driven
+-- dislocations (merger arbitrage first, squeezes and liquidity sweeps later)
+-- and holds multi-day positions in them. They share this Supabase project and
+-- the webapp shell, and nothing else: no foreign keys reach across, no Erebor
+-- row joins to `bars` / `analysis_runs` / `entry_models`, and Erebor trades do
+-- NOT go in `journal_entries`. That last one is a correctness matter, not
+-- tidiness — `journal_entries` carries 0DTE round-trip semantics and a daily
+-- P/L reconciliation against the broker, and multi-day equity holds dropped
+-- into it would corrupt both.
+--
+-- Owner-only tier, like every other routine-written table. The routine's
+-- connector runs as `postgres` with `auth.uid()` NULL, so every insert here
+-- must pass `user_id` explicitly or hit a not-null violation — the same
+-- asymmetric failure the rest of the schema warns about (reads look fine
+-- while writes silently stop).
+
+-- Announced deals and their terms. This is the input the merger-arb screen
+-- cannot compute for itself: terms live in an 8-K or a press release, not in
+-- any free structured feed, so a human or the routine enters them once. That
+-- is the whole reason merger arb is the cheapest of the three screens to
+-- build — the terms change essentially never while the price moves daily, so
+-- one hand-entered row supports an indefinite series of automated readings.
+--
+-- Upserted on (user_id, ticker, announced_on) rather than append-only: unlike
+-- a price, a correction to a deal's terms supersedes the old value outright
+-- and keeping both would just be two contradictory rows.
+create table if not exists erebor_deals (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  ticker text not null,
+  company text default '',
+  acquirer text default '',
+  announced_on date not null,
+  -- Terms. Both are nullable and mean different things when absent:
+  -- cash_per_share is NULL in an all-stock deal, stub_pct is NULL when
+  -- holders are cashed out entirely. A deal with neither is not screenable
+  -- and the scanner skips it rather than assuming a zero.
+  cash_per_share double precision,
+  stub_pct double precision check (stub_pct is null or (stub_pct >= 0 and stub_pct <= 100)),
+  -- Headline transaction value, and the denominator the screen exists to
+  -- compare against: when the market's implied value of the combined company
+  -- runs to several times the price the deal was actually struck at, that gap
+  -- is the signal. GPRO on 2026-09-03 implied ~$1.1B against a $285M deal.
+  transaction_value_usd double precision,
+  shares_outstanding double precision,
+  status text not null default 'announced'
+    check (status in ('announced', 'closed', 'terminated')),
+  expected_close date,
+  -- the filing or release the terms were read from, so a number that looks
+  -- wrong six weeks later can be re-checked against its source instead of
+  -- re-derived from memory
+  source_url text default '',
+  notes text default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists erebor_deals_user_ticker_announced_key
+  on erebor_deals (user_id, ticker, announced_on);
+
+alter table erebor_deals enable row level security;
+
+create policy "erebor_deals_owner_all"
+  on erebor_deals
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- One row per name per screen per day. This is the table that makes the
+-- module tradeable rather than merely readable, and it is deliberately the
+-- opposite of `daily_briefs`: that one keeps a single row per user with no
+-- history, which is why the Roaring Kitty and Whale Action panels can show a
+-- screen without anyone being able to ask whether the screen has ever worked.
+-- Here every day accumulates, so a rule can be backtested, a skipped name can
+-- be checked against what it went on to do, and a silently broken source
+-- shows up as a gap in a series instead of vanishing.
+--
+-- `kind` partitions the screens rather than splitting them into three tables:
+-- they share every column that matters (what, when, how much, why) and differ
+-- only in `metrics`, which is jsonb precisely so each screen can carry its own
+-- fields without a migration per screen.
+--
+-- Upsert on (user_id, as_of, ticker, kind), not plain insert: a re-run on the
+-- same day should correct that day's reading, not file a second one. History
+-- lives across days, never within one.
+create table if not exists erebor_candidates (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  as_of date not null,
+  ticker text not null,
+  kind text not null check (kind in ('merger_arb', 'squeeze', 'whale', 'sweep')),
+  company text default '',
+  price double precision,
+  -- The quote's own date, kept separate from `as_of` for the same reason the
+  -- squeeze panel separates its three vintages: a fresh price must never lend
+  -- credibility to a stale input sitting next to it.
+  price_as_of date,
+  -- Comparable within a `kind` and meaningless across them. Nothing should
+  -- ever sort the whole table by this column.
+  --
+  -- NULL for the routine-written kinds (`squeeze`, `whale`), deliberately.
+  -- Those panels have always stored what the source printed and derived every
+  -- ratio and ranking at render time — the routine is explicitly forbidden
+  -- from writing a squeeze score, because a composite number nobody can
+  -- re-derive is one a trader would size a position on. Only `merger_arb`
+  -- carries a score, and it can because that score is arithmetic over
+  -- published deal terms rather than a judgement.
+  score double precision,
+  -- Screen-specific figures, as the source printed them.
+  --   merger_arb: stub_per_share, implied_combined_value_usd,
+  --               premium_to_cash_pct, implied_vs_transaction_x, deal_id
+  --   squeeze:    short_percent_float, days_to_cover, buzz {...}
+  --   whale:      lean, volume, avg_volume, flow
+  metrics jsonb not null default '{}'::jsonb,
+  note text default '',
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists erebor_candidates_user_day_ticker_kind_key
+  on erebor_candidates (user_id, as_of, ticker, kind);
+
+create index if not exists erebor_candidates_ticker_idx
+  on erebor_candidates (user_id, ticker, as_of desc);
+
+alter table erebor_candidates enable row level security;
+
+create policy "erebor_candidates_owner_all"
+  on erebor_candidates
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- Run health, one row per scan. This exists because of a bug found on
+-- 2026-09-08: the brief ran, both market panels were written as empty arrays
+-- because their sources were unreachable, and the webapp rendered that as
+-- "Awaiting run" — a broken scraper and a quiet market looked identical, and
+-- with no history there was no way to notice it had been happening.
+--
+-- An empty `erebor_candidates` day is ambiguous for exactly the same reason,
+-- so the ambiguity is resolved structurally instead of by inference: a scan
+-- that ran and found nothing writes a row here with its sources marked ok,
+-- and a scan that never ran leaves no row at all. `sources` is per-source
+-- status so one dead feed doesn't get read as a clean screen.
+create table if not exists erebor_runs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  as_of date not null,
+  ran_at timestamptz not null default now(),
+  kinds jsonb not null default '[]'::jsonb,
+  sources jsonb not null default '{}'::jsonb,
+  candidates_written int not null default 0,
+  errors jsonb not null default '[]'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists erebor_runs_user_day_key
+  on erebor_runs (user_id, as_of);
+
+alter table erebor_runs enable row level security;
+
+create policy "erebor_runs_owner_all"
+  on erebor_runs
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- Erebor's own trade log. Separate from `journal_entries` for the reason given
+-- at the top of this section, and shaped differently because the trades are
+-- different: multi-day rather than same-session, shares or longer-dated
+-- options rather than 0DTE, and closed in pieces often enough that a single
+-- open/close pair would misreport them.
+--
+-- `opened_at`/`closed_at` are timestamps, not a `date` — an Erebor position
+-- spans days, so a single date column could not say which one it meant.
+-- `closed_at` NULL means the position is still open, which is a state
+-- `journal_entries` never has to represent.
+create table if not exists erebor_positions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  ticker text not null,
+  direction text not null check (direction in ('Long', 'Short')),
+  -- what put the name on the radar, so the screen can be scored by outcome
+  -- rather than by how good its candidates looked on the day
+  thesis text not null default '' check (thesis in ('', 'merger_arb', 'squeeze', 'sweep', 'discretionary')),
+  opened_at timestamptz not null,
+  closed_at timestamptz,
+  quantity double precision,
+  avg_entry double precision,
+  avg_exit double precision,
+  -- Gross of fees, matching the hand-entered convention in journal_entries.
+  -- Signed dollars; NULL while the position is open rather than 0, so an
+  -- unrealised position can never be summed into a realised total.
+  result double precision,
+  cost_basis double precision,
+  notes text default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists erebor_positions_user_opened_idx
+  on erebor_positions (user_id, opened_at desc);
+
+alter table erebor_positions enable row level security;
+
+create policy "erebor_positions_owner_all"
+  on erebor_positions
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
