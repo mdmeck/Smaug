@@ -2246,13 +2246,23 @@ function computeStats(entries, { from, to }) {
 
   const byDay = new Map();
   for (const t of used) {
-    const d = byDay.get(t.date) || { pl: 0, n: 0, rows: [] };
+    const d = byDay.get(t.date) || { pl: 0, n: 0, fees: 0, rows: [] };
     d.pl += t.pl;
     d.n += 1;
+    d.fees += feesForEntry(t) || 0;
     d.rows.push(t);
     byDay.set(t.date, d);
   }
-  for (const d of byDay.values()) d.rows.sort((a, b) => b.pl - a.pl);
+  // pl stays gross — it is the number thinkorswim shows, and the calendar has
+  // to agree with the platform. net carries the fee drag alongside it rather
+  // than replacing it.
+  for (const d of byDay.values()) {
+    d.rows.sort((a, b) => b.pl - a.pl);
+    d.net = d.pl - d.fees;
+  }
+
+  const fees = used.reduce((a, t) => a + (feesForEntry(t) || 0), 0);
+  const contracts = used.reduce((a, t) => a + (Number(t.contracts) || 0), 0);
 
   const wins = used.filter((t) => t.pl > 0).map((t) => t.pl);
   const losses = used.filter((t) => t.pl < 0).map((t) => t.pl);
@@ -2276,12 +2286,16 @@ function computeStats(entries, { from, to }) {
     winRate: wins.length + losses.length ? wins.length / (wins.length + losses.length) : null,
     profitFactor: grossLoss ? sum(wins) / grossLoss : null,
     tradingDays: byDay.size,
+    fees,
+    contracts,
+    netAfterFees: sum(wins) + sum(losses) - fees,
+    feesEstimated: feesAreEstimated(used),
     byDay,
     curve,
   };
 }
 
-function KpiCard({ label, value, tone = "neutral" }) {
+function KpiCard({ label, value, tone = "neutral", sub = null }) {
   const color =
     tone === "pos" ? B.greenText : tone === "neg" ? "oklch(0.75 0.18 25)" : B.ink;
   return (
@@ -2309,6 +2323,11 @@ function KpiCard({ label, value, tone = "neutral" }) {
       >
         {value}
       </div>
+      {sub && (
+        <div style={{ fontSize: 12, color: B.dim, whiteSpace: "nowrap" }}>
+          {sub}
+        </div>
+      )}
     </div>
   );
 }
@@ -2324,7 +2343,28 @@ function KpiGrid({ s }) {
         gap: 16,
       }}
     >
-      <KpiCard label="Net P&L" value={usd(s.net, { sign: true })} tone={signTone(s.net)} />
+      {/* headline stays gross so the dashboard agrees with thinkorswim; the
+          fee-adjusted figure rides underneath rather than replacing it */}
+      <KpiCard
+        label="Net P&L"
+        value={usd(s.net, { sign: true })}
+        tone={signTone(s.net)}
+        sub={
+          s.fees
+            ? `${usd(s.netAfterFees, { sign: true })} after fees`
+            : null
+        }
+      />
+      <KpiCard
+        label="Fees"
+        value={s.fees ? `−${usd(s.fees)}` : "—"}
+        tone={s.fees ? "neg" : "neutral"}
+        sub={
+          s.fees
+            ? `${s.contracts} contracts${s.feesEstimated ? " · est" : ""}`
+            : null
+        }
+      />
       <KpiCard
         label="Average Winning Trade"
         value={s.avgWin == null ? "—" : usd(s.avgWin)}
@@ -2485,6 +2525,7 @@ function PnlCalendar({ byDay, selected, onSelect }) {
             const weekDays = week.map((d) => byDay.get(ymd(d))).filter(Boolean);
             const weekPl = weekDays.reduce((a, d) => a + d.pl, 0);
             const weekN = weekDays.reduce((a, d) => a + d.n, 0);
+            const weekFees = weekDays.reduce((a, d) => a + d.fees, 0);
             return (
               <div
                 key={wi}
@@ -2557,6 +2598,29 @@ function PnlCalendar({ byDay, selected, onSelect }) {
                           <div style={{ fontFamily: B.mono, fontSize: 11, color: B.faint }}>
                             {cell.n} {cell.n === 1 ? "Trade" : "Trades"}
                           </div>
+                          {/* fee drag sits under the gross figure: a green day
+                              that nets red is the thing this has to surface */}
+                          {cell.fees > 0 && (
+                            <div
+                              style={{
+                                fontFamily: B.mono,
+                                fontSize: 11,
+                                color: B.faint,
+                              }}
+                            >
+                              −{usd(cell.fees)} ·{" "}
+                              <span
+                                style={{
+                                  color:
+                                    cell.net >= 0
+                                      ? B.greenText
+                                      : "oklch(0.75 0.18 25)",
+                                }}
+                              >
+                                {usd(cell.net, { sign: true })}
+                              </span>
+                            </div>
+                          )}
                         </>
                       )}
                     </div>
@@ -2588,6 +2652,21 @@ function PnlCalendar({ byDay, selected, onSelect }) {
                       <div style={{ fontFamily: B.mono, fontSize: 11, color: B.faint }}>
                         {weekN} {weekN === 1 ? "Trade" : "Trades"}
                       </div>
+                      {weekFees > 0 && (
+                        <div style={{ fontFamily: B.mono, fontSize: 11, color: B.faint }}>
+                          <span
+                            style={{
+                              color:
+                                weekPl - weekFees >= 0
+                                  ? B.greenText
+                                  : "oklch(0.75 0.18 25)",
+                            }}
+                          >
+                            {usd(weekPl - weekFees, { sign: true })}
+                          </span>{" "}
+                          net
+                        </div>
+                      )}
                     </>
                   )}
                 </div>
