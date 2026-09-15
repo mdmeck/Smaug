@@ -2598,8 +2598,10 @@ function PnlCalendar({ byDay, selected, onSelect }) {
                           <div style={{ fontFamily: B.mono, fontSize: 11, color: B.faint }}>
                             {cell.n} {cell.n === 1 ? "Trade" : "Trades"}
                           </div>
-                          {/* fee drag sits under the gross figure: a green day
-                              that nets red is the thing this has to surface */}
+                          {/* after-fees only. The fee total itself lives in the
+                              KPI row — in a cell this size it crowded out the
+                              number that actually matters: a green day that
+                              nets red. */}
                           {cell.fees > 0 && (
                             <div
                               style={{
@@ -2608,7 +2610,6 @@ function PnlCalendar({ byDay, selected, onSelect }) {
                                 color: B.faint,
                               }}
                             >
-                              −{usd(cell.fees)} ·{" "}
                               <span
                                 style={{
                                   color:
@@ -2618,7 +2619,8 @@ function PnlCalendar({ byDay, selected, onSelect }) {
                                 }}
                               >
                                 {usd(cell.net, { sign: true })}
-                              </span>
+                              </span>{" "}
+                              net
                             </div>
                           )}
                         </>
