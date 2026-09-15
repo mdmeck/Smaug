@@ -2334,6 +2334,11 @@ function KpiCard({ label, value, tone = "neutral", sub = null }) {
 
 const signTone = (n) => (n == null ? "neutral" : n > 0 ? "pos" : n < 0 ? "neg" : "neutral");
 
+// Same three colours KpiCard resolves a tone to, for the places that colour a
+// figure inline rather than through the card's own value.
+const signColor = (n) =>
+  n == null || n === 0 ? B.dim : n > 0 ? B.greenText : "oklch(0.75 0.18 25)";
+
 function KpiGrid({ s }) {
   return (
     <div
@@ -2344,25 +2349,22 @@ function KpiGrid({ s }) {
       }}
     >
       {/* headline stays gross so the dashboard agrees with thinkorswim; the
-          fee-adjusted figure rides underneath rather than replacing it */}
+          fee total and the figure it produces ride underneath rather than
+          taking a card of their own */}
       <KpiCard
         label="Net P&L"
         value={usd(s.net, { sign: true })}
         tone={signTone(s.net)}
         sub={
-          s.fees
-            ? `${usd(s.netAfterFees, { sign: true })} after fees`
-            : null
-        }
-      />
-      <KpiCard
-        label="Fees"
-        value={s.fees ? `−${usd(s.fees)}` : "—"}
-        tone={s.fees ? "neg" : "neutral"}
-        sub={
-          s.fees
-            ? `${s.contracts} contracts${s.feesEstimated ? " · est" : ""}`
-            : null
+          s.fees ? (
+            <>
+              −{usd(s.fees)} {s.feesEstimated ? "est " : ""}fees ·{" "}
+              <span style={{ color: signColor(s.netAfterFees) }}>
+                {usd(s.netAfterFees, { sign: true })}
+              </span>{" "}
+              net
+            </>
+          ) : null
         }
       />
       <KpiCard
