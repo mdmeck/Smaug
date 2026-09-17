@@ -39,7 +39,8 @@ import json
 import math
 import os
 import sys
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -192,14 +193,21 @@ def fetch_prices(tickers):
             if hist is None or hist.empty:
                 failures[t] = "no price history returned"
                 continue
-            last = hist.iloc[-1]
-            px = float(last["Close"])
-            if not math.isfinite(px) or px <= 0:
-                failures[t] = f"unusable close: {px!r}"
+            # Last *usable* row, not last row. After the close yfinance often
+            # appends a placeholder bar for the session just ended (or the
+            # next one) with a NaN close, and taking iloc[-1] blindly read that
+            # as the price. Both scheduled runs on 2026-09-16/17 failed on
+            # exactly this while a same-day manual dispatch succeeded, because
+            # the scheduler fired hours after the close and the manual run
+            # fired during the session. Walk back to the newest finite close.
+            closes = hist["Close"]
+            ok = closes[closes.notna() & (closes > 0)]
+            if ok.empty:
+                failures[t] = f"no finite close in {len(hist)} rows (last: {closes.iloc[-1]!r})"
                 continue
             prices[t] = {
-                "price": px,
-                "as_of": hist.index[-1].date().isoformat(),
+                "price": float(ok.iloc[-1]),
+                "as_of": ok.index[-1].date().isoformat(),
             }
         except Exception as exc:  # noqa: BLE001 - one bad ticker must not end the scan
             failures[t] = f"{type(exc).__name__}: {exc}"
@@ -317,7 +325,11 @@ def _describe(deal, price, cash, stub_per_share, premium_pct, score, metrics):
 # Run
 # ----------------------------------------------------------------------
 def run(dry_run=False):
-    as_of = date.today().isoformat()
+    # The run's own date, in market time. GitHub's scheduler fired the 22:00
+    # UTC cron at 00:13 UTC on 2026-09-17, and date.today() on the runner
+    # called that the 17th — labelling the 16th's close as a session that had
+    # not opened yet. Every date in this module is an ET trading date.
+    as_of = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
     errors, skipped = [], []
 
     deals = load_open_deals()
@@ -353,7 +365,14 @@ def run(dry_run=False):
             candidates.append(
                 {
                     "user_id": deal["user_id"],
-                    "as_of": as_of,
+                    # The session the price is from, NOT the run date: the
+                    # deal terms are static, so a merger-arb reading *is* a
+                    # price reading, and it carries that price's own date the
+                    # same way a squeeze row carries its settlement date.
+                    # Keeps a late cron from filing yesterday's close under
+                    # today, and makes the (as_of, ticker, kind) key mean
+                    # "one reading per session" rather than "one per run".
+                    "as_of": quote["as_of"],
                     "ticker": t,
                     "kind": "merger_arb",
                     "company": deal.get("company") or "",
