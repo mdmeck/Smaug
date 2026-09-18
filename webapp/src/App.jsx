@@ -319,6 +319,37 @@ function dayKey(value) {
   return s ? s[0].toUpperCase() + s.slice(1, 3).toLowerCase() : "";
 }
 
+// Dates compare as local-calendar YYYY-MM-DD via `ymd` (defined with the
+// Dashboard helpers below; module-scope, so usable here at render time),
+// which matches how tradingWeek() builds its column dates.
+const eventDate = (e) => {
+  const d = String(e?.date || "").trim().slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : "";
+};
+
+// A weekday name alone cannot say *which* Wednesday. On 2026-09-11 (a Friday,
+// CPI at 8:30) the routine wrote the following week's calendar; every row
+// carried a plausible weekday, so the grid painted next week's FOMC onto this
+// week's Wednesday and left Friday — CPI day — empty, under a fresh LAST RUN
+// stamp. Rows now carry a `date`, and a dated row is placed by that date
+// alone: it lands on the matching column or on none. The weekday name is only
+// trusted on legacy rows that have no date.
+function onDay(e, day) {
+  const d = eventDate(e);
+  return d ? d === ymd(day.date) : dayKey(e.day) === day.label;
+}
+
+// Dated rows that fit no column in the rendered week. Surfaced as a count so
+// a wrong-week brief reads as "N events outside this week", never as a full
+// grid or an empty one.
+function outsideWeek(rows, week) {
+  const dates = new Set(week.map((d) => ymd(d.date)));
+  return rows.filter((e) => {
+    const d = eventDate(e);
+    return d && !dates.has(d);
+  });
+}
+
 // Earnings order pre-market first, after-close last. The spec calls `time`
 // descriptive ("before open" / "after close"); earlier rows used the BMO/AMC
 // abbreviations. Both vocabularies have to sort the same, and the tag column is
@@ -337,9 +368,9 @@ function earnSlot(time) {
 // before — it's chronological in spirit even though only econ rows carry a
 // clock time — but expressed as one sequence, which is what lets the dot rail
 // in TimelineItem read as a day unfolding.
-function dayTimeline(econEvents, earnRows, label) {
-  const dayEcon = econEvents.filter((e) => dayKey(e.day) === label);
-  const dayEarn = earnRows.filter((e) => dayKey(e.day) === label);
+function dayTimeline(econEvents, earnRows, day) {
+  const dayEcon = econEvents.filter((e) => onDay(e, day));
+  const dayEarn = earnRows.filter((e) => onDay(e, day));
   const at = (slot) => dayEarn.filter((e) => earnSlot(e.time) === slot);
   const bmo = at("BMO");
   const amc = at("AMC");
@@ -516,6 +547,9 @@ function WeekCalendar({ econ, earnings, lastRun }) {
   // date, not just time: a brief that stopped refreshing days ago used to look
   // identical to one written this morning
   const stale = lastRun && !isSameDay(lastRun, new Date());
+  // a wrong-week brief is not an error and not an empty grid, so it needs its
+  // own line — see onDay()
+  const misdated = outsideWeek([...econEvents, ...earnRows], week);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -585,6 +619,23 @@ function WeekCalendar({ econ, earnings, lastRun }) {
         )}
       </div>
 
+      {misdated.length > 0 && (
+        <div
+          style={{
+            fontFamily: B.mono,
+            fontSize: 12,
+            color: B.amber,
+            lineHeight: 1.5,
+          }}
+        >
+          {misdated.length} event{misdated.length === 1 ? "" : "s"} in this
+          brief {misdated.length === 1 ? "is" : "are"} dated outside{" "}
+          {ymd(week[0].date)} – {ymd(week[4].date)} and{" "}
+          {misdated.length === 1 ? "is" : "are"} not shown — the routine
+          likely wrote the wrong week.
+        </div>
+      )}
+
       {nothingYet ? (
         <div style={{ fontFamily: B.mono, fontSize: 12, color: B.faint }}>
           Awaiting run
@@ -601,7 +652,7 @@ function WeekCalendar({ econ, earnings, lastRun }) {
           >
             {week.map((day) => {
               const today = isToday(day.date);
-              const items = dayTimeline(econEvents, earnRows, day.label);
+              const items = dayTimeline(econEvents, earnRows, day);
               return (
                 <div
                   key={day.label}
@@ -1537,7 +1588,7 @@ function latestOfKind(rows, kind, adapt) {
 // `tone` stays calm only for the two states that are genuinely fine (nothing
 // has run yet, or everything ran and the market is quiet). Every other case is
 // amber, because an empty panel the trader might act on is a problem.
-function panelEmptyState(raw, run, itemCount, label, error) {
+function panelEmptyState(raw, run, itemCount, label, error, kind) {
   // Checked before everything else: when the read itself failed we know
   // nothing about the screen, and every message below would be a claim the
   // data does not support.
@@ -1553,6 +1604,18 @@ function panelEmptyState(raw, run, itemCount, label, error) {
     };
   const ran = dayLabel(run.as_of) || String(run.as_of);
   const n = Array.isArray(raw) ? raw.length : 0;
+
+  // The run row is shared across every screen the scanner runs, so "every
+  // source ok" is only evidence about the screens it actually attempted.
+  // `kinds` is the list of those. A kind absent from it was not run — and
+  // must not be reported as a clean screen, which is exactly what the
+  // sources map alone would have said about Whale Action on 2026-09-18.
+  const kinds = Array.isArray(run.kinds) ? run.kinds : [];
+  if (kind && kinds.length && !kinds.includes(kind))
+    return {
+      text: `Scan ran ${ran} but did not attempt ${label} — no writer for this screen yet.`,
+      tone: "warn",
+    };
 
   if (n > 0 && itemCount === 0)
     return {
@@ -1670,7 +1733,7 @@ function WhaleActionPanel({ whales, run, error }) {
 
       {items.length === 0 ? (
         <PanelEmpty
-          state={panelEmptyState(whales, run, items.length, "whale flow", error)}
+          state={panelEmptyState(whales, run, items.length, "whale flow", error, "whale")}
         />
       ) : (
         <div
@@ -1831,15 +1894,23 @@ function buzzOf(raw) {
   const b = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
   if (!b) return null;
   const mentions = numValue(b.mentions ?? b.mention_count ?? b.count);
-  if (mentions === null || mentions < BUZZ_FLOOR) return null;
+  const source = asText(b.source ?? b.subreddit).trim();
+  // StockTwits' trending list is membership, not a count: a name on it is
+  // loud by the source's own definition and carries no mention figure. The
+  // scanner writes it with mentions null and source "stocktwits", and it
+  // passes the floor on that basis alone. Every other source still needs a
+  // real count at or above the floor — a null from reddit is not chatter.
+  const trending = mentions === null && source === "stocktwits";
+  if (!trending && (mentions === null || mentions < BUZZ_FLOOR)) return null;
   const prev = numValue(b.mentions_prev ?? b.mentions_24h_ago ?? b.prev_mentions);
   return {
     mentions,
+    trending,
     // The change is computed here from the two raw counts, never read from the
     // row — same rule as the whale panel's volume multiple.
-    delta: prev === null ? null : mentions - prev,
+    delta: prev === null || mentions === null ? null : mentions - prev,
     upvotes: numValue(b.upvotes ?? b.score),
-    source: asText(b.source ?? b.subreddit).trim(),
+    source,
     // Chatter is a rolling 24h window ending when the routine fetched, so this
     // is normally today — the fast vintage against a two-week-old settlement.
     asOf: asText(b.as_of ?? b.date).trim(),
@@ -1917,7 +1988,9 @@ function SqueezeStat({ label, value }) {
 // token that means something else two panels away. Emoji-as-marker is an
 // established deviation in this design system (docs/design.md, deviation 1).
 function BuzzChip({ buzz }) {
-  const parts = [buzz.source || "reddit", `${buzz.upvotes ?? "?"} upvotes`];
+  const parts = buzz.trending
+    ? [buzz.source, "on the trending list"]
+    : [buzz.source || "reddit", `${buzz.upvotes ?? "?"} upvotes`];
   return (
     <span
       title={parts.join(" \u00b7 ")}
@@ -1936,7 +2009,9 @@ function BuzzChip({ buzz }) {
       }}
     >
       <span aria-hidden="true">🔥</span>
-      {buzz.mentions} {buzz.mentions === 1 ? "mention" : "mentions"}
+      {buzz.trending
+        ? "trending"
+        : `${buzz.mentions} ${buzz.mentions === 1 ? "mention" : "mentions"}`}
       {buzz.delta !== null && (
         // Neutral on purpose. Rising chatter is not the same thing as bullish,
         // and green here would assert a direction the count doesn't carry.
@@ -2141,7 +2216,7 @@ function SqueezePanel({ squeezes, run, error }) {
 
       {items.length === 0 ? (
         <PanelEmpty
-          state={panelEmptyState(squeezes, run, items.length, "squeeze setups", error)}
+          state={panelEmptyState(squeezes, run, items.length, "squeeze setups", error, "squeeze")}
         />
       ) : (
         <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 26 }}>

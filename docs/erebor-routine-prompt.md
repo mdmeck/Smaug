@@ -1,13 +1,35 @@
 # Erebor daily routine — prompt
 
+> **Status (2026-09-18): this routine is DISABLED and cannot currently run.**
+> On its first fire the cloud routine environment blocked every one of its
+> sources on organisation policy — TipRanks, MarketBeat, apewisdom, StockTwits
+> and CBOE all returned `EGRESS_BLOCKED` (confirmed with a direct `curl`: 403 on
+> CONNECT). The routine did the right thing — wrote zero candidates and a run
+> row with every source marked failed — but it can never produce a row from
+> that environment. This is also why `daily_briefs.whales`/`.squeezes` came
+> back `[]` on 2026-09-08: the same block, not a flaky source.
+>
+> **The squeeze screen has moved to Python** (`screen_squeeze()` in
+> `erebor_scan.py`, run by `.github/workflows/erebor-daily.yml`, which has
+> open egress). yfinance carries short % of float, days to cover and the
+> settlement date per ticker, and both chatter feeds are plain JSON, so
+> nothing needed a browser after all. One change in meaning: it starts from
+> the chatter universe and checks short interest, rather than ranking the
+> whole market by short interest and then checking chatter — see the comment
+> block above `screen_squeeze()`.
+>
+> **Whale Action has no writer.** MarketBeat's unusual-options table renders
+> one row without JavaScript, so it is not a plain-HTTP source either. Open
+> options: a headless browser in Actions, a different flow source, or
+> deriving it from yfinance option chains over a watchlist.
+>
+> The task list below is kept as the specification the Python screen was
+> written against, and for whenever a routine environment with open egress
+> becomes available. Do not re-enable it as-is.
+
 Erebor screens **individual equities** for event-driven dislocations. It is a
 separate module from Smaug, which trades intraday SPY options; the two share a
 Supabase project and the webapp shell and nothing else.
-
-This routine covers only the screens that need a browser and judgement — short
-squeezes and unusual options flow. The merger-arbitrage screen is deterministic
-arithmetic over published deal terms and runs in Python (`erebor_scan.py`), not
-here. Liquidity sweeps will run there too.
 
 ## What to actually paste into the routine
 
