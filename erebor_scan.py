@@ -206,7 +206,9 @@ def fetch_prices(tickers):
                 failures[t] = f"no finite close in {len(hist)} rows (last: {closes.iloc[-1]!r})"
                 continue
             prices[t] = {
-                "price": float(ok.iloc[-1]),
+                # float32 from yfinance prints as 13.5447998046875; four
+                # places is more than a quote carries
+                "price": round(float(ok.iloc[-1]), 4),
                 "as_of": ok.index[-1].date().isoformat(),
             }
         except Exception as exc:  # noqa: BLE001 - one bad ticker must not end the scan
@@ -322,6 +324,222 @@ def _describe(deal, price, cash, stub_per_share, premium_pct, score, metrics):
 
 
 # ----------------------------------------------------------------------
+# The squeeze screen (Roaring Kitty)
+# ----------------------------------------------------------------------
+# This screen was written for the AI routine first, on the theory that web
+# reading needs judgement and a Python scraper of MarketBeat would rot faster
+# than a prompt. That theory died on 2026-09-18: the cloud routine environment
+# blocks outbound fetches to every one of its sources on organisation policy
+# (TipRanks, MarketBeat, apewisdom, StockTwits, CBOE all EGRESS_BLOCKED), so
+# the routine could never have produced a row. It also turned out the data is
+# more structured than the prompt assumed — yfinance carries short interest as
+# a percent of float, days to cover AND the settlement date per ticker, and
+# both chatter feeds are plain JSON. Nothing here parses HTML.
+#
+# What changed in the screen's meaning, stated plainly: the old design ranked
+# the whole market by short interest (TipRanks) and then checked chatter. This
+# one starts from the chatter universe (apewisdom's top pages plus StockTwits
+# trending) and checks short interest. "Most shorted, quiet" therefore means
+# most shorted *among names retail is at least mentioning*, not most shorted
+# on the exchange. That is a narrower baseline and a better-targeted one for a
+# squeeze screen — a name nobody mentions is not about to be squeezed — but it
+# is a different claim and the panel copy should not pretend otherwise.
+
+BUZZ_FLOOR = 5          # matches the panel's floor; below it there is no buzz object
+SHORT_FLOAT_MIN_PCT = 10.0
+APEWISDOM_PAGES = 2     # 100 tickers per page; two pages ~40s of yfinance lookups
+MAX_LOUD = 4            # names with chatter — the actionable half
+MAX_QUIET = 8           # shorted-but-quiet baseline
+
+# ETFs create and redeem shares on demand and cannot squeeze; their short-float
+# readings (XBI once showed 118%) are an artifact of that mechanism. Crypto
+# tickers on the chatter feeds end in .X and are not equities.
+ETF_SKIP = {
+    "SPY", "QQQ", "IWM", "DIA", "TLT", "XBI", "VXX", "UVXY", "SQQQ", "TQQQ",
+    "SPXU", "SPXL", "SOXL", "SOXS", "TZA", "TNA", "GLD", "SLV", "USO", "ARKK",
+    "HYG", "LQD", "EEM", "EFA", "XLF", "XLE", "XLK", "SMH", "KRE", "GDX",
+}
+
+UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128 Safari/537.36"}
+
+
+def _is_equity_ticker(t):
+    return bool(t) and t.isascii() and t.upper() == t and "." not in t and t not in ETF_SKIP
+
+
+def fetch_chatter():
+    """The universe, with per-name buzz. Returns (universe, sources).
+
+    universe: {ticker: buzz-or-None}. A name is in the universe if either feed
+    mentions it; it carries a buzz object only if apewisdom counts it at or
+    above BUZZ_FLOOR. Below the floor there is no buzz object at all, not a
+    zero — one person typing a ticker is not chatter, and the panel renders
+    the presence of the object as "loud". Same rule the prompt enforced.
+    """
+    universe, sources = {}, {}
+    today = datetime.now(ZoneInfo("America/New_York")).date().isoformat()
+
+    got_any = False
+    for page in range(1, APEWISDOM_PAGES + 1):
+        try:
+            r = requests.get(
+                f"https://apewisdom.io/api/v1.0/filter/wallstreetbets/page/{page}",
+                headers=UA, timeout=REQUEST_TIMEOUT,
+            )
+            r.raise_for_status()
+            for row in r.json().get("results", []):
+                t = str(row.get("ticker", "")).strip().upper()
+                if not _is_equity_ticker(t):
+                    continue
+                got_any = True
+                mentions = row.get("mentions")
+                buzz = None
+                if isinstance(mentions, (int, float)) and mentions >= BUZZ_FLOOR:
+                    buzz = {
+                        "mentions": int(mentions),
+                        "mentions_prev": row.get("mentions_24h_ago"),
+                        "upvotes": row.get("upvotes"),
+                        "source": "wallstreetbets",
+                        # chatter's own vintage — a rolling 24h window ending
+                        # now — kept separate from the settlement date
+                        "as_of": today,
+                    }
+                # keep the louder reading if a name appears on two pages
+                if t not in universe or (buzz and not universe[t]):
+                    universe[t] = buzz
+        except Exception as exc:  # noqa: BLE001
+            sources["apewisdom"] = f"failed: {type(exc).__name__}"
+            break
+    sources.setdefault("apewisdom", "ok" if got_any else "failed")
+
+    try:
+        r = requests.get(
+            "https://api.stocktwits.com/api/2/trending/symbols.json",
+            headers=UA, timeout=REQUEST_TIMEOUT,
+        )
+        r.raise_for_status()
+        syms = [str(x.get("symbol", "")).strip().upper() for x in r.json().get("symbols", [])]
+        # Trending is membership, not a count: a name on the list is loud by
+        # the source's own definition, so it gets a buzz object with the
+        # source named and no mention figure invented for it.
+        for t in syms:
+            if not _is_equity_ticker(t):
+                continue
+            if not universe.get(t):
+                universe[t] = universe.get(t) or {
+                    "mentions": None, "mentions_prev": None, "upvotes": None,
+                    "source": "stocktwits", "as_of": today,
+                }
+        sources["stocktwits"] = "ok" if syms else "failed"
+    except Exception as exc:  # noqa: BLE001
+        sources["stocktwits"] = f"failed: {type(exc).__name__}"
+
+    return universe, sources
+
+
+def fetch_short_interest(tickers):
+    """Per-ticker short interest from yfinance. Returns (data, failures).
+
+    yfinance reports shortPercentOfFloat as a FRACTION (0.1741). The schema
+    and the panel want the source's own printed scale — 17.41 means 17.41% —
+    so it is multiplied here, exactly once, and nowhere downstream. The panel
+    deliberately does no fraction detection (0.4 is a real reading), so getting
+    this wrong would render every name as under 1% short.
+    """
+    import yfinance as yf
+
+    data, failures = {}, {}
+    for t in tickers:
+        try:
+            info = yf.Ticker(t).info or {}
+            frac = info.get("shortPercentOfFloat")
+            if frac is None:
+                failures[t] = "no short interest field"
+                continue
+            settle = info.get("dateShortInterest")
+            data[t] = {
+                "short_percent_float": round(float(frac) * 100.0, 2),
+                "days_to_cover": info.get("shortRatio"),
+                "shares_short": info.get("sharesShort"),
+                "shares_short_prior": info.get("sharesShortPriorMonth"),
+                "float_shares": info.get("floatShares"),
+                "company": info.get("shortName") or info.get("longName") or "",
+                # the settlement date the figure describes — normally two to
+                # four weeks old, and that is correct, never today's date
+                "as_of": (
+                    datetime.fromtimestamp(settle, tz=timezone.utc).date().isoformat()
+                    if isinstance(settle, (int, float)) else None
+                ),
+            }
+        except Exception as exc:  # noqa: BLE001
+            failures[t] = f"{type(exc).__name__}: {exc}"
+    return data, failures
+
+
+def screen_squeeze(owner):
+    """Returns (candidates, sources, errors) for kind='squeeze'."""
+    universe, sources = fetch_chatter()
+    errors = []
+    if not universe:
+        return [], sources, errors
+
+    tickers = sorted(universe)
+    si, si_failures = fetch_short_interest(tickers)
+    sources["yfinance_short"] = (
+        "ok" if not si_failures else ("failed" if not si else "partial")
+    )
+    # Names with no short-interest field are common (ADRs, tiny floats) and
+    # not worth an error line each; the count is what matters.
+    if si_failures:
+        errors.append({"stage": "short_interest", "missing": len(si_failures)})
+
+    prices, px_failures = fetch_prices([t for t in tickers if t in si])
+    sources["yfinance"] = "ok" if not px_failures else ("failed" if not prices else "partial")
+
+    rows = []
+    for t, d in si.items():
+        if d["short_percent_float"] < SHORT_FLOAT_MIN_PCT or not d["as_of"]:
+            continue
+        q = prices.get(t)
+        buzz = universe.get(t)
+        metrics = {
+            "short_percent_float": d["short_percent_float"],
+            "days_to_cover": d["days_to_cover"],
+            "shares_short": d["shares_short"],
+            "shares_short_prior": d["shares_short_prior"],
+            "float_shares": d["float_shares"],
+        }
+        if buzz:
+            metrics["buzz"] = buzz
+        rows.append(
+            {
+                "user_id": owner,
+                "as_of": d["as_of"],
+                "ticker": t,
+                "kind": "squeeze",
+                "company": d["company"],
+                "price": _json_safe(q["price"]) if q else None,
+                "price_as_of": q["as_of"] if q else None,
+                # NULL on purpose: the panel ranks from the raw figures so the
+                # trader can check the ordering against the source. A stored
+                # composite is the number that would get a position sized on it.
+                "score": None,
+                "metrics": {k: _json_safe(v) for k, v in metrics.items()},
+                "note": "",
+            }
+        )
+
+    # Two sections, capped separately, both ranked by short float. The loud
+    # names are the actionable half and are usually few; the quiet baseline
+    # is capped so the panel stays a screen rather than a table.
+    rows.sort(key=lambda r: -r["metrics"]["short_percent_float"])
+    loud = [r for r in rows if "buzz" in r["metrics"]][:MAX_LOUD]
+    quiet = [r for r in rows if "buzz" not in r["metrics"]][:MAX_QUIET]
+    return loud + quiet, sources, errors
+
+
+# ----------------------------------------------------------------------
 # Run
 # ----------------------------------------------------------------------
 def run(dry_run=False):
@@ -335,7 +553,20 @@ def run(dry_run=False):
     deals = load_open_deals()
     print(f"[erebor] {len(deals)} announced deal(s)")
 
+    # Owner resolves from a deal row when there is one, else the env fallback.
+    # Resolved here rather than at write time because the squeeze screen
+    # needs it before a single row exists.
+    owner = deals[0]["user_id"] if deals else EREBOR_USER_ID
+    if not owner:
+        # No deals and no configured owner means there is nothing to attribute
+        # a run row to. Say so rather than writing under a guessed id — a run
+        # row with the wrong owner is invisible to the trader and would make
+        # an unmonitored scan look monitored.
+        print("[erebor] no deals and no EREBOR_USER_ID — nothing written", file=sys.stderr)
+        return
+
     sources = {"erebor_deals": "ok"}
+    kinds = ["merger_arb"]
     candidates = []
 
     if deals:
@@ -389,30 +620,32 @@ def run(dry_run=False):
     # different (and much rarer) opportunity it is.
     candidates.sort(key=lambda c: (c["score"] is None, -(c["score"] or 0)))
 
+    # Squeeze screen. Its sources are recorded under their own keys so a dead
+    # chatter feed cannot be mistaken for a dead price feed, and its kind is
+    # listed so the panel can tell "attempted, found nothing" from "not run".
+    kinds.append("squeeze")
+    sq_rows, sq_sources, sq_errors = screen_squeeze(owner)
+    sources.update(sq_sources)
+    errors.extend(sq_errors)
+    candidates.extend(sq_rows)
+    loud = sum(1 for r in sq_rows if "buzz" in r["metrics"])
+    print(f"[erebor] squeeze: {len(sq_rows)} name(s), {loud} with chatter")
+
     for c in candidates:
-        print(f"  {c['note']}")
+        if c["kind"] == "squeeze":
+            m = c["metrics"]
+            tag = "LOUD " if "buzz" in m else "quiet"
+            print(f"  [{tag}] {c['ticker']:<6} {m['short_percent_float']:>6.2f}% short"
+                  f"  dtc {m.get('days_to_cover') or '-'}  settled {c['as_of']}")
+        else:
+            print(f"  {c['note']}")
     for s in skipped:
         print(f"  [skip] {s['ticker']}: {s['reason']}")
     for e in errors:
-        print(f"  [error] {e['ticker']}: {e['error']}", file=sys.stderr)
+        print(f"  [error] {e}", file=sys.stderr)
 
     if dry_run:
         print("[erebor] --dry-run: nothing written")
-        return
-
-    owner = (
-        candidates[0]["user_id"] if candidates
-        else (deals[0]["user_id"] if deals else EREBOR_USER_ID)
-    )
-    if not owner:
-        # No deals and no configured owner means there is nothing to attribute
-        # a run row to. Say so rather than writing a row under a guessed id —
-        # a run row with the wrong owner is invisible to the trader and would
-        # make an unmonitored scan look monitored.
-        print(
-            "[erebor] no deals and no EREBOR_USER_ID — no run row written",
-            file=sys.stderr,
-        )
         return
 
     upsert_candidates(candidates)
@@ -421,7 +654,7 @@ def run(dry_run=False):
             "user_id": owner,
             "as_of": as_of,
             "ran_at": datetime.now(timezone.utc).isoformat(),
-            "kinds": ["merger_arb"],
+            "kinds": kinds,
             "sources": sources,
             "candidates_written": len(candidates),
             # Skips ride along with errors but stay labelled as skips: an
