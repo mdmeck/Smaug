@@ -325,19 +325,22 @@ create table if not exists erebor_candidates (
   -- Comparable within a `kind` and meaningless across them. Nothing should
   -- ever sort the whole table by this column.
   --
-  -- NULL for the routine-written kinds (`squeeze`, `whale`), deliberately.
-  -- Those panels have always stored what the source printed and derived every
-  -- ratio and ranking at render time — the routine is explicitly forbidden
-  -- from writing a squeeze score, because a composite number nobody can
-  -- re-derive is one a trader would size a position on. Only `merger_arb`
-  -- carries a score, and it can because that score is arithmetic over
-  -- published deal terms rather than a judgement.
+  -- Only ever written by code that can be re-run, never by an AI routine: a
+  -- composite number nobody can re-derive is one a trader would size a
+  -- position on. `merger_arb` is arithmetic over published deal terms;
+  -- `squeeze` is `score_squeeze()` in erebor_scan.py, a fixed-weight 0-100
+  -- over the four figures in `metrics`, tagged with `metrics.score_version`
+  -- so a formula change never gets read against an older formula's outcomes.
+  -- `whale` is NULL — the panel shows the volume/OI multiple directly.
   score double precision,
   -- Screen-specific figures, as the source printed them.
   --   merger_arb: stub_per_share, implied_combined_value_usd,
   --               premium_to_cash_pct, implied_vs_transaction_x, deal_id
-  --   squeeze:    short_percent_float, days_to_cover, buzz {...}
-  --   whale:      lean, volume, avg_volume, flow
+  --   squeeze:    short_percent_float, days_to_cover, shares_short,
+  --               shares_short_prior, float_shares, buzz {...},
+  --               score_version, score_parts {fuel, trapped, pressing, spark}
+  --   whale:      lean, volume, call_volume, put_volume, open_interest,
+  --               vol_oi_ratio, expiries, flow
   metrics jsonb not null default '{}'::jsonb,
   note text default '',
   created_at timestamptz not null default now()
@@ -353,6 +356,51 @@ alter table erebor_candidates enable row level security;
 
 create policy "erebor_candidates_owner_all"
   on erebor_candidates
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- What the screen showed on each run, kept forever. `erebor_candidates` is
+-- keyed on the data's own date (a settlement, a session), which is right for
+-- the panel and wrong for a backtest: a Thursday run and a Friday run that
+-- read the same settlement figure collapse into one row, and Friday's price
+-- and chatter overwrite Thursday's. This table is keyed on the run date, so
+-- every day's reading survives as the trader saw it — same figures, same
+-- score, nothing recomputed.
+--
+-- `outcome` is filled in later by the scan once the forward window has fully
+-- printed (see `compute_outcome()` in erebor_scan.py): the max high, min low
+-- and close over the next POP_WINDOW sessions after `price_as_of`, as
+-- percent returns off `price`, and whether the max cleared the pop threshold.
+-- NULL until then — never a partial window, which would make every young
+-- row look like a dud. `python erebor_scan.py --backtest` reads this table.
+create table if not exists erebor_snapshots (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  run_date date not null,
+  ticker text not null,
+  kind text not null check (kind in ('merger_arb', 'squeeze', 'whale', 'sweep')),
+  price double precision,
+  price_as_of date,
+  score double precision,
+  score_version text,
+  metrics jsonb not null default '{}'::jsonb,
+  outcome jsonb,
+  outcome_as_of date,
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists erebor_snapshots_user_run_ticker_kind_key
+  on erebor_snapshots (user_id, run_date, ticker, kind);
+
+create index if not exists erebor_snapshots_pending_idx
+  on erebor_snapshots (user_id, kind, run_date)
+  where outcome is null;
+
+alter table erebor_snapshots enable row level security;
+
+create policy "erebor_snapshots_owner_all"
+  on erebor_snapshots
   for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
