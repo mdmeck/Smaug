@@ -18,10 +18,13 @@
 > whole market by short interest and then checking chatter — see the comment
 > block above `screen_squeeze()`.
 >
-> **Whale Action has no writer.** MarketBeat's unusual-options table renders
-> one row without JavaScript, so it is not a plain-HTTP source either. Open
-> options: a headless browser in Actions, a different flow source, or
-> deriving it from yfinance option chains over a watchlist.
+> **Whale Action has also moved to Python** (`screen_whale()`), and it is a
+> different measurement: MarketBeat compared today's options volume to a
+> rolling average; this compares it to open interest on the same contracts,
+> over the Erebor universe rather than the whole market, skipping expiries
+> under a week out (daily-expiry names churn their front week as routine) and
+> requiring a directional skew. The panel labels the multiple "x OI", never
+> "x avg", for that reason.
 >
 > The task list below is kept as the specification the Python screen was
 > written against, and for whenever a routine environment with open egress

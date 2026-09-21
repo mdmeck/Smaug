@@ -1438,10 +1438,20 @@ function whaleItems(whales) {
     .map((w) => {
       const vol = countValue(w.volume ?? w.option_volume ?? w.call_volume ?? w.put_volume);
       const avg = countValue(w.avg_volume ?? w.average_volume ?? w.avg_vol);
+      const oi = countValue(w.open_interest ?? w.oi);
       // The multiple is computed here rather than read from the row: the source
       // publishes a percent increase, the tile shows a multiple, and letting the
       // routine convert between them is one more place to be quietly wrong.
-      const mult = vol > 0 && avg > 0 ? vol / avg : null;
+      //
+      // Two possible denominators, and the label follows the one used. The
+      // original source compared volume to a rolling AVERAGE; the Python
+      // scanner has no options-volume history and compares to OPEN INTEREST
+      // instead — a same-day "new positioning" read, not a vs-history one.
+      // They are different measurements. The scanner keeps them under
+      // different keys so this code can never confuse them, and the tile
+      // says which it is showing rather than printing "x avg" for both.
+      const basis = vol > 0 && avg > 0 ? "avg" : vol > 0 && oi > 0 ? "OI" : null;
+      const mult = basis === "avg" ? vol / avg : basis === "OI" ? vol / oi : null;
       return {
         ticker: asText(w.ticker ?? w.symbol).trim().toUpperCase(),
         lean: leanKey(w.lean ?? w.bias ?? w.sentiment ?? w.direction),
@@ -1450,7 +1460,7 @@ function whaleItems(whales) {
         // Built from the two raw numbers; a prose size the routine wrote itself
         // is the fallback, so an older or hand-written row still shows something.
         size:
-          [countText(vol), mult ? `${mult.toFixed(1)}\u00d7 avg` : ""]
+          [countText(vol), mult ? `${mult.toFixed(2)}\u00d7 ${basis}` : ""]
             .filter(Boolean)
             .join(" \u00b7 ") || asText(w.size ?? w.premium),
         flow: asText(w.flow ?? w.description ?? w.summary),
@@ -1520,6 +1530,7 @@ function adaptWhale(row) {
     lean: m.lean,
     volume: m.volume,
     avg_volume: m.avg_volume,
+    open_interest: m.open_interest,
     flow: m.flow,
     note: row.note,
     // the session the flow was seen in, not the day the scan ran
@@ -1719,7 +1730,7 @@ function WhaleActionPanel({ whales, run, error }) {
         <div>
           <div style={{ fontSize: 17, fontWeight: 700, color: B.ink }}>Whale Action</div>
           <div style={{ fontSize: 13, color: B.dim, marginTop: 4 }}>
-            Unusual options volume across the market, most abnormal first
+            Directional options flow beyond the front week, volume vs open interest
           </div>
         </div>
         {stamp && (
@@ -2198,7 +2209,7 @@ function SqueezePanel({ squeezes, run, error }) {
         <div>
           <div style={{ fontSize: 17, fontWeight: 700, color: B.ink }}>Roaring Kitty</div>
           <div style={{ fontSize: 13, color: B.dim, marginTop: 4 }}>
-            Heavily shorted names, and whether anyone is talking about them
+            Heavily shorted names retail is talking about, loud ones first
           </div>
         </div>
         {items.length > 0 && stamps.length > 0 && (
