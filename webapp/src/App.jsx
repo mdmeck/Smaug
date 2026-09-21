@@ -1553,6 +1553,11 @@ function adaptSqueeze(row) {
     as_of: row.as_of,
     price_as_of: row.price_as_of,
     buzz: m.buzz,
+    // Versioned composite from erebor_scan.py's score_squeeze(); the parts
+    // ride along so the tile can show what the number is made of.
+    score: row.score,
+    score_parts: m.score_parts,
+    score_version: m.score_version,
   };
 }
 
@@ -1871,6 +1876,24 @@ function numValue(raw) {
 // name that has none.
 const pctText = (n) => (n === null ? "" : `${n.toFixed(1)}%`);
 const dtcText = (n) => (n === null ? "" : n.toFixed(1));
+const scoreText = (n) => (n === null ? "" : Math.round(n).toString());
+
+// The four 0-1 parts behind a score, in the weight order erebor_scan.py
+// declares. Hover text only: the number is the headline, this is its receipt.
+const SCORE_PART_LABELS = [
+  ["fuel", "short float"],
+  ["trapped", "days to cover"],
+  ["pressing", "shorts adding"],
+  ["spark", "chatter"],
+];
+const scoreTitle = (s) => {
+  if (!s.scoreParts) return s.scoreVersion ? `score ${s.scoreVersion}` : "";
+  const bits = SCORE_PART_LABELS.map(([k, label]) => {
+    const v = s.scoreParts[k];
+    return `${label} ${v === null || v === undefined ? "\u2014" : Math.round(v * 100) + "%"}`;
+  });
+  return `${s.scoreVersion || "score"} \u00b7 ${bits.join(" \u00b7 ")}`;
+};
 const priceText = (n) =>
   n === null ? "" : `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
@@ -1960,23 +1983,33 @@ function squeezeItems(squeezes) {
       pxAsOf: asText(s.price_as_of ?? s.px_as_of ?? s.quote_date).trim(),
       note: asText(s.note ?? s.why ?? s.read ?? s.catalyst),
       buzz: buzzOf(s.buzz ?? s.chatter ?? s.social),
+      // Stored, not derived here: the backtest scores the same number the
+      // panel showed, so both must read it from the row. The parts are shown
+      // so the trader can see what the score is made of, not recomputed.
+      score: numValue(s.score),
+      scoreParts:
+        s.score_parts && typeof s.score_parts === "object" ? s.score_parts : null,
+      scoreVersion: asText(s.score_version).trim(),
     }))
     // A row with no ticker names nothing, and one with no numbers and no note
     // says nothing - either way there is no tile worth drawing.
     .filter((s) => s.ticker && (s.pct !== null || s.dtc !== null || s.note))
-    // Ranked as the source publishes it: by short interest as a share of float,
-    // descending. Rows missing the number sort last rather than to the top.
+    // Ranked by score when the scan wrote one, else as the source publishes
+    // it: short interest as a share of float, descending. Rows missing a
+    // number sort last rather than to the top.
     .sort(
       (a, b) =>
-        (b.pct ?? -1) - (a.pct ?? -1) || (b.dtc ?? -1) - (a.dtc ?? -1)
+        (b.score ?? -1) - (a.score ?? -1) ||
+        (b.pct ?? -1) - (a.pct ?? -1) ||
+        (b.dtc ?? -1) - (a.dtc ?? -1)
     );
 }
 
 // One labeled figure. The eyebrow-over-value pairing is the design system's
 // stat treatment (docs/design.md); three of these sit in a row per tile.
-function SqueezeStat({ label, value }) {
+function SqueezeStat({ label, value, title }) {
   return (
-    <div style={{ minWidth: 0 }}>
+    <div style={{ minWidth: 0 }} title={title || undefined}>
       <div style={eyebrow(B.ghost, 9.5)}>{label}</div>
       <div
         style={{
@@ -2086,7 +2119,16 @@ function SqueezeTile({ s, showOwnDates }) {
       {/* The magnitude is left uncolored on purpose. Green/red would assert a
           direction the number doesn't carry, and amber is already spoken for by
           staleness everywhere else in this app. Sort order conveys rank. */}
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: s.score === null ? "1fr 1fr 1fr" : "auto 1fr 1fr 1fr",
+          gap: 12,
+        }}
+      >
+        {s.score !== null && (
+          <SqueezeStat label="Score" value={scoreText(s.score)} title={scoreTitle(s)} />
+        )}
         <SqueezeStat label="Short float" value={pctText(s.pct)} />
         <SqueezeStat label="Days to cover" value={dtcText(s.dtc)} />
         <SqueezeStat label="Price" value={priceText(s.price)} />
@@ -2241,7 +2283,7 @@ function SqueezePanel({ squeezes, run, error }) {
           />
           <Section
             label="Most shorted"
-            hint="Loaded but quiet — ranked by short interest as published"
+            hint="Loaded but quiet — ranked by score, then short interest as published"
             rows={quiet}
             empty="Every name below is drawing chatter."
           />

@@ -33,8 +33,10 @@ WHAT THE SCREEN ACTUALLY DOES
     is making, and lets that assumption be judged.
 
 Usage (needs SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY in env):
-    python erebor_scan.py              # normal run
+    python erebor_scan.py              # normal run (scan + fill outcomes)
     python erebor_scan.py --dry-run    # compute and print, write nothing
+    python erebor_scan.py --outcomes   # only fill forward outcomes on snapshots
+    python erebor_scan.py --backtest   # score vs. forward pop, from snapshots
 """
 
 import argparse
@@ -169,6 +171,61 @@ def upsert_run(row):
         headers=headers,
         params={"on_conflict": "user_id,as_of"},
         json=[row],
+        timeout=REQUEST_TIMEOUT,
+    )
+    _raise_for_status(resp)
+
+
+def upsert_snapshots(rows):
+    """Upsert on (user_id, run_date, ticker, kind).
+
+    `erebor_candidates` is keyed on the data's own date, so two runs that read
+    the same settlement figure resolve to one row and the second run's price
+    and chatter overwrite the first's. Correct for the panel, useless for a
+    backtest: what the screen showed on the 17th is gone by the 18th. This
+    table is keyed on the run date instead, one reading per run, and is
+    never overwritten by a later day — the row is what the trader saw.
+    """
+    if not rows:
+        return
+    headers = _supabase_headers(
+        prefer="resolution=merge-duplicates,return=minimal"
+    )
+    resp = requests.post(
+        f"{SUPABASE_URL}/rest/v1/erebor_snapshots",
+        headers=headers,
+        params={"on_conflict": "user_id,run_date,ticker,kind"},
+        json=rows,
+        timeout=REQUEST_TIMEOUT,
+    )
+    _raise_for_status(resp)
+
+
+def load_snapshots(params):
+    """Paged read of erebor_snapshots — PostgREST caps a response at 1000 rows
+    and this table grows by a couple of dozen a day forever."""
+    out, page = [], 1000
+    for start in range(0, 100_000, page):
+        resp = requests.get(
+            f"{SUPABASE_URL}/rest/v1/erebor_snapshots",
+            headers={**_supabase_headers(), "Range": f"{start}-{start + page - 1}"},
+            params={"select": "*", "order": "run_date.asc,ticker.asc", **params},
+            timeout=REQUEST_TIMEOUT,
+        )
+        _raise_for_status(resp)
+        rows = resp.json()
+        out.extend(rows)
+        if len(rows) < page:
+            break
+    return out
+
+
+def patch_snapshot(row_id, fields):
+    resp = requests.patch(
+        f"{SUPABASE_URL}/rest/v1/erebor_snapshots",
+        headers=_supabase_headers(prefer="return=minimal"),
+        params={"id": f"eq.{row_id}"},
+        json=fields,
         timeout=REQUEST_TIMEOUT,
     )
     _raise_for_status(resp)
@@ -354,6 +411,58 @@ APEWISDOM_PAGES = 2     # 100 tickers per page; two pages ~40s of yfinance looku
 MAX_LOUD = 4            # names with chatter — the actionable half
 MAX_QUIET = 8           # shorted-but-quiet baseline
 
+# Squeeze score. A 0-100 composite over the four raw figures the panel already
+# shows, so every point of it can be re-derived from the tile it sits on. The
+# weights are a starting guess, not a finding — the snapshot table and
+# `--backtest` exist to replace them with measured ones. Every stored score
+# carries SCORE_VERSION so a later formula never gets compared against an
+# earlier one's outcomes as if they were the same number.
+#
+# Each input is clamped to a 0-1 ramp between a floor and a ceiling:
+#   fuel      short % of float      10% -> 0, 50% -> 1
+#   trapped   days to cover          1  -> 0, 10  -> 1
+#   pressing  shares short vs prior -20% -> 0, +20% -> 1 (flat = 0.5)
+#   spark     chatter present        0 or 1
+SCORE_VERSION = "sq1"
+SCORE_WEIGHTS = {"fuel": 40, "trapped": 25, "pressing": 15, "spark": 20}
+SCORE_RAMPS = {
+    "fuel": (10.0, 50.0),
+    "trapped": (1.0, 10.0),
+    "pressing": (-0.20, 0.20),
+}
+
+# Outcome window for the backtest: a "pop" is the max high over the next
+# POP_WINDOW sessions clearing POP_THRESHOLD_PCT above the snapshot price.
+POP_WINDOW = 5
+POP_THRESHOLD_PCT = 15.0
+
+
+def _ramp(x, lo, hi):
+    if x is None:
+        return None
+    return max(0.0, min(1.0, (float(x) - lo) / (hi - lo)))
+
+
+def score_squeeze(metrics):
+    """Returns (score, parts) for a squeeze row's metrics, or (None, {}) when
+    the one mandatory input (short float) is missing. A missing optional input
+    scores zero for its part rather than dropping the row — a name with no
+    days-to-cover figure is still a candidate, just an unproven one."""
+    pct = metrics.get("short_percent_float")
+    if pct is None:
+        return None, {}
+    ss, prior = metrics.get("shares_short"), metrics.get("shares_short_prior")
+    growth = (ss / prior - 1.0) if ss and prior else None
+    parts = {
+        "fuel": _ramp(pct, *SCORE_RAMPS["fuel"]),
+        "trapped": _ramp(metrics.get("days_to_cover"), *SCORE_RAMPS["trapped"]),
+        "pressing": _ramp(growth, *SCORE_RAMPS["pressing"]),
+        "spark": 1.0 if metrics.get("buzz") else 0.0,
+    }
+    total = sum(SCORE_WEIGHTS[k] * (v or 0.0) for k, v in parts.items())
+    parts = {k: (None if v is None else round(v, 3)) for k, v in parts.items()}
+    return round(total, 1), parts
+
 # ETFs create and redeem shares on demand and cannot squeeze; their short-float
 # readings (XBI once showed 118%) are an artifact of that mechanism. Crypto
 # tickers on the chatter feeds end in .X and are not equities.
@@ -521,6 +630,9 @@ def screen_squeeze(owner, universe):
         }
         if buzz:
             metrics["buzz"] = buzz
+        score, parts = score_squeeze(metrics)
+        metrics["score_version"] = SCORE_VERSION
+        metrics["score_parts"] = parts
         rows.append(
             {
                 "user_id": owner,
@@ -530,19 +642,21 @@ def screen_squeeze(owner, universe):
                 "company": d["company"],
                 "price": _json_safe(q["price"]) if q else None,
                 "price_as_of": q["as_of"] if q else None,
-                # NULL on purpose: the panel ranks from the raw figures so the
-                # trader can check the ordering against the source. A stored
-                # composite is the number that would get a position sized on it.
-                "score": None,
+                # Versioned composite over the figures in `metrics`, so the
+                # trader can re-derive it from the tile. This used to be NULL
+                # on principle (a stored number nobody can check is one a
+                # position gets sized on); it is stored now because the
+                # backtest needs the score exactly as the panel showed it.
+                "score": score,
                 "metrics": {k: _json_safe(v) for k, v in metrics.items()},
                 "note": "",
             }
         )
 
-    # Two sections, capped separately, both ranked by short float. The loud
-    # names are the actionable half and are usually few; the quiet baseline
-    # is capped so the panel stays a screen rather than a table.
-    rows.sort(key=lambda r: -r["metrics"]["short_percent_float"])
+    # Two sections, capped separately, both ranked by score. The loud names
+    # are the actionable half and are usually few; the quiet baseline is
+    # capped so the panel stays a screen rather than a table.
+    rows.sort(key=lambda r: -(r["score"] or 0))
     loud = [r for r in rows if "buzz" in r["metrics"]][:MAX_LOUD]
     quiet = [r for r in rows if "buzz" not in r["metrics"]][:MAX_QUIET]
     return loud + quiet, sources, errors
@@ -672,8 +786,9 @@ def screen_whale(owner, tickers, session_date):
                 "company": "",
                 "price": None,
                 "price_as_of": None,
-                # NULL for the same reason as the squeeze screen: the panel
-                # computes the multiple from the two raw figures it can show.
+                # NULL: the panel computes the multiple from the two raw
+                # figures it can show, and nothing has been backtested against
+                # a whale composite yet. Snapshots are kept so one could be.
                 "score": None,
                 "metrics": {
                     "lean": lean,
@@ -691,6 +806,194 @@ def screen_whale(owner, tickers, session_date):
 
     rows.sort(key=lambda r: -r["metrics"]["vol_oi_ratio"])
     return rows[:MAX_WHALES], sources, errors
+
+
+# ----------------------------------------------------------------------
+# Outcomes and backtest
+# ----------------------------------------------------------------------
+def snapshot_rows(candidates, run_date):
+    """The day's candidates, re-keyed on the run date for `erebor_snapshots`.
+    Same figures, same score — nothing recomputed, so the snapshot is exactly
+    the reading the panel rendered."""
+    return [
+        {
+            "user_id": c["user_id"],
+            "run_date": run_date,
+            "ticker": c["ticker"],
+            "kind": c["kind"],
+            "price": c["price"],
+            "price_as_of": c["price_as_of"],
+            "score": c["score"],
+            "score_version": c["metrics"].get("score_version"),
+            "metrics": c["metrics"],
+        }
+        for c in candidates
+    ]
+
+
+def compute_outcome(hist, base_date, base_price):
+    """Forward result over the POP_WINDOW sessions strictly after `base_date`.
+
+    Returns None until the full window has printed — a partial window would
+    understate every max and make early rows look like duds. `base_date` is
+    the price's own session, not the run date: a scan that ran at 6pm read
+    that day's close, and the window starts the next morning.
+    """
+    if not base_price or base_price <= 0:
+        return None
+    fwd = hist[hist.index.date > date.fromisoformat(base_date)].head(POP_WINDOW)
+    if len(fwd) < POP_WINDOW:
+        return None
+    max_high = float(fwd["High"].max())
+    min_low = float(fwd["Low"].min())
+    last_close = float(fwd["Close"].iloc[-1])
+    ret_max = (max_high / base_price - 1.0) * 100.0
+    return {
+        "window": POP_WINDOW,
+        "threshold_pct": POP_THRESHOLD_PCT,
+        "base_price": base_price,
+        "max_high": round(max_high, 4),
+        "min_low": round(min_low, 4),
+        "last_close": round(last_close, 4),
+        "ret_max_pct": round(ret_max, 2),
+        "ret_min_pct": round((min_low / base_price - 1.0) * 100.0, 2),
+        "ret_close_pct": round((last_close / base_price - 1.0) * 100.0, 2),
+        "pop": ret_max >= POP_THRESHOLD_PCT,
+        "through": fwd.index[-1].date().isoformat(),
+    }
+
+
+def fill_outcomes(dry_run=False):
+    """Fill `outcome` on every snapshot old enough to have a full window.
+
+    One history fetch per ticker covering every pending row for it, rather
+    than one per row — the same name shows up day after day, and yfinance
+    rate-limits. Rows whose window has not finished are left for a later run.
+    """
+    import yfinance as yf
+
+    pending = load_snapshots({"outcome": "is.null"})
+    if not pending:
+        print("[erebor] outcomes: nothing pending")
+        return 0
+    by_ticker = {}
+    for r in pending:
+        by_ticker.setdefault(r["ticker"], []).append(r)
+
+    filled, today = 0, datetime.now(ZoneInfo("America/New_York")).date()
+    for t, rows in sorted(by_ticker.items()):
+        earliest = min(r.get("price_as_of") or r["run_date"] for r in rows)
+        # Window can't have finished yet — skip the fetch entirely.
+        if (today - date.fromisoformat(earliest)).days < POP_WINDOW:
+            continue
+        try:
+            hist = yf.Ticker(t).history(start=earliest, interval="1d")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  [outcome] {t}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            continue
+        if hist is None or hist.empty:
+            continue
+        for r in rows:
+            base_date = r.get("price_as_of") or r["run_date"]
+            out = compute_outcome(hist, base_date, r.get("price"))
+            if out is None:
+                continue
+            filled += 1
+            tag = "POP " if out["pop"] else "    "
+            print(f"  [{tag}] {t:<6} {base_date}  max {out['ret_max_pct']:+6.1f}%"
+                  f"  close {out['ret_close_pct']:+6.1f}%")
+            if not dry_run:
+                patch_snapshot(r["id"], {"outcome": out, "outcome_as_of": today.isoformat()})
+    print(f"[erebor] outcomes: {filled} filled, {len(pending) - filled} still pending")
+    return filled
+
+
+def _spearman(xs, ys):
+    """Rank correlation without numpy — the workflow deliberately installs
+    only yfinance and requests. Average ranks for ties."""
+    def ranks(v):
+        order = sorted(range(len(v)), key=lambda i: v[i])
+        r, i = [0.0] * len(v), 0
+        while i < len(order):
+            j = i
+            while j + 1 < len(order) and v[order[j + 1]] == v[order[i]]:
+                j += 1
+            for k in range(i, j + 1):
+                r[order[k]] = (i + j) / 2.0 + 1.0
+            i = j + 1
+        return r
+    n = len(xs)
+    if n < 3:
+        return None
+    rx, ry = ranks(xs), ranks(ys)
+    mx, my = sum(rx) / n, sum(ry) / n
+    cov = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    vx = sum((a - mx) ** 2 for a in rx)
+    vy = sum((b - my) ** 2 for b in ry)
+    return cov / math.sqrt(vx * vy) if vx and vy else None
+
+
+def backtest(kind="squeeze"):
+    """Did the score predict a pop? Prints, writes nothing.
+
+    Reads every scored snapshot with an outcome and reports the pop rate by
+    score tercile, the rank correlation of score (and each part) with the
+    forward max return, and the same for the raw inputs. Terciles rather than
+    deciles because the table will be small for months; splitting 40 rows ten
+    ways would just be reading noise.
+    """
+    rows = [
+        r for r in load_snapshots({"kind": f"eq.{kind}", "outcome": "not.is.null"})
+        if r.get("score") is not None and r.get("outcome")
+    ]
+    if not rows:
+        print(f"[erebor] backtest: no scored {kind} snapshots with outcomes yet")
+        return
+    versions = sorted({r.get("score_version") or "?" for r in rows})
+    print(f"[erebor] backtest: {len(rows)} {kind} snapshot(s), score version(s) {versions}")
+    if len(versions) > 1:
+        print("  WARNING: mixed score versions — the formula changed mid-series;"
+              " read per-version numbers, not the pooled ones.")
+
+    scores = [r["score"] for r in rows]
+    ret = [r["outcome"]["ret_max_pct"] for r in rows]
+    pops = [1 if r["outcome"]["pop"] else 0 for r in rows]
+    thr = rows[0]["outcome"].get("threshold_pct", POP_THRESHOLD_PCT)
+    win = rows[0]["outcome"].get("window", POP_WINDOW)
+    print(f"  pop = max high >= +{thr:.0f}% within {win} sessions;"
+          f" base rate {sum(pops) / len(pops):.0%}")
+
+    order = sorted(range(len(rows)), key=lambda i: scores[i])
+    thirds = [order[: len(order) // 3], order[len(order) // 3: 2 * len(order) // 3],
+              order[2 * len(order) // 3:]]
+    print("  score tercile      n   pop rate   median max ret")
+    for label, idx in zip(("low", "mid", "high"), thirds):
+        if not idx:
+            continue
+        rr = sorted(ret[i] for i in idx)
+        med = rr[len(rr) // 2]
+        rate = sum(pops[i] for i in idx) / len(idx)
+        lo, hi = scores[idx[0]], scores[idx[-1]]
+        print(f"  {label:<5} {lo:5.1f}-{hi:5.1f} {len(idx):4d}   {rate:7.0%}   {med:+8.1f}%")
+
+    print("  spearman vs max return:")
+    rho = _spearman(scores, ret)
+    print(f"    score            {rho:+.2f}" if rho is not None else "    score            n/a")
+    for part in SCORE_WEIGHTS:
+        xs = [(r["metrics"].get("score_parts") or {}).get(part) for r in rows]
+        keep = [i for i, x in enumerate(xs) if x is not None]
+        rho = _spearman([xs[i] for i in keep], [ret[i] for i in keep])
+        print(f"    part {part:<12}{rho:+.2f}  (n={len(keep)})" if rho is not None
+              else f"    part {part:<12}n/a")
+    for raw in ("short_percent_float", "days_to_cover"):
+        xs = [r["metrics"].get(raw) for r in rows]
+        keep = [i for i, x in enumerate(xs) if x is not None]
+        rho = _spearman([xs[i] for i in keep], [ret[i] for i in keep])
+        print(f"    raw  {raw:<20}{rho:+.2f}  (n={len(keep)})" if rho is not None
+              else f"    raw  {raw:<20}n/a")
+    if len(rows) < 30:
+        print(f"  ({len(rows)} rows is too few to trust any of this; it is a smoke test"
+              " of the plumbing until the table has a few months in it)")
 
 
 # ----------------------------------------------------------------------
@@ -819,6 +1122,7 @@ def run(dry_run=False):
         return
 
     upsert_candidates(candidates)
+    upsert_snapshots(snapshot_rows(candidates, as_of))
     upsert_run(
         {
             "user_id": owner,
@@ -835,6 +1139,14 @@ def run(dry_run=False):
     )
     print(f"[erebor] wrote {len(candidates)} candidate(s) for {as_of}")
 
+    # After the day's write, not before: a yfinance failure here should never
+    # cost the scan, and the outcome pass is idempotent so a miss today is
+    # simply picked up tomorrow.
+    try:
+        fill_outcomes()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[erebor] outcomes failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+
 
 def main():
     ap = argparse.ArgumentParser(description="Erebor single-name event screen.")
@@ -843,8 +1155,23 @@ def main():
         action="store_true",
         help="compute and print, write nothing to Supabase",
     )
+    ap.add_argument(
+        "--outcomes",
+        action="store_true",
+        help="only fill forward outcomes on pending snapshots, no scan",
+    )
+    ap.add_argument(
+        "--backtest",
+        action="store_true",
+        help="print how the squeeze score has related to forward pops; writes nothing",
+    )
     args = ap.parse_args()
-    run(dry_run=args.dry_run)
+    if args.backtest:
+        backtest()
+    elif args.outcomes:
+        fill_outcomes(dry_run=args.dry_run)
+    else:
+        run(dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

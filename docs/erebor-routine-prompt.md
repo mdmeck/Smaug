@@ -26,6 +26,14 @@
 > requiring a directional skew. The panel labels the multiple "x OI", never
 > "x avg", for that reason.
 >
+> **The squeeze screen now writes a score** (`score_squeeze()`, 0-100, tagged
+> `metrics.score_version`), and every run's readings are kept in
+> `erebor_snapshots` with forward outcomes filled in later, so
+> `python erebor_scan.py --backtest` can say whether the score predicted a
+> pop. The "score stays NULL" rule below still binds *this routine*: the
+> objection was to a number an LLM invents from a borrow fee nobody can check,
+> not to a fixed formula over stored figures that a script can re-run.
+>
 > The task list below is kept as the specification the Python screen was
 > written against, and for whenever a routine environment with open egress
 > becomes available. Do not re-enable it as-is.
