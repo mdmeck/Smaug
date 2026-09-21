@@ -6,9 +6,12 @@ scalping; Erebor screens individual equities for event-driven dislocations and
 holds multi-day positions in them. They share a Supabase project and the webapp
 shell and nothing else — see the Erebor section of webapp/supabase/schema.sql.
 
-This run implements the merger-arbitrage screen only. Squeezes stay with the AI
-routine (they need a browser and judgment, and a Python scraper of MarketBeat
-would rot faster than a prompt does); liquidity sweeps come later off `bars`.
+Three screens run here: merger arbitrage (deal terms + price), short squeezes
+(chatter universe + short interest), and whale flow (option chain volume vs
+open interest). All three were meant to be split between this script and an AI
+routine; the routine's environment turned out to block every source it needed
+(see docs/erebor-routine-prompt.md), and the data was structured enough not to
+need one. Liquidity sweeps come later, off `bars`.
 
 WHAT THE SCREEN ACTUALLY DOES
     A cash-and-stub merger is the rare case where a stock has a *hard,
@@ -39,7 +42,7 @@ import json
 import math
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 import requests
@@ -358,6 +361,7 @@ ETF_SKIP = {
     "SPY", "QQQ", "IWM", "DIA", "TLT", "XBI", "VXX", "UVXY", "SQQQ", "TQQQ",
     "SPXU", "SPXL", "SOXL", "SOXS", "TZA", "TNA", "GLD", "SLV", "USO", "ARKK",
     "HYG", "LQD", "EEM", "EFA", "XLF", "XLE", "XLK", "SMH", "KRE", "GDX",
+    "IBIT", "FBTC", "ETHA", "GBTC", "BITO", "MSTY", "TSLL", "NVDL", "XLV", "XLI",
 }
 
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -365,7 +369,10 @@ UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 
 
 def _is_equity_ticker(t):
-    return bool(t) and t.isascii() and t.upper() == t and "." not in t and t not in ETF_SKIP
+    # Drops crypto (.X) and junk. ETFs stay in the universe: they cannot
+    # squeeze, so the squeeze screen drops them, but options flow on IBIT or
+    # SMH is real flow and the whale screen wants it.
+    return bool(t) and t.isascii() and t.upper() == t and "." not in t
 
 
 def fetch_chatter():
@@ -477,14 +484,14 @@ def fetch_short_interest(tickers):
     return data, failures
 
 
-def screen_squeeze(owner):
-    """Returns (candidates, sources, errors) for kind='squeeze'."""
-    universe, sources = fetch_chatter()
-    errors = []
+def screen_squeeze(owner, universe):
+    """Returns (candidates, sources, errors) for kind='squeeze'.
+    `universe` comes from fetch_chatter(), shared with the whale screen."""
+    sources, errors = {}, []
     if not universe:
         return [], sources, errors
 
-    tickers = sorted(universe)
+    tickers = sorted(t for t in universe if t not in ETF_SKIP)
     si, si_failures = fetch_short_interest(tickers)
     sources["yfinance_short"] = (
         "ok" if not si_failures else ("failed" if not si else "partial")
@@ -499,6 +506,8 @@ def screen_squeeze(owner):
 
     rows = []
     for t, d in si.items():
+        if t in ETF_SKIP:
+            continue
         if d["short_percent_float"] < SHORT_FLOAT_MIN_PCT or not d["as_of"]:
             continue
         q = prices.get(t)
@@ -537,6 +546,151 @@ def screen_squeeze(owner):
     loud = [r for r in rows if "buzz" in r["metrics"]][:MAX_LOUD]
     quiet = [r for r in rows if "buzz" not in r["metrics"]][:MAX_QUIET]
     return loud + quiet, sources, errors
+
+
+# ----------------------------------------------------------------------
+# The whale screen (Whale Action)
+# ----------------------------------------------------------------------
+# MarketBeat's unusual-options table — the source the panel was designed
+# around — renders a single row without JavaScript, so it is not reachable from
+# plain HTTP any more than it was from the cloud routine. This derives the
+# same idea from yfinance option chains instead, and the idea is NOT the same
+# measurement, which the panel copy is careful about:
+#
+#   MarketBeat: today's options volume vs a rolling AVERAGE of daily volume
+#   Here:       today's options volume vs OPEN INTEREST on the same contracts
+#
+# Volume over open interest is the standard "new positioning" read — a name
+# trading more contracts today than exist open across its front expiries is
+# seeing flow that was not there yesterday. It is a same-day signal rather than
+# a vs-history one, and it is stored under its own key (`open_interest`) rather
+# than aliased into `avg_volume`, so the tile labels it "x OI" and never
+# "x avg". A multiple against the wrong denominator, correctly labelled, is
+# still a wrong multiple; the label is what stops it being read as the other.
+#
+# The universe is the chatter universe plus any open deals — the names Erebor
+# is already watching — not the whole market. That is a real narrowing versus
+# the source's market-wide scan and is stated in the panel's subtitle.
+
+WHALE_EXPIRIES = 3        # expiries aggregated per name, after the skip below
+WHALE_MIN_DAYS = 7        # skip expiries closer than this
+WHALE_MIN_VOLUME = 2000   # contracts; below this vol/OI is noise on a tiny book
+MAX_WHALES = 8
+
+# WHALE_MIN_DAYS exists because the first version of this screen ranked TSLA,
+# AAPL, AMZN, GOOGL and META at the top every day. Names with daily expiries
+# turn over more than their open interest in the front week as a matter of
+# routine — 0DTE gamma trade, not positioning — so vol/OI over the nearest
+# expiries measures how heavily a name is day-traded, which is the opposite
+# of unusual. Measured on 2026-09-21: TSLA 1.69x over the front three
+# expiries, 0.61x once anything under a week out was skipped; AAPL 1.06x to
+# 0.38x. The panel's own comment warns that "a mega-cap's ordinary million
+# contracts" must not outrank the name that did something, and this is the
+# line that enforces it. Directional skew is required for the same reason:
+# two-way churn on a big book is not a whale, however large.
+
+
+def fetch_option_flow(tickers):
+    """Aggregate call/put volume and open interest over the front expiries.
+
+    Returns (data, failures). Names with no options listed are common and are
+    counted rather than itemised; a name with chains but under the volume
+    floor is not a failure, it is a quiet name, and is simply not returned.
+    """
+    import yfinance as yf
+
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    data, failures = {}, {}
+    for t in tickers:
+        try:
+            tk = yf.Ticker(t)
+            exps = [
+                e for e in (tk.options or [])
+                if (date.fromisoformat(e) - today).days >= WHALE_MIN_DAYS
+            ][:WHALE_EXPIRIES]
+            if not exps:
+                failures[t] = "no options listed beyond the front week"
+                continue
+            cv = pv = co = po = 0
+            for e in exps:
+                ch = tk.option_chain(e)
+                cv += int(ch.calls["volume"].fillna(0).sum())
+                co += int(ch.calls["openInterest"].fillna(0).sum())
+                pv += int(ch.puts["volume"].fillna(0).sum())
+                po += int(ch.puts["openInterest"].fillna(0).sum())
+            data[t] = {
+                "call_volume": cv, "put_volume": pv,
+                "call_oi": co, "put_oi": po,
+                "expiries": exps,
+            }
+        except Exception as exc:  # noqa: BLE001
+            failures[t] = f"{type(exc).__name__}: {exc}"
+    return data, failures
+
+
+def _lean(cv, pv):
+    tot = cv + pv
+    if tot <= 0:
+        return "mixed"
+    share = cv / tot
+    # Wide bands on purpose: 60/40 is ordinary two-way trade, not a lean.
+    return "bullish" if share >= 0.65 else ("bearish" if share <= 0.35 else "mixed")
+
+
+def screen_whale(owner, tickers, session_date):
+    """Returns (candidates, sources, errors) for kind='whale'."""
+    sources, errors = {}, []
+    flow, failures = fetch_option_flow(sorted(set(tickers)))
+    sources["yfinance_options"] = (
+        "ok" if not failures else ("failed" if not flow else "partial")
+    )
+    if failures:
+        errors.append({"stage": "option_flow", "missing": len(failures)})
+
+    rows = []
+    for t, d in flow.items():
+        vol = d["call_volume"] + d["put_volume"]
+        oi = d["call_oi"] + d["put_oi"]
+        if vol < WHALE_MIN_VOLUME or oi <= 0:
+            continue
+        ratio = vol / oi
+        lean = _lean(d["call_volume"], d["put_volume"])
+        if lean == "mixed":
+            continue
+        exps = d["expiries"]
+        window = exps[0] if len(exps) == 1 else f"{exps[0]} to {exps[-1]}"
+        flow_text = (
+            f"{d['call_volume']:,} calls vs {d['put_volume']:,} puts, "
+            f"expiries {window} \u00b7 {ratio:.2f}\u00d7 open interest"
+        )
+        rows.append(
+            {
+                "user_id": owner,
+                "as_of": session_date,
+                "ticker": t,
+                "kind": "whale",
+                "company": "",
+                "price": None,
+                "price_as_of": None,
+                # NULL for the same reason as the squeeze screen: the panel
+                # computes the multiple from the two raw figures it can show.
+                "score": None,
+                "metrics": {
+                    "lean": lean,
+                    "volume": vol,
+                    "call_volume": d["call_volume"],
+                    "put_volume": d["put_volume"],
+                    "open_interest": oi,
+                    "vol_oi_ratio": round(ratio, 3),
+                    "expiries": d["expiries"],
+                    "flow": flow_text,
+                },
+                "note": "",
+            }
+        )
+
+    rows.sort(key=lambda r: -r["metrics"]["vol_oi_ratio"])
+    return rows[:MAX_WHALES], sources, errors
 
 
 # ----------------------------------------------------------------------
@@ -623,16 +777,32 @@ def run(dry_run=False):
     # Squeeze screen. Its sources are recorded under their own keys so a dead
     # chatter feed cannot be mistaken for a dead price feed, and its kind is
     # listed so the panel can tell "attempted, found nothing" from "not run".
+    # One chatter fetch feeds both screens: it is the universe for the squeeze
+    # screen and, with the deal tickers added, for the whale screen too.
+    universe, chatter_sources = fetch_chatter()
+    sources.update(chatter_sources)
+
     kinds.append("squeeze")
-    sq_rows, sq_sources, sq_errors = screen_squeeze(owner)
+    sq_rows, sq_sources, sq_errors = screen_squeeze(owner, universe)
     sources.update(sq_sources)
     errors.extend(sq_errors)
     candidates.extend(sq_rows)
     loud = sum(1 for r in sq_rows if "buzz" in r["metrics"])
     print(f"[erebor] squeeze: {len(sq_rows)} name(s), {loud} with chatter")
 
+    kinds.append("whale")
+    wh_tickers = list(universe) + [d["ticker"] for d in deals if d.get("ticker")]
+    wh_rows, wh_sources, wh_errors = screen_whale(owner, wh_tickers, as_of)
+    sources.update(wh_sources)
+    errors.extend(wh_errors)
+    candidates.extend(wh_rows)
+    print(f"[erebor] whale: {len(wh_rows)} name(s) over {len(set(wh_tickers))} looked up")
+
     for c in candidates:
-        if c["kind"] == "squeeze":
+        if c["kind"] == "whale":
+            m = c["metrics"]
+            print(f"  [whale] {c['ticker']:<6} {m['lean']:<8} {m['flow']}")
+        elif c["kind"] == "squeeze":
             m = c["metrics"]
             tag = "LOUD " if "buzz" in m else "quiet"
             print(f"  [{tag}] {c['ticker']:<6} {m['short_percent_float']:>6.2f}% short"

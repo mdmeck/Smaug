@@ -51,10 +51,12 @@ Omitting it does not error visibly at the reasoning level — reads keep looking
 
 === PART 1: MORNING BRIEF ===
 
-Determine today's date and the current/upcoming trading week (Mon-Fri) yourself. Search the web and research:
+**Anchor to today before researching anything.** State today's date (Eastern) and the Monday–Friday of the week that *contains* it — that week, and only that week, is what the calendar covers. Every dated row below must fall inside it. Never write the following week, and never treat "the week" as "the week ahead": on 2026-09-11, a Friday with CPI at 8:30, a run wrote the next week's calendar instead. Every row carried a plausible weekday name, so the grid painted next week's FOMC onto that week's Wednesday and showed Friday — CPI day — as empty, under a fresh LAST RUN stamp. Nothing errored. If today is a weekday, today's prints must be in the calendar; a weekday run that writes no events for today is wrong, not sparse. On a Saturday or Sunday, the week containing today has already finished — write the *coming* Monday–Friday and say so in `sentiment.summary`.
 
-1. **ECON CALENDAR**: US economic calendar for the week — the schedule shown on sites like Forex Factory. USD events only, medium and high impact only (Fed speakers, CPI, PPI, jobs data, PMI, FOMC, auctions, consumer sentiment, etc). Max 18 events across the week, each day's events sorted by time.
-2. **EARNINGS**: Major companies reporting earnings this week, with special focus on tech and semiconductor companies plus any mega-caps that move the S&P 500. Max 12 across the week, empty array if nothing major. Always include the ticker symbol, not just the company name.
+Search the web and research:
+
+1. **ECON CALENDAR**: US economic calendar for that week — the schedule shown on sites like Forex Factory. USD events only, medium and high impact only (Fed speakers, CPI, PPI, jobs data, PMI, FOMC, auctions, consumer sentiment, etc). Max 18 events across the week, each day's events sorted by time.
+2. **EARNINGS**: Major companies reporting earnings that week, with special focus on tech and semiconductor companies plus any mega-caps that move the S&P 500. Max 12 across the week, empty array if nothing major. Always include the ticker symbol, not just the company name.
 3. **SENTIMENT**: Current pre-market / overnight US market sentiment for today — S&P 500 futures direction and %, VIX level, CNN Fear & Greed index, and any major overnight headlines moving markets.
 4. **BULL/BEAR CASE**: Latest news and analyst commentary relevant to SPY / the S&P 500 today. Build a same-day bull case and bear case, each point under 15 words.
 
@@ -67,8 +69,10 @@ routine against the `erebor_candidates` table —
 Using your Supabase connector, upsert into `daily_briefs` with conflict target `user_id` (the unique constraint is in place, so `on_conflict=user_id` resolves correctly):
 
 - `user_id`: the UUID from Part 0 — required, do not omit
-- `econ`: `{"events": [{"day": "Mon|Tue|Wed|Thu|Fri", "time_et": "e.g. 8:30 AM", "event": "name", "impact": "high|medium", "forecast": "or empty string", "previous": "or empty string"}]}`
-- `earnings`: `{"earnings": [{"day": "Mon|Tue|Wed|Thu|Fri", "ticker": "e.g. AAPL", "company": "name", "time": "BMO|AMC", "note": "why it matters, under 8 words"}]}`
+- `econ`: a **bare array** — `[{"date": "YYYY-MM-DD", "day": "Mon|Tue|Wed|Thu|Fri", "time_et": "HH:MM 24-hour ET, e.g. 08:30", "event": "name", "impact": "high|medium", "forecast": "or empty string", "previous": "or empty string"}]`. `date` is the calendar date of the print and is what places the row on the grid; `day` must agree with it. A row whose `date` falls outside the week is dropped from the grid and counted in a warning, which is the intended failure — it is how the wrong-week mistake above becomes visible instead of silent.
+- `earnings`: a **bare array** — `[{"date": "YYYY-MM-DD", "day": "Mon|Tue|Wed|Thu|Fri", "ticker": "e.g. AAPL", "company": "name", "time": "before open|after close", "note": "why it matters, under 8 words"}]`. Same `date` rule.
+
+Do not wrap either array in an object (`{"events": [...]}`); the spec pins them as bare arrays and the webapp only tolerates the wrapper as a legacy shape.
 - `sentiment`: `{"tone": "bullish|bearish|neutral", "futures": "e.g. ES +0.3%", "vix": "e.g. 18.6", "fear_greed": "e.g. 62 - Greed", "overnight": "one line on overnight action", "summary": "2 sentences max on the tape's tone"}`
 - `cases`: `{"bull": ["point 1", "point 2", "point 3"], "bear": ["point 1", "point 2", "point 3"], "watch": "single most important thing to watch today, one line"}`
 - `generated_at`: current timestamp — this is when the brief was last refreshed, not the row's original insert time
