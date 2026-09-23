@@ -435,6 +435,46 @@ create policy "erebor_snapshots_owner_all"
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
 
+-- The screen's own report card, recomputed by every scan and stored so the
+-- webapp can render it without anyone running a script. One row per
+-- (user_id, as_of, kind, score_version): upserted, because a re-run on the
+-- same day corrects that day's reading rather than filing a second one, and
+-- versioned because sq1 and sq2 are different formulas whose outcomes must
+-- never be pooled.
+--
+-- `report` holds the whole thing as computed — hit rate by score tercile,
+-- Spearman of the score and of each part against the forward directional
+-- return, and for squeezes the per-episode table. `trustworthy` is false
+-- until `n` clears BACKTEST_MIN_N, and the panel is required to say so
+-- rather than drawing a confident chart over fourteen rows.
+--
+-- "Directional" matters for whales: a bearish flag that fell is a hit. The
+-- sign lives in `metrics.lean` and is applied when the report is built, not
+-- when the outcome is recorded — see _directional() in erebor_scan.py.
+create table if not exists erebor_backtests (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  as_of date not null,
+  kind text not null check (kind in ('merger_arb', 'squeeze', 'whale', 'sweep')),
+  score_version text not null default '',
+  n int not null default 0,
+  base_rate double precision,
+  trustworthy boolean not null default false,
+  report jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists erebor_backtests_user_day_kind_ver_key
+  on erebor_backtests (user_id, as_of, kind, score_version);
+
+alter table erebor_backtests enable row level security;
+
+create policy "erebor_backtests_owner_all"
+  on erebor_backtests
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
 -- Run health, one row per scan. This exists because of a bug found on
 -- 2026-09-08: the brief ran, both market panels were written as empty arrays
 -- because their sources were unreachable, and the webapp rendered that as
