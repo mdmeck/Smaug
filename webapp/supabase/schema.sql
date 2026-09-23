@@ -329,8 +329,10 @@ create table if not exists erebor_candidates (
   -- composite number nobody can re-derive is one a trader would size a
   -- position on. `merger_arb` is arithmetic over published deal terms;
   -- `squeeze` is `score_squeeze()` in erebor_scan.py, a fixed-weight 0-100
-  -- over the four figures in `metrics`, tagged with `metrics.score_version`
-  -- so a formula change never gets read against an older formula's outcomes.
+  -- over the figures in `metrics`, tagged with `metrics.score_version` so a
+  -- formula change never gets read against an older formula's outcomes —
+  -- sq1 led with short float, sq2 leads with days to cover on the evidence
+  -- cited there, and the two are not the same number.
   -- `whale` is NULL — the panel shows the volume/OI multiple directly.
   score double precision,
   -- Screen-specific figures, as the source printed them.
@@ -338,7 +340,10 @@ create table if not exists erebor_candidates (
   --               premium_to_cash_pct, implied_vs_transaction_x, deal_id
   --   squeeze:    short_percent_float, days_to_cover, shares_short,
   --               shares_short_prior, float_shares, buzz {...},
-  --               score_version, score_parts {fuel, trapped, pressing, spark}
+  --               call_vol, call_oi, flow_lean (from the shared option-chain
+  --               pass, absent when the name has no readable chain),
+  --               score_version, score_parts {trapped, fuel, spark,
+  --               accelerant, pressing}
   --   whale:      lean, volume, call_volume, put_volume, open_interest,
   --               vol_oi_ratio, expiries, flow
   metrics jsonb not null default '{}'::jsonb,
