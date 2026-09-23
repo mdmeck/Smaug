@@ -2481,7 +2481,24 @@ function SqueezePanel({ squeezes, run, error, backtest }) {
 //     that includes a bearish name falling, which is why this says "hit" and
 //     not "pop".
 function BacktestBlock({ bt }) {
-  if (!bt) return null;
+  // No row yet means no reading has finished its forward window — the scan
+  // stores nothing rather than an empty report. Rendering the absence is
+  // better than rendering nothing: a blank space under the panel reads as a
+  // feature that didn't ship, where this reads as a clock that hasn't run out.
+  if (!bt) {
+    return (
+      <div style={{ borderTop: `1px solid ${B.edge}`, padding: "14px 24px 18px" }}>
+        <div style={{ ...eyebrow(B.faint, 11), marginBottom: 5 }}>
+          Has the score worked?
+        </div>
+        <div style={{ fontFamily: B.mono, fontSize: 12, color: B.faint, lineHeight: 1.5 }}>
+          Not answerable yet. Every reading needs its full forward window to
+          print before it can be scored, and the scan stores a report card only
+          once something has resolved.
+        </div>
+      </div>
+    );
+  }
   const r = bt.report || {};
   const terciles = Array.isArray(r.terciles) ? r.terciles : [];
   const dim = !bt.trustworthy;
