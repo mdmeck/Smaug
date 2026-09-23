@@ -1558,6 +1558,7 @@ function adaptSqueeze(row) {
     score: row.score,
     score_parts: m.score_parts,
     score_version: m.score_version,
+    episode: m.episode,
   };
 }
 
@@ -1928,6 +1929,41 @@ const PX_STALE_DAYS = 4;
 // thing standing between a noisy row and the trader.
 const BUZZ_FLOOR = 5;
 
+// How the name has moved since it first appeared on this screen, and how much
+// of that was just the tape. The anchor is the first day of the current
+// unbroken streak of scans: the chatter universe turns over about two thirds
+// a day, so a name that dropped off and came back is a new setup rather than
+// a continuing one, and pretending otherwise would quietly stretch a week-old
+// anchor across a gap where nothing was being watched.
+//
+// Both figures are derived here from the two raw prices the scan stored, the
+// same rule the rest of this panel follows. `vsSpy` subtracts SPY's move over
+// the identical span — assuming a beta of one, which is crude and is why the
+// unadjusted number is shown beside it rather than replaced by it.
+//
+// This is NOT how the screen gets validated. It can only ever describe names
+// still listed, and names leave the screen partly *because* they worked, so
+// reading it as a scorecard would flatter the duds. `erebor_snapshots.outcome`
+// keeps measuring a name after it drops off; that is the honest half.
+function episodeOf(raw) {
+  const e = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+  if (!e) return null;
+  const start = asText(e.start ?? e.episode_start).trim();
+  const anchor = numValue(e.anchor_price);
+  const days = numValue(e.days);
+  if (!start) return null;
+  return { start, anchor, days, anchorSpy: numValue(e.anchor_spy), spy: numValue(e.spy) };
+}
+
+// Needs the row's current price, so it can't live inside episodeOf().
+function episodeDrift(s) {
+  const e = s.episode;
+  if (!e || !e.anchor || s.price === null) return null;
+  const pct = (s.price / e.anchor - 1) * 100;
+  const tape = e.anchorSpy && e.spy ? (e.spy / e.anchorSpy - 1) * 100 : null;
+  return { pct, vsSpy: tape === null ? null : pct - tape };
+}
+
 function buzzOf(raw) {
   const b = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
   if (!b) return null;
@@ -1994,6 +2030,7 @@ function squeezeItems(squeezes) {
       scoreParts:
         s.score_parts && typeof s.score_parts === "object" ? s.score_parts : null,
       scoreVersion: asText(s.score_version).trim(),
+      episode: episodeOf(s.episode),
     }))
     // A row with no ticker names nothing, and one with no numbers and no note
     // says nothing - either way there is no tile worth drawing.
@@ -2072,7 +2109,58 @@ function BuzzChip({ buzz }) {
   );
 }
 
+// Day one of an episode has nothing to compare against, so it says so rather
+// than rendering a confident +0.0%. Green/red is earned here in a way it is
+// not elsewhere on this tile: unlike a short-interest reading, a price move
+// since the anchor does carry a direction.
+function DriftChip({ s, drift }) {
+  const first = s.episode.days !== null && s.episode.days <= 1;
+  const up = drift.pct >= 0;
+  // Same text-safe pair the Dashboard's figures use; B.green / B.red are dot
+  // colors and read poorly at 11px.
+  const tone = first ? B.muted : up ? B.greenText : "oklch(0.75 0.18 25)";
+  const body = first
+    ? "listed today"
+    : `${up ? "+" : "\u2212"}${Math.abs(drift.pct).toFixed(1)}% since listed`;
+  return (
+    <span
+      title={
+        first
+          ? `First appeared ${dayLabel(s.episode.start)}`
+          : `Anchored ${dayLabel(s.episode.start)} at ${priceText(s.episode.anchor)}` +
+            ` \u00b7 ${s.episode.days} scan${s.episode.days === 1 ? "" : "s"} listed` +
+            (drift.vsSpy === null ? "" : ` \u00b7 SPY-adjusted ${drift.vsSpy >= 0 ? "+" : "\u2212"}${Math.abs(drift.vsSpy).toFixed(1)}%`)
+      }
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "3px 9px",
+        borderRadius: 20,
+        background: B.bg,
+        fontFamily: B.mono,
+        fontSize: 11,
+        fontWeight: 600,
+        color: tone,
+        flexShrink: 0,
+      }}
+    >
+      {body}
+      {!first && drift.vsSpy !== null && (
+        // The tape-adjusted figure is the one that says whether anything
+        // name-specific happened, so it sits right next to the raw move
+        // rather than hiding in the tooltip.
+        <span style={{ color: B.dim, fontWeight: 500 }}>
+          {drift.vsSpy >= 0 ? "+" : "\u2212"}
+          {Math.abs(drift.vsSpy).toFixed(1)}% vs SPY
+        </span>
+      )}
+    </span>
+  );
+}
+
 function SqueezeTile({ s, showOwnDates }) {
+  const drift = episodeDrift(s);
   const ownDates = showOwnDates
     ? [
         s.asOf ? `SI ${dayLabel(s.asOf)}` : "",
@@ -2138,9 +2226,18 @@ function SqueezeTile({ s, showOwnDates }) {
         <SqueezeStat label="Price" value={priceText(s.price)} />
       </div>
 
-      {s.buzz && (
-        <div style={{ marginTop: 11 }}>
-          <BuzzChip buzz={s.buzz} />
+      {(s.buzz || drift) && (
+        <div
+          style={{
+            marginTop: 11,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          {s.buzz && <BuzzChip buzz={s.buzz} />}
+          {drift && <DriftChip s={s} drift={drift} />}
         </div>
       )}
 

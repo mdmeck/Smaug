@@ -379,6 +379,13 @@ create policy "erebor_candidates_owner_all"
 -- percent returns off `price`, and whether the max cleared the pop threshold.
 -- NULL until then — never a partial window, which would make every young
 -- row look like a dud. `python erebor_scan.py --backtest` reads this table.
+--
+-- The forward window keeps running after a name leaves the screen, which is
+-- the whole reason the question "did we flag that correctly?" is answerable
+-- here and not from the panel. Names drop off the screen partly *because*
+-- they worked — the settlement figure updates, the chatter moves on — so any
+-- reading taken only over names still listed is biased toward the ones that
+-- did nothing. Nothing in this table is ever deleted when a name drops off.
 create table if not exists erebor_snapshots (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
@@ -390,6 +397,24 @@ create table if not exists erebor_snapshots (
   score double precision,
   score_version text,
   metrics jsonb not null default '{}'::jsonb,
+  -- The listing episode this reading belongs to: the first run_date of the
+  -- current UNBROKEN streak of scans that carried this ticker, and the price
+  -- and SPY close on that day. A name that drops off the screen and comes
+  -- back starts a new episode rather than resuming the old one — the chatter
+  -- universe turns over about two thirds a day, so a gap is a different
+  -- setup, not a continuation of the same one.
+  --
+  -- Carried forward from the prior row rather than recomputed, so the anchor
+  -- a tile shows is the price that was actually on screen the day the name
+  -- appeared. NULL on rows written before this existed, and on day one of an
+  -- episode `episode_start` equals `run_date`.
+  episode_start date,
+  anchor_price double precision,
+  anchor_spy double precision,
+  -- SPY's close on this run's session. Stored on every row because a name
+  -- that rose while the whole tape rose is not squeezing, and that comparison
+  -- cannot be reconstructed later once the panel only has the name's price.
+  spy double precision,
   outcome jsonb,
   outcome_as_of date,
   created_at timestamptz not null default now()

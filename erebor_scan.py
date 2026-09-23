@@ -220,6 +220,51 @@ def load_snapshots(params):
     return out
 
 
+def load_prior_episode_anchors(kind, before_date):
+    """Ticker -> episode anchor, from the most recent scan BEFORE `before_date`.
+
+    Streak continuation is defined against the previous *scan*, not the
+    previous calendar day: weekends, holidays and a skipped run would
+    otherwise each break an episode that never actually lapsed. A ticker
+    missing from that scan starts a fresh episode — the chatter universe
+    turns over roughly two thirds a day, so a gap is a different setup.
+    """
+    resp = requests.get(
+        f"{SUPABASE_URL}/rest/v1/erebor_snapshots",
+        headers=_supabase_headers(),
+        params={
+            "select": "run_date", "kind": f"eq.{kind}",
+            "run_date": f"lt.{before_date}",
+            "order": "run_date.desc", "limit": 1,
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+    _raise_for_status(resp)
+    rows = resp.json()
+    if not rows:
+        return {}
+    prior = rows[0]["run_date"]
+    rows = load_snapshots({"kind": f"eq.{kind}", "run_date": f"eq.{prior}"})
+    out = {}
+    for r in rows:
+        # A row from before these columns existed has no anchor to carry, so
+        # it cannot continue an episode; the name simply starts a new one.
+        if not r.get("episode_start"):
+            continue
+        ep = (r.get("metrics") or {}).get("episode") or {}
+        out[r["ticker"]] = {
+            "episode_start": r["episode_start"],
+            "anchor_price": r.get("anchor_price"),
+            "anchor_spy": r.get("anchor_spy"),
+            # Scans the name has been listed for, not calendar days: a holiday
+            # or a skipped run should not inflate how long a setup has been
+            # sitting there. Carried rather than counted so the panel needs no
+            # second query.
+            "days": int(ep.get("days") or 1),
+        }
+    return out
+
+
 def patch_snapshot(row_id, fields):
     resp = requests.patch(
         f"{SUPABASE_URL}/rest/v1/erebor_snapshots",
@@ -864,33 +909,60 @@ def screen_whale(owner, flow, failures, session_date):
 # ----------------------------------------------------------------------
 # Outcomes and backtest
 # ----------------------------------------------------------------------
-def snapshot_rows(candidates, run_date):
+def snapshot_rows(candidates, run_date, anchors=None, spy=None):
     """The day's candidates, re-keyed on the run date for `erebor_snapshots`.
     Same figures, same score — nothing recomputed, so the snapshot is exactly
-    the reading the panel rendered."""
-    return [
-        {
-            "user_id": c["user_id"],
-            "run_date": run_date,
-            "ticker": c["ticker"],
-            "kind": c["kind"],
-            "price": c["price"],
-            "price_as_of": c["price_as_of"],
-            "score": c["score"],
-            "score_version": c["metrics"].get("score_version"),
-            "metrics": c["metrics"],
-        }
-        for c in candidates
-    ]
+    the reading the panel rendered.
+
+    `anchors` maps ticker -> the prior scan's episode anchor. Present means
+    the streak continues and the original anchor is carried forward unchanged;
+    absent means this row opens a new episode anchored on today.
+    """
+    anchors = anchors or {}
+    rows = []
+    for c in candidates:
+        prev = anchors.get(c["ticker"]) if c["kind"] == "squeeze" else None
+        if prev:
+            start = prev["episode_start"]
+            anchor_price = prev["anchor_price"]
+            anchor_spy = prev["anchor_spy"]
+        else:
+            start = run_date
+            anchor_price = c["price"]
+            anchor_spy = spy
+        rows.append(
+            {
+                "user_id": c["user_id"],
+                "run_date": run_date,
+                "ticker": c["ticker"],
+                "kind": c["kind"],
+                "price": c["price"],
+                "price_as_of": c["price_as_of"],
+                "score": c["score"],
+                "score_version": c["metrics"].get("score_version"),
+                "metrics": c["metrics"],
+                "episode_start": start,
+                "anchor_price": _json_safe(anchor_price),
+                "anchor_spy": _json_safe(anchor_spy),
+                "spy": _json_safe(spy),
+            }
+        )
+    return rows
 
 
-def compute_outcome(hist, base_date, base_price):
+def compute_outcome(hist, base_date, base_price, spy_hist=None):
     """Forward result over the POP_WINDOW sessions strictly after `base_date`.
 
     Returns None until the full window has printed — a partial window would
     understate every max and make early rows look like duds. `base_date` is
     the price's own session, not the run date: a scan that ran at 6pm read
     that day's close, and the window starts the next morning.
+
+    When `spy_hist` is supplied the same window is measured on SPY and the
+    difference recorded, because a name that rose while the whole tape rose
+    is not squeezing. That subtraction assumes a beta of one and is a crude
+    adjustment, not a risk model — it is stored beside the raw figure rather
+    than replacing it so the unadjusted number stays checkable.
     """
     if not base_price or base_price <= 0:
         return None
@@ -901,6 +973,14 @@ def compute_outcome(hist, base_date, base_price):
     min_low = float(fwd["Low"].min())
     last_close = float(fwd["Close"].iloc[-1])
     ret_max = (max_high / base_price - 1.0) * 100.0
+    spy_ret = None
+    if spy_hist is not None and not spy_hist.empty:
+        sfwd = spy_hist[spy_hist.index.date > date.fromisoformat(base_date)].head(POP_WINDOW)
+        prior = spy_hist[spy_hist.index.date <= date.fromisoformat(base_date)]
+        if len(sfwd) == POP_WINDOW and not prior.empty:
+            base_spy = float(prior["Close"].iloc[-1])
+            if base_spy > 0:
+                spy_ret = (float(sfwd["Close"].iloc[-1]) / base_spy - 1.0) * 100.0
     return {
         "window": POP_WINDOW,
         "threshold_pct": POP_THRESHOLD_PCT,
@@ -912,6 +992,9 @@ def compute_outcome(hist, base_date, base_price):
         "ret_min_pct": round((min_low / base_price - 1.0) * 100.0, 2),
         "ret_close_pct": round((last_close / base_price - 1.0) * 100.0, 2),
         "pop": ret_max >= POP_THRESHOLD_PCT,
+        "spy_ret_close_pct": None if spy_ret is None else round(spy_ret, 2),
+        "ret_max_vs_spy_pct": None if spy_ret is None else round(ret_max - spy_ret, 2),
+        "pop_vs_spy": None if spy_ret is None else (ret_max - spy_ret) >= POP_THRESHOLD_PCT,
         "through": fwd.index[-1].date().isoformat(),
     }
 
@@ -934,6 +1017,16 @@ def fill_outcomes(dry_run=False):
         by_ticker.setdefault(r["ticker"], []).append(r)
 
     filled, today = 0, datetime.now(ZoneInfo("America/New_York")).date()
+    # One SPY pull covering every pending row, so each outcome can be stated
+    # against the tape it happened in. A failure here degrades to unbenchmarked
+    # outcomes rather than costing the pass — the raw figures still stand.
+    spy_hist = None
+    try:
+        earliest_all = min(r.get("price_as_of") or r["run_date"] for r in pending)
+        spy_hist = yf.Ticker("SPY").history(start=earliest_all, interval="1d")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  [outcome] SPY benchmark unavailable: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
     for t, rows in sorted(by_ticker.items()):
         earliest = min(r.get("price_as_of") or r["run_date"] for r in rows)
         # Window can't have finished yet — skip the fetch entirely.
@@ -948,13 +1041,15 @@ def fill_outcomes(dry_run=False):
             continue
         for r in rows:
             base_date = r.get("price_as_of") or r["run_date"]
-            out = compute_outcome(hist, base_date, r.get("price"))
+            out = compute_outcome(hist, base_date, r.get("price"), spy_hist)
             if out is None:
                 continue
             filled += 1
             tag = "POP " if out["pop"] else "    "
+            vs = ("" if out["ret_max_vs_spy_pct"] is None
+                  else f"  vs SPY {out['ret_max_vs_spy_pct']:+6.1f}%")
             print(f"  [{tag}] {t:<6} {base_date}  max {out['ret_max_pct']:+6.1f}%"
-                  f"  close {out['ret_close_pct']:+6.1f}%")
+                  f"  close {out['ret_close_pct']:+6.1f}%{vs}")
             if not dry_run:
                 patch_snapshot(r["id"], {"outcome": out, "outcome_as_of": today.isoformat()})
     print(f"[erebor] outcomes: {filled} filled, {len(pending) - filled} still pending")
@@ -1047,6 +1142,46 @@ def backtest(kind="squeeze"):
     if len(rows) < 30:
         print(f"  ({len(rows)} rows is too few to trust any of this; it is a smoke test"
               " of the plumbing until the table has a few months in it)")
+    report_episodes(kind)
+
+
+def report_episodes(kind="squeeze"):
+    """Per listing episode: how long a name stayed on the screen and what it
+    did from its anchor — including after it dropped off.
+
+    Derived from the snapshots rather than stored, so it cannot drift out of
+    step with them. This is the half that answers "did we flag that one
+    correctly": the panel can only ever show names still listed, and names
+    leave the screen partly *because* they worked, so a reading taken over
+    current members is biased toward the ones that did nothing.
+    """
+    rows = [r for r in load_snapshots({"kind": f"eq.{kind}"}) if r.get("episode_start")]
+    if not rows:
+        print("  episodes: no anchored snapshots yet")
+        return
+    eps = {}
+    for r in rows:
+        eps.setdefault((r["ticker"], r["episode_start"]), []).append(r)
+
+    print(f"  {len(eps)} listing episode(s):")
+    print("  ticker  anchored     days  peak score   since anchor   vs SPY   fwd max")
+    for (t, start), rs in sorted(eps.items(), key=lambda kv: kv[0][1], reverse=True)[:25]:
+        rs.sort(key=lambda r: r["run_date"])
+        anchor, last = rs[0].get("anchor_price"), rs[-1]
+        drift = vs_spy = None
+        if anchor and last.get("price"):
+            drift = (last["price"] / anchor - 1.0) * 100.0
+            a_spy, l_spy = rs[0].get("anchor_spy"), last.get("spy")
+            if a_spy and l_spy:
+                vs_spy = drift - (l_spy / a_spy - 1.0) * 100.0
+        peak = max((r["score"] for r in rs if r.get("score") is not None), default=None)
+        # The forward window on the LAST listed day is what carries past the
+        # end of the episode, which is exactly where a squeeze tends to land.
+        fwd = (last.get("outcome") or {}).get("ret_max_pct")
+        fmt = lambda v, suf="%": "     —" if v is None else f"{v:+6.1f}{suf}"
+        print(f"  {t:<7} {start}  {len(rs):4d}  "
+              f"{'    —' if peak is None else f'{peak:9.1f}'}   "
+              f"{fmt(drift)}  {fmt(vs_spy)}  {fmt(fwd)}")
 
 
 # ----------------------------------------------------------------------
@@ -1181,8 +1316,35 @@ def run(dry_run=False):
         print("[erebor] --dry-run: nothing written")
         return
 
+    # SPY's own close for this session, so every row can be read against the
+    # tape it was taken in — a name that rose while the whole market rose is
+    # not squeezing. Best-effort: a missing benchmark leaves the field NULL
+    # rather than failing the scan.
+    spy_prices, _ = fetch_prices(["SPY"])
+    spy_close = (spy_prices.get("SPY") or {}).get("price")
+    anchors = load_prior_episode_anchors("squeeze", as_of)
+
+    # The episode rides in `metrics` as well as its own columns, because the
+    # panel reads `erebor_candidates` and would otherwise need a second query
+    # against the snapshots to draw a drift the scan already knows.
+    for c in candidates:
+        if c["kind"] != "squeeze":
+            continue
+        prev = anchors.get(c["ticker"])
+        c["metrics"]["episode"] = {
+            "start": prev["episode_start"] if prev else as_of,
+            "anchor_price": _json_safe(prev["anchor_price"] if prev else c["price"]),
+            "anchor_spy": _json_safe(prev["anchor_spy"] if prev else spy_close),
+            "spy": _json_safe(spy_close),
+            "days": (prev["days"] + 1) if prev else 1,
+        }
+
     upsert_candidates(candidates)
-    upsert_snapshots(snapshot_rows(candidates, as_of))
+    snaps = snapshot_rows(candidates, as_of, anchors, spy_close)
+    upsert_snapshots(snaps)
+    fresh = sum(1 for r in snaps if r["kind"] == "squeeze" and r["episode_start"] == as_of)
+    held = sum(1 for r in snaps if r["kind"] == "squeeze") - fresh
+    print(f"[erebor] episodes: {fresh} new, {held} continuing")
     upsert_run(
         {
             "user_id": owner,
@@ -1223,7 +1385,9 @@ def main():
     ap.add_argument(
         "--backtest",
         action="store_true",
-        help="print how the squeeze score has related to forward pops; writes nothing",
+        help="print how the squeeze score has related to forward pops, plus a "
+             "per-episode report of what each listed name went on to do; "
+             "writes nothing",
     )
     args = ap.parse_args()
     if args.backtest:
