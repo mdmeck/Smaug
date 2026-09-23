@@ -7495,12 +7495,36 @@ const NAV = [
   { label: "Resources" },
 ];
 
+// The active tab lives in the URL hash (#/training-data) so a reload stays put.
+// Hash, not path: GitHub Pages would 404 a reload of /Smaug/journal.
+const tabSlug = (label) => label.toLowerCase().replace(/\s+/g, "-");
+const LEAF_TABS = NAV.flatMap((item) => item.children || [item.label]);
+const tabFromHash = () =>
+  LEAF_TABS.find((t) => `#/${tabSlug(t)}` === window.location.hash) ||
+  "Morning Brief";
+
 
 export default function Smaug() {
   const session = useSession();
   const now = useEtClock();
   const countdown = openCountdown(now);
-  const [tab, setTab] = useState("Morning Brief");
+  const [tab, setTab] = useState(tabFromHash);
+  useEffect(() => {
+    const hash = `#/${tabSlug(tab)}`;
+    if (window.location.hash === hash) return;
+    // first load with no/unknown hash: rewrite in place rather than adding a
+    // history entry, so Back doesn't land on a bare URL
+    if (!LEAF_TABS.some((t) => `#/${tabSlug(t)}` === window.location.hash)) {
+      window.history.replaceState(null, "", hash);
+    } else {
+      window.location.hash = hash;
+    }
+  }, [tab]);
+  useEffect(() => {
+    const onHash = () => setTab(tabFromHash());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
   const [panels, setPanels] = useState({
     econ: null,
     earnings: null,
