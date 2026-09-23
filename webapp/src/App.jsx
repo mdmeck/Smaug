@@ -1878,13 +1878,17 @@ const pctText = (n) => (n === null ? "" : `${n.toFixed(1)}%`);
 const dtcText = (n) => (n === null ? "" : n.toFixed(1));
 const scoreText = (n) => (n === null ? "" : Math.round(n).toString());
 
-// The four 0-1 parts behind a score, in the weight order erebor_scan.py
-// declares. Hover text only: the number is the headline, this is its receipt.
+// The 0-1 parts behind a score, in the weight order erebor_scan.py declares.
+// Hover text only: the number is the headline, this is its receipt. Days to
+// cover leads because it is the one short-selling measure with robust
+// evidence behind it; raw short float predicts weakly and, unconditionally,
+// in the wrong direction. See the SCORE block in erebor_scan.py.
 const SCORE_PART_LABELS = [
-  ["fuel", "short float"],
   ["trapped", "days to cover"],
-  ["pressing", "shorts adding"],
+  ["fuel", "short float"],
   ["spark", "chatter"],
+  ["accelerant", "call flow"],
+  ["pressing", "shorts adding"],
 ];
 const scoreTitle = (s) => {
   if (!s.scoreParts) return s.scoreVersion ? `score ${s.scoreVersion}` : "";

@@ -411,24 +411,51 @@ APEWISDOM_PAGES = 2     # 100 tickers per page; two pages ~40s of yfinance looku
 MAX_LOUD = 4            # names with chatter — the actionable half
 MAX_QUIET = 8           # shorted-but-quiet baseline
 
-# Squeeze score. A 0-100 composite over the four raw figures the panel already
-# shows, so every point of it can be re-derived from the tile it sits on. The
-# weights are a starting guess, not a finding — the snapshot table and
-# `--backtest` exist to replace them with measured ones. Every stored score
-# carries SCORE_VERSION so a later formula never gets compared against an
+# Squeeze score. A 0-100 composite over figures the panel already shows, so
+# every point of it can be re-derived from the tile it sits on. Every stored
+# score carries SCORE_VERSION, so a later formula is never compared against an
 # earlier one's outcomes as if they were the same number.
 #
+# READ THIS BEFORE TRADING OFF THE SCORE. High short interest, on its own,
+# predicts *negative* abnormal returns — Asquith & Meulbroek (1995) and
+# Asquith, Pathak & Ritter (2005) both find heavily shorted names underperform,
+# because short sellers are informed on average. A squeeze is the tail of that
+# distribution, not its centre, and "most shorted" read unconditionally is a
+# bearish list. Nothing in this score contradicts that; it ranks candidates
+# within a screen the trader has already chosen to look at.
+#
+# sq2 weights follow the evidence rather than intuition. sq1 led with short
+# float (40) over days to cover (25), which is backwards:
+#   - Hong, Li, Ni, Scheinkman & Yan (NBER w21166): short interest alone is a
+#     weak predictor; days-to-cover — short interest over daily volume — is
+#     the robust one. The volume denominator carries the signal.
+#   - Boehmer, Huszar, Wang & Zhang, 38 countries: days-to-cover is the most
+#     robust of eight short-selling variables, and once borrow fees and
+#     utilization enter the regression short interest stops predicting at all.
+#   - Every historical squeeze (VW 2008, GME 2021 and 2024, AMC, OPEN 2025)
+#     needed a dated spark and was accelerated by short-dated call buying
+#     forcing dealer hedging. None of them started because short interest was
+#     high; that only set how far the move ran.
+# So: days to cover leads, short float is demoted to a necessary-but-weak
+# condition, and the call-side flow the whale screen already measures enters
+# as its own term. Borrow fee and utilization are the two inputs the evidence
+# rates highest that no free source publishes — their absence is the main
+# known gap in this score, not an oversight.
+#
 # Each input is clamped to a 0-1 ramp between a floor and a ceiling:
-#   fuel      short % of float      10% -> 0, 50% -> 1
-#   trapped   days to cover          1  -> 0, 10  -> 1
-#   pressing  shares short vs prior -20% -> 0, +20% -> 1 (flat = 0.5)
-#   spark     chatter present        0 or 1
-SCORE_VERSION = "sq1"
-SCORE_WEIGHTS = {"fuel": 40, "trapped": 25, "pressing": 15, "spark": 20}
+#   trapped     days to cover           1  -> 0, 10  -> 1
+#   fuel        short % of float       10% -> 0, 50% -> 1
+#   spark       chatter present         0 or 1
+#   accelerant  call volume / call OI  0.2 -> 0, 1.0 -> 1; zero if flow is
+#               leaning bearish, None when the name has no readable chain
+#   pressing    shares short vs prior -20% -> 0, +20% -> 1 (flat = 0.5)
+SCORE_VERSION = "sq2"
+SCORE_WEIGHTS = {"trapped": 30, "fuel": 20, "spark": 20, "accelerant": 15, "pressing": 15}
 SCORE_RAMPS = {
     "fuel": (10.0, 50.0),
     "trapped": (1.0, 10.0),
     "pressing": (-0.20, 0.20),
+    "accelerant": (0.2, 1.0),
 }
 
 # Outcome window for the backtest: a "pop" is the max high over the next
@@ -447,17 +474,31 @@ def score_squeeze(metrics):
     """Returns (score, parts) for a squeeze row's metrics, or (None, {}) when
     the one mandatory input (short float) is missing. A missing optional input
     scores zero for its part rather than dropping the row — a name with no
-    days-to-cover figure is still a candidate, just an unproven one."""
+    days-to-cover figure is still a candidate, just an unproven one, and the
+    part is recorded as None rather than 0 so the backtest can tell "absent"
+    from "measured and low"."""
     pct = metrics.get("short_percent_float")
     if pct is None:
         return None, {}
     ss, prior = metrics.get("shares_short"), metrics.get("shares_short_prior")
     growth = (ss / prior - 1.0) if ss and prior else None
+    # Call volume against standing call OI: new call buying is what forces a
+    # dealer to hedge by buying stock, which is the accelerant every historical
+    # squeeze had. Flow leaning bearish scores zero rather than None — that is
+    # a real reading that the accelerant is absent, not a missing one.
+    accel = None
+    cv, coi = metrics.get("call_vol"), metrics.get("call_oi")
+    if cv is not None and coi:
+        accel = (
+            0.0 if metrics.get("flow_lean") == "bearish"
+            else _ramp(cv / coi, *SCORE_RAMPS["accelerant"])
+        )
     parts = {
-        "fuel": _ramp(pct, *SCORE_RAMPS["fuel"]),
         "trapped": _ramp(metrics.get("days_to_cover"), *SCORE_RAMPS["trapped"]),
-        "pressing": _ramp(growth, *SCORE_RAMPS["pressing"]),
+        "fuel": _ramp(pct, *SCORE_RAMPS["fuel"]),
         "spark": 1.0 if metrics.get("buzz") else 0.0,
+        "accelerant": accel,
+        "pressing": _ramp(growth, *SCORE_RAMPS["pressing"]),
     }
     total = sum(SCORE_WEIGHTS[k] * (v or 0.0) for k, v in parts.items())
     parts = {k: (None if v is None else round(v, 3)) for k, v in parts.items()}
@@ -593,10 +634,12 @@ def fetch_short_interest(tickers):
     return data, failures
 
 
-def screen_squeeze(owner, universe):
+def screen_squeeze(owner, universe, flow=None):
     """Returns (candidates, sources, errors) for kind='squeeze'.
-    `universe` comes from fetch_chatter(), shared with the whale screen."""
+    `universe` comes from fetch_chatter() and `flow` from fetch_option_flow();
+    both are shared with the whale screen so neither source is fetched twice."""
     sources, errors = {}, []
+    flow = flow or {}
     if not universe:
         return [], sources, errors
 
@@ -630,6 +673,14 @@ def screen_squeeze(owner, universe):
         }
         if buzz:
             metrics["buzz"] = buzz
+        # The accelerant inputs, copied in raw so the score stays re-derivable
+        # from the row. Absent for any name with no readable option chain,
+        # which is common down the chatter universe and is not an error.
+        f = flow.get(t)
+        if f:
+            metrics["call_vol"] = f["call_volume"]
+            metrics["call_oi"] = f["call_oi"]
+            metrics["flow_lean"] = _lean(f["call_volume"], f["put_volume"])
         score, parts = score_squeeze(metrics)
         metrics["score_version"] = SCORE_VERSION
         metrics["score_parts"] = parts
@@ -751,10 +802,12 @@ def _lean(cv, pv):
     return "bullish" if share >= 0.65 else ("bearish" if share <= 0.35 else "mixed")
 
 
-def screen_whale(owner, tickers, session_date):
-    """Returns (candidates, sources, errors) for kind='whale'."""
+def screen_whale(owner, flow, failures, session_date):
+    """Returns (candidates, sources, errors) for kind='whale'.
+    `flow` comes from fetch_option_flow(), fetched once in run() and shared
+    with the squeeze screen — the chains are the slowest fetch in the module
+    and the two screens look at overlapping tickers."""
     sources, errors = {}, []
-    flow, failures = fetch_option_flow(sorted(set(tickers)))
     sources["yfinance_options"] = (
         "ok" if not failures else ("failed" if not flow else "partial")
     )
@@ -1085,8 +1138,15 @@ def run(dry_run=False):
     universe, chatter_sources = fetch_chatter()
     sources.update(chatter_sources)
 
+    # One option-chain pass feeds both screens, same as the chatter fetch: it
+    # is the slowest thing in the module, and the squeeze score now uses the
+    # call-side flow that the whale screen was already reading for these very
+    # tickers. Fetched before the squeeze screen so it can be scored with it.
+    wh_tickers = list(universe) + [d["ticker"] for d in deals if d.get("ticker")]
+    flow, flow_failures = fetch_option_flow(sorted(set(wh_tickers)))
+
     kinds.append("squeeze")
-    sq_rows, sq_sources, sq_errors = screen_squeeze(owner, universe)
+    sq_rows, sq_sources, sq_errors = screen_squeeze(owner, universe, flow)
     sources.update(sq_sources)
     errors.extend(sq_errors)
     candidates.extend(sq_rows)
@@ -1094,8 +1154,7 @@ def run(dry_run=False):
     print(f"[erebor] squeeze: {len(sq_rows)} name(s), {loud} with chatter")
 
     kinds.append("whale")
-    wh_tickers = list(universe) + [d["ticker"] for d in deals if d.get("ticker")]
-    wh_rows, wh_sources, wh_errors = screen_whale(owner, wh_tickers, as_of)
+    wh_rows, wh_sources, wh_errors = screen_whale(owner, flow, flow_failures, as_of)
     sources.update(wh_sources)
     errors.extend(wh_errors)
     candidates.extend(wh_rows)
@@ -1108,7 +1167,8 @@ def run(dry_run=False):
         elif c["kind"] == "squeeze":
             m = c["metrics"]
             tag = "LOUD " if "buzz" in m else "quiet"
-            print(f"  [{tag}] {c['ticker']:<6} {m['short_percent_float']:>6.2f}% short"
+            print(f"  [{tag}] {c['ticker']:<6} score {c['score'] or 0:>5.1f}"
+                  f"  {m['short_percent_float']:>6.2f}% short"
                   f"  dtc {m.get('days_to_cover') or '-'}  settled {c['as_of']}")
         else:
             print(f"  {c['note']}")
