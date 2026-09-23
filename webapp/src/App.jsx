@@ -1272,7 +1272,7 @@ function CasesBody({ data }) {
 // ---------- Morning Brief tab ----------
 // Styled from the imported Claude Design system (`B` tokens, docs/design.md)
 // rather than the app-wide `T` — see the note on `B` for why the two coexist.
-function MorningBriefTab({ panels, lastRun, ereborPanels, ereborRun, ereborError }) {
+function MorningBriefTab({ panels, lastRun, ereborPanels, ereborRun, ereborError, ereborBacktests }) {
   return (
     <div
       style={{
@@ -1319,6 +1319,7 @@ function MorningBriefTab({ panels, lastRun, ereborPanels, ereborRun, ereborError
           whales={ereborPanels.whales}
           run={ereborRun}
           error={ereborError}
+          backtest={ereborBacktests.whale}
         />
       </PanelBoundary>
       <PanelBoundary>
@@ -1326,6 +1327,7 @@ function MorningBriefTab({ panels, lastRun, ereborPanels, ereborRun, ereborError
           squeezes={ereborPanels.squeezes}
           run={ereborRun}
           error={ereborError}
+          backtest={ereborBacktests.squeeze}
         />
       </PanelBoundary>
 
@@ -1452,11 +1454,30 @@ function whaleItems(whales) {
       // says which it is showing rather than printing "x avg" for both.
       const basis = vol > 0 && avg > 0 ? "avg" : vol > 0 && oi > 0 ? "OI" : null;
       const mult = basis === "avg" ? vol / avg : basis === "OI" ? vol / oi : null;
+      const parts = w.score_parts && typeof w.score_parts === "object" ? w.score_parts : null;
       return {
         ticker: asText(w.ticker ?? w.symbol).trim().toUpperCase(),
         lean: leanKey(w.lean ?? w.bias ?? w.sentiment ?? w.direction),
         vol,
         mult,
+        // Which denominator the multiple used, so the column header can name
+        // it. Never blended: "x avg" and "x OI" are different measurements.
+        basis,
+        score: numValue(w.score),
+        // Signal STRENGTH, not bullishness — `lean` carries the sign. A
+        // bearish name with a high score is a strong bearish read.
+        scoreTitle: parts
+          ? [
+              ["newness", "volume vs OI"],
+              ["conviction", "directional skew"],
+              ["size", "contracts"],
+            ]
+              .map(([k, label]) => {
+                const v = parts[k];
+                return `${label} ${v === null || v === undefined ? "\u2014" : Math.round(v * 100) + "%"}`;
+              })
+              .join(" \u00b7 ")
+          : undefined,
         // Built from the two raw numbers; a prose size the routine wrote itself
         // is the fallback, so an older or hand-written row still shows something.
         size:
@@ -1472,10 +1493,15 @@ function whaleItems(whales) {
       };
     })
     .filter((w) => w.ticker || w.flow)
-    // Ranked the way the source ranks it — by how far above normal the volume
-    // is, not by raw size, so a mega-cap's ordinary million contracts doesn't
-    // outrank the name that actually did something unusual.
-    .sort((a, b) => (b.mult ?? -1) - (a.mult ?? -1) || b.vol - a.vol);
+    // Ranked by score when the scan wrote one, else by how far above normal
+    // the volume is — not by raw size, so a mega-cap's ordinary million
+    // contracts doesn't outrank the name that actually did something unusual.
+    .sort(
+      (a, b) =>
+        (b.score ?? -1) - (a.score ?? -1) ||
+        (b.mult ?? -1) - (a.mult ?? -1) ||
+        b.vol - a.vol
+    );
 }
 
 // Compact cousin of TonePill — same 14% wash and dot, sized to sit inline with
@@ -1533,6 +1559,9 @@ function adaptWhale(row) {
     open_interest: m.open_interest,
     flow: m.flow,
     note: row.note,
+    score: row.score,
+    score_parts: m.score_parts,
+    score_version: m.score_version,
     // the session the flow was seen in, not the day the scan ran
     as_of: row.as_of,
   };
@@ -1686,7 +1715,7 @@ function PanelEmpty({ state }) {
   );
 }
 
-function WhaleActionPanel({ whales, run, error }) {
+function WhaleActionPanel({ whales, run, error, backtest }) {
   // The scan's own clock, not the brief's — these panels no longer ride on
   // `daily_briefs` and must not borrow its freshness.
   const generatedAt = run && run.ran_at ? new Date(run.ran_at) : null;
@@ -1753,87 +1782,85 @@ function WhaleActionPanel({ whales, run, error }) {
           state={panelEmptyState(whales, run, items.length, "whale flow", error, "whale")}
         />
       ) : (
-        <div
-          style={{
-            padding: 24,
-            display: "grid",
-            gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-            gap: 16,
-          }}
-        >
-          {items.map((w, i) => (
-            <div
-              key={`${w.ticker}-${i}`}
-              style={{ background: B.sunken, borderRadius: 10, padding: "14px 16px" }}
-            >
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 10,
-                  marginBottom: w.flow || w.note ? 9 : 0,
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
-                  <span
+        <div style={gridScroll}>
+          <table style={gridWrap}>
+            <colgroup>
+              <col style={{ width: "13%" }} />
+              <col style={{ width: "11%" }} />
+              <col style={{ width: "9%" }} />
+              <col style={{ width: "13%" }} />
+              <col style={{ width: "12%" }} />
+              <col style={{ width: "42%" }} />
+            </colgroup>
+            <thead>
+              <tr>
+                <th style={gridHead()}>Ticker</th>
+                <th style={gridHead()}>Lean</th>
+                <th style={gridHead("right")}>Score</th>
+                <th style={gridHead("right")}>Volume</th>
+                <th style={gridHead("right")}>vs {items[0].basis === "avg" ? "avg" : "OI"}</th>
+                <th style={gridHead()}>Flow</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.map((w, i) => (
+                <tr key={`${w.ticker}-${i}`}>
+                  <td style={{ ...gridCell(), color: B.blue, fontWeight: 700 }}>
+                    {w.ticker || "\u2014"}
+                  </td>
+                  <td style={gridCell()}>
+                    <LeanTag lean={w.lean} />
+                  </td>
+                  <td style={gridCell("right")} title={w.scoreTitle}>
+                    {w.score === null ? "\u2014" : Math.round(w.score)}
+                  </td>
+                  <td style={gridCell("right")}>{countText(w.vol) || "\u2014"}</td>
+                  {/* The multiple is computed in whaleItems from the two raw
+                      figures and labelled with the denominator it used; a
+                      stored multiple would be one the trader can't check. */}
+                  <td style={gridCell("right")}>
+                    {w.mult === null ? "\u2014" : `${w.mult.toFixed(2)}\u00d7`}
+                  </td>
+                  <td
                     style={{
-                      fontFamily: B.mono,
-                      fontSize: 15,
-                      fontWeight: 700,
-                      color: B.blue,
-                    }}
-                  >
-                    {w.ticker || "—"}
-                  </span>
-                  <LeanTag lean={w.lean} />
-                </div>
-                {w.size && (
-                  <span
-                    style={{
-                      fontFamily: B.mono,
+                      ...gridCell(),
+                      fontFamily: B.sans,
+                      fontWeight: 400,
                       fontSize: 12.5,
-                      fontWeight: 600,
                       color: B.muted,
-                      flexShrink: 0,
+                      whiteSpace: "normal",
+                      lineHeight: 1.45,
                     }}
                   >
-                    {w.size}
-                  </span>
-                )}
-              </div>
-              {w.flow && (
-                <div style={{ fontSize: 13.5, lineHeight: 1.5, color: B.muted }}>
-                  {w.flow}
-                </div>
-              )}
-              {w.note && (
-                <div
-                  style={{ fontSize: 12.5, lineHeight: 1.45, color: B.dim, marginTop: 7 }}
-                >
-                  {w.note}
-                </div>
-              )}
-              {/* only when the header can't speak for every row — one date in
-                  two places is noise, one date standing for two sessions is a
-                  lie */}
-              {mixedDates && w.asOf && (
-                <div
-                  style={{
-                    fontFamily: B.mono,
-                    fontSize: 10.5,
-                    letterSpacing: "0.07em",
-                    color: B.ghost,
-                    marginTop: 8,
-                  }}
-                >
-                  {dayLabel(w.asOf).toUpperCase()}
-                </div>
-              )}
-            </div>
-          ))}
+                    {w.flow || "\u2014"}
+                    {w.note && (
+                      <div style={{ color: B.dim, marginTop: 4 }}>{w.note}</div>
+                    )}
+                    {/* only when the header can't speak for every row — one
+                        date in two places is noise, one date standing for two
+                        sessions is a lie */}
+                    {mixedDates && w.asOf && (
+                      <div
+                        style={{
+                          fontFamily: B.mono,
+                          fontSize: 10.5,
+                          letterSpacing: "0.07em",
+                          color: B.ghost,
+                          marginTop: 5,
+                        }}
+                      >
+                        {dayLabel(w.asOf).toUpperCase()}
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
+
+      <BacktestBlock bt={backtest} />
     </div>
   );
 }
@@ -2046,8 +2073,45 @@ function squeezeItems(squeezes) {
     );
 }
 
+// ---------- shared grid chrome ----------
+// Both market panels render as tables rather than cards: they are ranked lists
+// of the same few figures, and a card grid made every row look like an
+// independent object while hiding the comparison the ranking exists to make.
+// The design system has no table treatment (docs/design.md is built around
+// cards), so this is the one deviation, kept deliberately minimal: mono
+// eyebrow headers, hairline row rules, no zebra, no borders between columns.
+const gridWrap = {
+  width: "100%",
+  borderCollapse: "collapse",
+  // `fixed` so a long company name can't reflow the numeric columns; every
+  // width below is explicit and the name column absorbs the slack.
+  tableLayout: "fixed",
+};
+const gridHead = (align = "left") => ({
+  ...eyebrow(B.ghost, 9.5),
+  textAlign: align,
+  padding: "0 10px 8px",
+  borderBottom: `1px solid ${B.edge}`,
+  whiteSpace: "nowrap",
+});
+const gridCell = (align = "left") => ({
+  fontFamily: B.mono,
+  fontSize: 13,
+  fontWeight: 600,
+  color: B.ink,
+  textAlign: align,
+  padding: "10px",
+  borderBottom: `1px solid ${B.edgeSoft}`,
+  whiteSpace: "nowrap",
+});
+
+// Horizontal scroll rather than reflow: these are numeric rows that stay
+// legible when scrolled and become unreadable when wrapped.
+const gridScroll = { overflowX: "auto", padding: "8px 24px 20px" };
+
 // One labeled figure. The eyebrow-over-value pairing is the design system's
-// stat treatment (docs/design.md); three of these sit in a row per tile.
+// stat treatment (docs/design.md); used in the card layout and kept for the
+// backtest block's summary figures.
 function SqueezeStat({ label, value, title }) {
   return (
     <div style={{ minWidth: 0 }} title={title || undefined}>
@@ -2159,117 +2223,98 @@ function DriftChip({ s, drift }) {
   );
 }
 
-function SqueezeTile({ s, showOwnDates }) {
+// One row of the squeeze grid. Every figure the card carried is still here;
+// what changed is that the eyebrow labels moved up into a shared header row,
+// which is the whole reason a table beats a card grid for a ranked list —
+// twelve repetitions of "SHORT FLOAT" were louder than the numbers.
+function SqueezeRow({ s, showOwnDates }) {
   const drift = episodeDrift(s);
-  const ownDates = showOwnDates
-    ? [
-        s.asOf ? `SI ${dayLabel(s.asOf)}` : "",
-        s.pxAsOf ? `PX ${dayLabel(s.pxAsOf)}` : "",
-      ].filter(Boolean)
-    : [];
+  const dates = [
+    s.asOf ? `SI ${dayLabel(s.asOf)}` : "",
+    s.pxAsOf ? `PX ${dayLabel(s.pxAsOf)}` : "",
+  ].filter(Boolean);
   return (
-    <div style={{ background: B.sunken, borderRadius: 10, padding: "14px 16px" }}>
-      <div
-        style={{
-          display: "flex",
-          alignItems: "baseline",
-          gap: 9,
-          minWidth: 0,
-          marginBottom: 12,
-        }}
-      >
-        <span
-          style={{
-            fontFamily: B.mono,
-            fontSize: 15,
-            fontWeight: 700,
-            color: B.blue,
-            flexShrink: 0,
-          }}
-        >
+    <>
+      <tr>
+        <td style={{ ...gridCell(), color: B.blue, fontWeight: 700 }}>
           {s.ticker}
-        </span>
-        {s.company && (
-          // Truncates rather than wraps, so the name stays on the ticker's line
-          // (docs/design.md, deviation 2).
-          <span
+          {s.company && (
+            // Truncates rather than wraps (docs/design.md, deviation 2). In a
+            // fixed-layout table the name has to be blocked for ellipsis to
+            // engage at all.
+            <div
+              style={{
+                fontFamily: B.sans,
+                fontSize: 12,
+                fontWeight: 400,
+                color: B.dim,
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                marginTop: 2,
+              }}
+              title={s.company}
+            >
+              {s.company}
+            </div>
+          )}
+        </td>
+        {/* Magnitudes stay uncolored: green/red would assert a direction the
+            number doesn't carry, and amber is spoken for by staleness. Rank is
+            carried by row order. The drift chip is the one exception, and it
+            earns it — a price move does have a direction. */}
+        <td style={gridCell("right")} title={scoreTitle(s)}>
+          {scoreText(s.score) || "\u2014"}
+        </td>
+        <td style={gridCell("right")}>{pctText(s.pct) || "\u2014"}</td>
+        <td style={gridCell("right")}>{dtcText(s.dtc) || "\u2014"}</td>
+        <td style={gridCell("right")}>{priceText(s.price) || "\u2014"}</td>
+        <td style={gridCell()}>
+          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+            {s.buzz && <BuzzChip buzz={s.buzz} />}
+            {drift && <DriftChip s={s} drift={drift} />}
+            {!s.buzz && !drift && <span style={{ color: B.ghost }}>\u2014</span>}
+          </div>
+        </td>
+      </tr>
+      {/* A note or a disagreeing date gets its own full-width line under the
+          row rather than a column, because both are prose-shaped and would
+          force every numeric column narrower to fit the longest one. */}
+      {(s.note || (showOwnDates && dates.length > 0)) && (
+        <tr>
+          <td
+            colSpan={6}
             style={{
-              fontSize: 13,
-              color: B.dim,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              minWidth: 0,
+              padding: "0 10px 10px",
+              borderBottom: `1px solid ${B.edgeSoft}`,
             }}
-            title={s.company}
           >
-            {s.company}
-          </span>
-        )}
-      </div>
-
-      {/* The magnitude is left uncolored on purpose. Green/red would assert a
-          direction the number doesn't carry, and amber is already spoken for by
-          staleness everywhere else in this app. Sort order conveys rank. */}
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: s.score === null ? "1fr 1fr 1fr" : "auto 1fr 1fr 1fr",
-          gap: 12,
-        }}
-      >
-        {s.score !== null && (
-          <SqueezeStat label="Score" value={scoreText(s.score)} title={scoreTitle(s)} />
-        )}
-        <SqueezeStat label="Short float" value={pctText(s.pct)} />
-        <SqueezeStat label="Days to cover" value={dtcText(s.dtc)} />
-        <SqueezeStat label="Price" value={priceText(s.price)} />
-      </div>
-
-      {(s.buzz || drift) && (
-        <div
-          style={{
-            marginTop: 11,
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            flexWrap: "wrap",
-          }}
-        >
-          {s.buzz && <BuzzChip buzz={s.buzz} />}
-          {drift && <DriftChip s={s} drift={drift} />}
-        </div>
+            {s.note && (
+              <div style={{ fontSize: 12.5, lineHeight: 1.45, color: B.muted }}>
+                {s.note}
+              </div>
+            )}
+            {showOwnDates && dates.length > 0 && (
+              <div
+                style={{
+                  fontFamily: B.mono,
+                  fontSize: 10.5,
+                  letterSpacing: "0.07em",
+                  color: B.ghost,
+                  marginTop: s.note ? 6 : 0,
+                }}
+              >
+                {dates.join(" \u00b7 ").toUpperCase()}
+              </div>
+            )}
+          </td>
+        </tr>
       )}
-
-      {s.note && (
-        <div style={{ fontSize: 12.5, lineHeight: 1.45, color: B.muted, marginTop: 11 }}>
-          {s.note}
-        </div>
-      )}
-      {ownDates.length > 0 && (
-        <div
-          style={{
-            fontFamily: B.mono,
-            fontSize: 10.5,
-            letterSpacing: "0.07em",
-            color: B.ghost,
-            marginTop: 9,
-          }}
-        >
-          {ownDates.join(" \u00b7 ").toUpperCase()}
-        </div>
-      )}
-    </div>
+    </>
   );
 }
 
-const squeezeGrid = {
-  display: "grid",
-  gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
-  gap: 16,
-};
-
-function SqueezePanel({ squeezes, run, error }) {
+function SqueezePanel({ squeezes, run, error, backtest }) {
   const items = useMemo(() => squeezeItems(squeezes), [squeezes]);
 
   // Fuel and spark. A heavily shorted name nobody is discussing is a setup; the
@@ -2316,14 +2361,36 @@ function SqueezePanel({ squeezes, run, error }) {
   const Section = ({ label, hint, rows, empty }) => (
     <div>
       <div style={{ ...eyebrow(B.faint, 11), marginBottom: 3 }}>{label}</div>
-      <div style={{ fontSize: 12.5, color: B.ghost, marginBottom: 14 }}>{hint}</div>
+      <div style={{ fontSize: 12.5, color: B.ghost, marginBottom: 10 }}>{hint}</div>
       {rows.length === 0 ? (
         <div style={{ fontFamily: B.mono, fontSize: 12, color: B.faint }}>{empty}</div>
       ) : (
-        <div style={squeezeGrid}>
-          {rows.map((s, i) => (
-            <SqueezeTile key={`${s.ticker}-${i}`} s={s} showOwnDates={showOwnDates} />
-          ))}
+        <div style={{ overflowX: "auto" }}>
+          <table style={gridWrap}>
+            <colgroup>
+              <col style={{ width: "34%" }} />
+              <col style={{ width: "9%" }} />
+              <col style={{ width: "12%" }} />
+              <col style={{ width: "13%" }} />
+              <col style={{ width: "11%" }} />
+              <col style={{ width: "21%" }} />
+            </colgroup>
+            <thead>
+              <tr>
+                <th style={gridHead()}>Name</th>
+                <th style={gridHead("right")}>Score</th>
+                <th style={gridHead("right")}>Short float</th>
+                <th style={gridHead("right")}>Days to cover</th>
+                <th style={gridHead("right")}>Price</th>
+                <th style={gridHead()}>Signal</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((s, i) => (
+                <SqueezeRow key={`${s.ticker}-${i}`} s={s} showOwnDates={showOwnDates} />
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
     </div>
@@ -2373,7 +2440,7 @@ function SqueezePanel({ squeezes, run, error }) {
           state={panelEmptyState(squeezes, run, items.length, "squeeze setups", error, "squeeze")}
         />
       ) : (
-        <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 26 }}>
+        <div style={{ padding: "18px 24px 22px", display: "flex", flexDirection: "column", gap: 26 }}>
           {/* Loud first: it is the actionable half, and on most days it is
               empty, which is itself the honest answer rather than a gap. */}
           <Section
@@ -2388,6 +2455,117 @@ function SqueezePanel({ squeezes, run, error }) {
             rows={quiet}
             empty="Every name below is drawing chatter."
           />
+        </div>
+      )}
+
+      <BacktestBlock bt={backtest} />
+    </div>
+  );
+}
+
+// ---------- score report card ----------
+// Rendered under each market panel from `erebor_backtests`, which the daily
+// scan recomputes and stores. The whole point is that the trader can see
+// whether the score has been worth anything without running a script — and,
+// more often, that it is still too early to say.
+//
+// The honesty rules here are load-bearing, because this panel is the one most
+// likely to be mistaken for evidence:
+//   - `trustworthy` false (n below the scan's threshold) renders the numbers
+//     greyed with the count stated first. It never hides them — a hidden
+//     number invites the assumption that something is being withheld — but it
+//     never presents them as findings either.
+//   - mixed score versions are called out by name. Pooling sq1 and sq2
+//     outcomes would silently average two different formulas.
+//   - "hit" means the move went the way the screen flagged it. For whales
+//     that includes a bearish name falling, which is why this says "hit" and
+//     not "pop".
+function BacktestBlock({ bt }) {
+  if (!bt) return null;
+  const r = bt.report || {};
+  const terciles = Array.isArray(r.terciles) ? r.terciles : [];
+  const dim = !bt.trustworthy;
+  const pct = (v) => (v === null || v === undefined ? "\u2014" : `${Math.round(v * 100)}%`);
+  const signed = (v) =>
+    v === null || v === undefined ? "\u2014" : `${v >= 0 ? "+" : "\u2212"}${Math.abs(v).toFixed(1)}%`;
+  return (
+    <div style={{ borderTop: `1px solid ${B.edge}`, padding: "16px 24px 20px" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          gap: 10,
+          flexWrap: "wrap",
+          marginBottom: 10,
+        }}
+      >
+        <div style={eyebrow(B.faint, 11)}>Has the score worked?</div>
+        <div style={{ fontFamily: B.mono, fontSize: 11, color: dim ? B.amber : B.faint }}>
+          n={bt.n}
+          {dim && r.min_n ? ` \u00b7 too few to trust (need ${r.min_n})` : ""}
+          {r.window ? ` \u00b7 ${r.window}-session window` : ""}
+          {bt.score_version ? ` \u00b7 ${bt.score_version}` : ""}
+        </div>
+      </div>
+
+      {r.mixed_versions && (
+        <div style={{ fontFamily: B.mono, fontSize: 11.5, color: B.amber, marginBottom: 10 }}>
+          Mixed score versions in this series — the formula changed partway, so
+          these pooled figures compare two different numbers.
+        </div>
+      )}
+
+      {terciles.length === 0 ? (
+        <div style={{ fontFamily: B.mono, fontSize: 12, color: B.faint }}>
+          Nothing has resolved yet. Each reading needs its full forward window
+          to print before it can be scored.
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={gridWrap}>
+            <colgroup>
+              <col style={{ width: "28%" }} />
+              <col style={{ width: "12%" }} />
+              <col style={{ width: "20%" }} />
+              <col style={{ width: "20%" }} />
+              <col style={{ width: "20%" }} />
+            </colgroup>
+            <thead>
+              <tr>
+                <th style={gridHead()}>Score band</th>
+                <th style={gridHead("right")}>n</th>
+                <th style={gridHead("right")}>Hit rate</th>
+                <th style={gridHead("right")}>Median</th>
+                <th style={gridHead("right")}>vs SPY</th>
+              </tr>
+            </thead>
+            <tbody>
+              {terciles.map((t) => (
+                <tr key={t.band}>
+                  <td style={{ ...gridCell(), color: dim ? B.dim : B.ink }}>
+                    {t.band} {t.score_lo?.toFixed(0)}\u2013{t.score_hi?.toFixed(0)}
+                  </td>
+                  <td style={{ ...gridCell("right"), color: dim ? B.dim : B.ink }}>{t.n}</td>
+                  <td style={{ ...gridCell("right"), color: dim ? B.dim : B.ink }}>
+                    {pct(t.hit_rate)}
+                  </td>
+                  <td style={{ ...gridCell("right"), color: dim ? B.dim : B.ink }}>
+                    {signed(t.median_ret_pct)}
+                  </td>
+                  <td style={{ ...gridCell("right"), color: dim ? B.dim : B.ink }}>
+                    {signed(t.median_ret_vs_spy_pct)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ fontSize: 12, color: B.ghost, marginTop: 9, lineHeight: 1.5 }}>
+            A hit is a move of {r.threshold_pct}% or more in the direction the
+            screen flagged, within {r.window} sessions. Base rate across every
+            reading: {pct(bt.base_rate)}. If the high band doesn't beat the low
+            band, the score isn't earning its place.
+          </div>
         </div>
       )}
     </div>
@@ -7380,7 +7558,7 @@ function EreborTab() {
 
   useEffect(() => {
     (async () => {
-      const [candidates, runs] = await Promise.all([
+      const [candidates, runs, backtests] = await Promise.all([
         supabase
           .from("erebor_candidates")
           .select("*")
@@ -7392,6 +7570,16 @@ function EreborTab() {
           .order("as_of", { ascending: false })
           .limit(1)
           .maybeSingle(),
+        // The report cards. Newest first across both kinds; the latest row per
+        // kind is the current one. Read separately from the candidates for the
+        // same reason those are read separately from the brief — a missing
+        // report must not blank the panel it sits under.
+        supabase
+          .from("erebor_backtests")
+          .select("*")
+          .in("kind", ["whale", "squeeze"])
+          .order("as_of", { ascending: false })
+          .limit(20),
       ]);
       // Read the error rather than discard it. An empty list and a failed
       // query look identical otherwise, which is the confusion this whole
@@ -7536,6 +7724,7 @@ export default function Smaug() {
   // a different table on a different routine's schedule, and sharing one state
   // object would let a missing brief read as missing screens.
   const [ereborPanels, setEreborPanels] = useState({ whales: null, squeezes: null });
+  const [ereborBacktests, setEreborBacktests] = useState({ whale: null, squeeze: null });
   const [ereborRun, setEreborRun] = useState(null);
   const [ereborError, setEreborError] = useState(null);
 
@@ -7570,7 +7759,7 @@ export default function Smaug() {
       // Two independent reads. `erebor_runs` is what says a scan happened at
       // all: an empty candidates list means nothing on its own, and inferring
       // "no data" from it is exactly the mistake these panels shipped with.
-      const [candidates, runs] = await Promise.all([
+      const [candidates, runs, backtests] = await Promise.all([
         supabase
           .from("erebor_candidates")
           .select("*")
@@ -7583,6 +7772,16 @@ export default function Smaug() {
           .order("as_of", { ascending: false })
           .limit(1)
           .maybeSingle(),
+        // The report cards. Newest first across both kinds; the latest row per
+        // kind is the current one. Read separately from the candidates for the
+        // same reason those are read separately from the brief — a missing
+        // report must not blank the panel it sits under.
+        supabase
+          .from("erebor_backtests")
+          .select("*")
+          .in("kind", ["whale", "squeeze"])
+          .order("as_of", { ascending: false })
+          .limit(20),
       ]);
       // The error is read, not discarded. An earlier version destructured only
       // `data`, so a query that failed outright — the tables not existing yet
@@ -7596,6 +7795,12 @@ export default function Smaug() {
         whales: latestOfKind(candidates.data, "whale", adaptWhale),
         squeezes: latestOfKind(candidates.data, "squeeze", adaptSqueeze),
       });
+      // A failed backtest read is deliberately NOT folded into `ereborError`:
+      // that string drives the panels' empty-state copy, and a missing report
+      // card would otherwise be reported to the trader as a broken screen.
+      const newest = (kind) =>
+        (backtests.data || []).find((b) => b.kind === kind) || null;
+      setEreborBacktests({ whale: newest("whale"), squeeze: newest("squeeze") });
     })();
   }, [session]);
 
@@ -7774,6 +7979,7 @@ export default function Smaug() {
             ereborPanels={ereborPanels}
             ereborRun={ereborRun}
             ereborError={ereborError}
+            ereborBacktests={ereborBacktests}
           />
         )}
         {tab === "Dashboard" && (

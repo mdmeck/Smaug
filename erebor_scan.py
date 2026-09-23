@@ -265,6 +265,18 @@ def load_prior_episode_anchors(kind, before_date):
     return out
 
 
+def upsert_backtest(row):
+    """Upsert on (user_id, as_of, kind, score_version)."""
+    resp = requests.post(
+        f"{SUPABASE_URL}/rest/v1/erebor_backtests",
+        headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+        params={"on_conflict": "user_id,as_of,kind,score_version"},
+        json=[row],
+        timeout=REQUEST_TIMEOUT,
+    )
+    _raise_for_status(resp)
+
+
 def patch_snapshot(row_id, fields):
     resp = requests.patch(
         f"{SUPABASE_URL}/rest/v1/erebor_snapshots",
@@ -507,6 +519,12 @@ SCORE_RAMPS = {
 # POP_WINDOW sessions clearing POP_THRESHOLD_PCT above the snapshot price.
 POP_WINDOW = 5
 POP_THRESHOLD_PCT = 15.0
+
+# Below this many scored-and-resolved snapshots, the backtest is plumbing
+# rather than evidence, and both the terminal and the panel say so. Roughly a
+# quarter of daily scans — picked to be honest about how long this takes, not
+# to be reachable soon.
+BACKTEST_MIN_N = 30
 
 
 def _ramp(x, lo, hi):
@@ -787,6 +805,68 @@ WHALE_MIN_DAYS = 7        # skip expiries closer than this
 WHALE_MIN_VOLUME = 2000   # contracts; below this vol/OI is noise on a tiny book
 MAX_WHALES = 8
 
+# Whale score. Same contract as the squeeze score — 0-100, versioned, derived
+# only from figures stored on the row — but the evidence behind it is THINNER
+# and the weights should be trusted less until the backtest speaks.
+#
+# What the literature actually supports: Pan & Poteshman (2006) find that
+# put-call ratios built from option volume *initiated by buyers to open new
+# positions* predict returns — low P/C beat high P/C by ~40bp the next day and
+# over 1% the next week, and the effect is strongest where leverage is highest.
+# That is a real result, and it is not quite what this screen measures.
+# yfinance publishes total contract volume, with no buy/sell initiation and no
+# open/close flag, so:
+#   - the call share here is a crude stand-in for their P/C, polluted by
+#     sellers and by closing trades;
+#   - volume over open interest is a proxy for "these are NEW positions",
+#     which is the part their result actually turns on.
+# Both proxies point the right way, neither is the measured quantity. That gap
+# is the known weakness of this score, the same way a missing borrow fee is
+# the squeeze score's.
+#
+# NOTE ON DIRECTION: this scores signal STRENGTH, not bullishness. A bearish
+# name with a high score is a strong bearish read. `lean` carries the sign and
+# the backtest scores each row in its own direction — a bearish flag that fell
+# is a hit, not a miss.
+#
+#   newness     volume / open interest   0.2 -> 0, 1.5 -> 1
+#   conviction  |call share - 0.5| * 2   0.3 -> 0, 0.9 -> 1  (0.65/0.35 bands
+#               are already required upstream, so this grades past the gate)
+#   size        total contracts          2k  -> 0, 50k -> 1  (log-scaled: the
+#               step from 2k to 10k means far more than 42k to 50k)
+WHALE_SCORE_VERSION = "wh1"
+WHALE_SCORE_WEIGHTS = {"newness": 40, "conviction": 35, "size": 25}
+WHALE_SCORE_RAMPS = {
+    "newness": (0.2, 1.5),
+    "conviction": (0.3, 0.9),
+}
+WHALE_SIZE_RAMP = (2_000.0, 50_000.0)
+
+
+def score_whale(metrics):
+    """Returns (score, parts) for a whale row's metrics, or (None, {}) when the
+    volume/OI reading that the whole screen rests on is missing."""
+    vol, oi = metrics.get("volume"), metrics.get("open_interest")
+    if not vol or not oi:
+        return None, {}
+    cv, pv = metrics.get("call_volume") or 0, metrics.get("put_volume") or 0
+    total = cv + pv
+    conviction = abs(cv / total - 0.5) * 2 if total else None
+    parts = {
+        "newness": _ramp(vol / oi, *WHALE_SCORE_RAMPS["newness"]),
+        "conviction": _ramp(conviction, *WHALE_SCORE_RAMPS["conviction"]),
+        # Log-scaled: doubling a small book is a real change, adding the same
+        # contracts to an already-huge one is not.
+        "size": _ramp(
+            math.log10(max(vol, 1.0)),
+            math.log10(WHALE_SIZE_RAMP[0]),
+            math.log10(WHALE_SIZE_RAMP[1]),
+        ),
+    }
+    total_score = sum(WHALE_SCORE_WEIGHTS[k] * (v or 0.0) for k, v in parts.items())
+    parts = {k: (None if v is None else round(v, 3)) for k, v in parts.items()}
+    return round(total_score, 1), parts
+
 # WHALE_MIN_DAYS exists because the first version of this screen ranked TSLA,
 # AAPL, AMZN, GOOGL and META at the top every day. Names with daily expiries
 # turn over more than their open interest in the front week as a matter of
@@ -884,10 +964,7 @@ def screen_whale(owner, flow, failures, session_date):
                 "company": "",
                 "price": None,
                 "price_as_of": None,
-                # NULL: the panel computes the multiple from the two raw
-                # figures it can show, and nothing has been backtested against
-                # a whale composite yet. Snapshots are kept so one could be.
-                "score": None,
+                "score": None,   # filled just below, once metrics exist
                 "metrics": {
                     "lean": lean,
                     "volume": vol,
@@ -902,7 +979,16 @@ def screen_whale(owner, flow, failures, session_date):
             }
         )
 
-    rows.sort(key=lambda r: -r["metrics"]["vol_oi_ratio"])
+    for r in rows:
+        score, parts = score_whale(r["metrics"])
+        r["score"] = score
+        r["metrics"]["score_version"] = WHALE_SCORE_VERSION
+        r["metrics"]["score_parts"] = parts
+
+    # Ranked by score rather than by the raw multiple: a 3x on 2,100 contracts
+    # and a 3x on 60,000 are not the same event, and the multiple alone put
+    # them level.
+    rows.sort(key=lambda r: -(r["score"] or 0))
     return rows[:MAX_WHALES], sources, errors
 
 
@@ -1081,71 +1167,136 @@ def _spearman(xs, ys):
     return cov / math.sqrt(vx * vy) if vx and vy else None
 
 
-def backtest(kind="squeeze"):
-    """Did the score predict a pop? Prints, writes nothing.
+# Which raw inputs the per-kind correlation table reports alongside the score.
+BACKTEST_RAW_FIELDS = {
+    "squeeze": ("short_percent_float", "days_to_cover"),
+    "whale": ("vol_oi_ratio", "volume"),
+}
 
-    Reads every scored snapshot with an outcome and reports the pop rate by
-    score tercile, the rank correlation of score (and each part) with the
-    forward max return, and the same for the raw inputs. Terciles rather than
-    deciles because the table will be small for months; splitting 40 rows ten
-    ways would just be reading noise.
+
+def _directional(outcome, kind, metrics):
+    """The forward return in the direction the screen actually flagged.
+
+    A squeeze flag is always a bet on up. A whale flag is not: a bearish name
+    that fell is a correct call, and scoring it on its maximum HIGH would file
+    every good bearish read as a miss. `lean` carries the sign, so it is
+    applied here rather than in compute_outcome() — the outcome stays a plain
+    record of what the price did, and each screen interprets it.
+
+    Returns (return_pct, return_vs_spy_pct_or_None).
     """
+    spy = outcome.get("spy_ret_close_pct")
+    if kind == "whale" and metrics.get("lean") == "bearish":
+        r = -outcome["ret_min_pct"]
+        return r, (None if spy is None else r + spy)
+    r = outcome["ret_max_pct"]
+    return r, (None if spy is None else r - spy)
+
+
+def backtest(kind="squeeze", quiet=False):
+    """Did the score predict a move in the direction it flagged?
+
+    Reads every scored snapshot with an outcome and reports the hit rate by
+    score tercile, the rank correlation of score (and each part) with the
+    forward directional return, and the same for the raw inputs. Terciles
+    rather than deciles because the table will be small for months; splitting
+    40 rows ten ways would just be reading noise.
+
+    Returns the report as a dict so the daily scan can store it, and prints it
+    unless `quiet`. Writes nothing itself.
+    """
+    say = (lambda *a: None) if quiet else print
     rows = [
         r for r in load_snapshots({"kind": f"eq.{kind}", "outcome": "not.is.null"})
         if r.get("score") is not None and r.get("outcome")
     ]
     if not rows:
-        print(f"[erebor] backtest: no scored {kind} snapshots with outcomes yet")
-        return
+        say(f"[erebor] backtest: no scored {kind} snapshots with outcomes yet")
+        return None
     versions = sorted({r.get("score_version") or "?" for r in rows})
-    print(f"[erebor] backtest: {len(rows)} {kind} snapshot(s), score version(s) {versions}")
+    say(f"[erebor] backtest: {len(rows)} {kind} snapshot(s), score version(s) {versions}")
     if len(versions) > 1:
-        print("  WARNING: mixed score versions — the formula changed mid-series;"
-              " read per-version numbers, not the pooled ones.")
+        say("  WARNING: mixed score versions — the formula changed mid-series;"
+            " read per-version numbers, not the pooled ones.")
 
     scores = [r["score"] for r in rows]
-    ret = [r["outcome"]["ret_max_pct"] for r in rows]
-    pops = [1 if r["outcome"]["pop"] else 0 for r in rows]
+    pairs = [_directional(r["outcome"], kind, r.get("metrics") or {}) for r in rows]
+    ret = [p[0] for p in pairs]
+    ret_spy = [p[1] for p in pairs]
     thr = rows[0]["outcome"].get("threshold_pct", POP_THRESHOLD_PCT)
     win = rows[0]["outcome"].get("window", POP_WINDOW)
-    print(f"  pop = max high >= +{thr:.0f}% within {win} sessions;"
-          f" base rate {sum(pops) / len(pops):.0%}")
+    hits = [1 if r >= thr else 0 for r in ret]
+    base = sum(hits) / len(hits)
+    direction = "in the flagged direction" if kind == "whale" else "max high"
+    say(f"  hit = {direction} >= +{thr:.0f}% within {win} sessions;"
+        f" base rate {base:.0%}")
 
     order = sorted(range(len(rows)), key=lambda i: scores[i])
     thirds = [order[: len(order) // 3], order[len(order) // 3: 2 * len(order) // 3],
               order[2 * len(order) // 3:]]
-    print("  score tercile      n   pop rate   median max ret")
+    terciles = []
+    say("  score tercile      n   hit rate   median ret   vs SPY")
     for label, idx in zip(("low", "mid", "high"), thirds):
         if not idx:
             continue
         rr = sorted(ret[i] for i in idx)
         med = rr[len(rr) // 2]
-        rate = sum(pops[i] for i in idx) / len(idx)
+        adj = [ret_spy[i] for i in idx if ret_spy[i] is not None]
+        med_adj = sorted(adj)[len(adj) // 2] if adj else None
+        rate = sum(hits[i] for i in idx) / len(idx)
         lo, hi = scores[idx[0]], scores[idx[-1]]
-        print(f"  {label:<5} {lo:5.1f}-{hi:5.1f} {len(idx):4d}   {rate:7.0%}   {med:+8.1f}%")
+        terciles.append({"band": label, "score_lo": lo, "score_hi": hi, "n": len(idx),
+                         "hit_rate": round(rate, 3), "median_ret_pct": round(med, 2),
+                         "median_ret_vs_spy_pct": None if med_adj is None else round(med_adj, 2)})
+        say(f"  {label:<5} {lo:5.1f}-{hi:5.1f} {len(idx):4d}   {rate:7.0%}   {med:+8.1f}%   "
+            + ("     —" if med_adj is None else f"{med_adj:+6.1f}%"))
 
-    print("  spearman vs max return:")
-    rho = _spearman(scores, ret)
-    print(f"    score            {rho:+.2f}" if rho is not None else "    score            n/a")
-    for part in SCORE_WEIGHTS:
-        xs = [(r["metrics"].get("score_parts") or {}).get(part) for r in rows]
+    def rho_of(xs):
         keep = [i for i, x in enumerate(xs) if x is not None]
-        rho = _spearman([xs[i] for i in keep], [ret[i] for i in keep])
-        print(f"    part {part:<12}{rho:+.2f}  (n={len(keep)})" if rho is not None
-              else f"    part {part:<12}n/a")
-    for raw in ("short_percent_float", "days_to_cover"):
-        xs = [r["metrics"].get(raw) for r in rows]
-        keep = [i for i, x in enumerate(xs) if x is not None]
-        rho = _spearman([xs[i] for i in keep], [ret[i] for i in keep])
-        print(f"    raw  {raw:<20}{rho:+.2f}  (n={len(keep)})" if rho is not None
-              else f"    raw  {raw:<20}n/a")
-    if len(rows) < 30:
-        print(f"  ({len(rows)} rows is too few to trust any of this; it is a smoke test"
-              " of the plumbing until the table has a few months in it)")
-    report_episodes(kind)
+        return _spearman([xs[i] for i in keep], [ret[i] for i in keep]), len(keep)
+
+    say("  spearman vs directional return:")
+    corr = {}
+    r0, n0 = rho_of(scores)
+    corr["score"] = {"rho": None if r0 is None else round(r0, 3), "n": n0}
+    say(f"    score            {r0:+.2f}" if r0 is not None else "    score            n/a")
+    weights = WHALE_SCORE_WEIGHTS if kind == "whale" else SCORE_WEIGHTS
+    for part in weights:
+        r1, n1 = rho_of([(r["metrics"].get("score_parts") or {}).get(part) for r in rows])
+        corr[f"part.{part}"] = {"rho": None if r1 is None else round(r1, 3), "n": n1}
+        say(f"    part {part:<12}{r1:+.2f}  (n={n1})" if r1 is not None
+            else f"    part {part:<12}n/a")
+    for raw in BACKTEST_RAW_FIELDS.get(kind, ()):
+        r2, n2 = rho_of([r["metrics"].get(raw) for r in rows])
+        corr[f"raw.{raw}"] = {"rho": None if r2 is None else round(r2, 3), "n": n2}
+        say(f"    raw  {raw:<20}{r2:+.2f}  (n={n2})" if r2 is not None
+            else f"    raw  {raw:<20}n/a")
+
+    # Stated in the report itself, not just at the terminal, because the panel
+    # renders this and "n=14" has to arrive with its own health warning.
+    trustworthy = len(rows) >= BACKTEST_MIN_N
+    if not trustworthy:
+        say(f"  ({len(rows)} rows is too few to trust any of this; it is a smoke test"
+            f" of the plumbing until there are {BACKTEST_MIN_N}+)")
+
+    episodes = report_episodes(kind, quiet=quiet) if kind == "squeeze" else None
+    return {
+        "kind": kind,
+        "n": len(rows),
+        "score_versions": versions,
+        "mixed_versions": len(versions) > 1,
+        "window": win,
+        "threshold_pct": thr,
+        "base_rate": round(base, 3),
+        "min_n": BACKTEST_MIN_N,
+        "trustworthy": trustworthy,
+        "terciles": terciles,
+        "spearman": corr,
+        "episodes": episodes,
+    }
 
 
-def report_episodes(kind="squeeze"):
+def report_episodes(kind="squeeze", quiet=False):
     """Per listing episode: how long a name stayed on the screen and what it
     did from its anchor — including after it dropped off.
 
@@ -1155,16 +1306,18 @@ def report_episodes(kind="squeeze"):
     leave the screen partly *because* they worked, so a reading taken over
     current members is biased toward the ones that did nothing.
     """
+    say = (lambda *a: None) if quiet else print
     rows = [r for r in load_snapshots({"kind": f"eq.{kind}"}) if r.get("episode_start")]
     if not rows:
-        print("  episodes: no anchored snapshots yet")
-        return
+        say("  episodes: no anchored snapshots yet")
+        return []
     eps = {}
     for r in rows:
         eps.setdefault((r["ticker"], r["episode_start"]), []).append(r)
 
-    print(f"  {len(eps)} listing episode(s):")
-    print("  ticker  anchored     days  peak score   since anchor   vs SPY   fwd max")
+    say(f"  {len(eps)} listing episode(s):")
+    say("  ticker  anchored     days  peak score   since anchor   vs SPY   fwd max")
+    out = []
     for (t, start), rs in sorted(eps.items(), key=lambda kv: kv[0][1], reverse=True)[:25]:
         rs.sort(key=lambda r: r["run_date"])
         anchor, last = rs[0].get("anchor_price"), rs[-1]
@@ -1179,9 +1332,65 @@ def report_episodes(kind="squeeze"):
         # end of the episode, which is exactly where a squeeze tends to land.
         fwd = (last.get("outcome") or {}).get("ret_max_pct")
         fmt = lambda v, suf="%": "     —" if v is None else f"{v:+6.1f}{suf}"
-        print(f"  {t:<7} {start}  {len(rs):4d}  "
-              f"{'    —' if peak is None else f'{peak:9.1f}'}   "
-              f"{fmt(drift)}  {fmt(vs_spy)}  {fmt(fwd)}")
+        say(f"  {t:<7} {start}  {len(rs):4d}  "
+            f"{'    —' if peak is None else f'{peak:9.1f}'}   "
+            f"{fmt(drift)}  {fmt(vs_spy)}  {fmt(fwd)}")
+        out.append({
+            "ticker": t, "episode_start": start, "scans": len(rs),
+            "peak_score": peak,
+            "drift_pct": None if drift is None else round(drift, 2),
+            "drift_vs_spy_pct": None if vs_spy is None else round(vs_spy, 2),
+            "forward_max_pct": fwd,
+            "last_run_date": last["run_date"],
+        })
+    return out
+
+
+def store_backtests(owner, as_of, kinds=("squeeze", "whale")):
+    """Compute and store the report card for each scored kind.
+
+    Keyed by score_version as well as by day, so switching formulas leaves the
+    old version's row standing rather than overwriting it with numbers built
+    from a different score. A run whose snapshots span two versions is stored
+    under a joined key and flagged `mixed_versions` in the report — the panel
+    is expected to say so rather than draw the pooled figure as if it meant
+    something.
+    """
+    stored = 0
+    for kind in kinds:
+        report = backtest(kind, quiet=True)
+        if not report:
+            continue
+        upsert_backtest(
+            {
+                "user_id": owner,
+                "as_of": as_of,
+                "kind": kind,
+                "score_version": "+".join(report["score_versions"]),
+                "n": report["n"],
+                "base_rate": report["base_rate"],
+                "trustworthy": report["trustworthy"],
+                "report": _json_safe_deep(report),
+            }
+        )
+        stored += 1
+        print(f"[erebor] backtest stored: {kind} n={report['n']} "
+              f"base {report['base_rate']:.0%} "
+              f"{'' if report['trustworthy'] else '(below trust threshold)'}")
+    if not stored:
+        print("[erebor] backtest: nothing resolved yet, no report stored")
+    return stored
+
+
+def _json_safe_deep(v):
+    """_json_safe over a nested structure. The report is built from measured
+    floats and a stray inf or NaN anywhere in it would have PostgREST reject
+    the whole row, which is the same failure mode _json_safe exists for."""
+    if isinstance(v, dict):
+        return {k: _json_safe_deep(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_json_safe_deep(x) for x in v]
+    return _json_safe(v)
 
 
 # ----------------------------------------------------------------------
@@ -1369,6 +1578,15 @@ def run(dry_run=False):
     except Exception as exc:  # noqa: BLE001
         print(f"[erebor] outcomes failed: {type(exc).__name__}: {exc}", file=sys.stderr)
 
+    # The report card, recomputed and stored every run so the panel can show it
+    # without anyone opening a terminal. Runs after the outcome pass so it sees
+    # today's fills. Wrapped for the same reason: a broken report is not worth
+    # a failed scan, and the row simply stays at yesterday's version.
+    try:
+        store_backtests(owner, as_of)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[erebor] backtest store failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+
 
 def main():
     ap = argparse.ArgumentParser(description="Erebor single-name event screen.")
@@ -1391,7 +1609,8 @@ def main():
     )
     args = ap.parse_args()
     if args.backtest:
-        backtest()
+        backtest("squeeze")
+        backtest("whale")
     elif args.outcomes:
         fill_outcomes(dry_run=args.dry_run)
     else:
