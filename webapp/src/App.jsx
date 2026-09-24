@@ -1463,6 +1463,15 @@ function whaleItems(whales) {
         // Which denominator the multiple used, so the column header can name
         // it. Never blended: "x avg" and "x OI" are different measurements.
         basis,
+        // The two figures the flow sentence carried that no other column does.
+        calls: countValue(w.call_volume),
+        puts: countValue(w.put_volume),
+        // "2026-10-02 to 2026-10-16", or the single date when there is one.
+        expiries: Array.isArray(w.expiries)
+          ? w.expiries.length > 1
+            ? `${w.expiries[0]} to ${w.expiries[w.expiries.length - 1]}`
+            : asText(w.expiries[0])
+          : asText(w.expiries),
         score: numValue(w.score),
         // Signal STRENGTH, not bullishness — `lean` carries the sign. A
         // bearish name with a high score is a strong bearish read.
@@ -1557,6 +1566,9 @@ function adaptWhale(row) {
     volume: m.volume,
     avg_volume: m.avg_volume,
     open_interest: m.open_interest,
+    call_volume: m.call_volume,
+    put_volume: m.put_volume,
+    expiries: m.expiries,
     flow: m.flow,
     note: row.note,
     score: row.score,
@@ -1785,12 +1797,13 @@ function WhaleActionPanel({ whales, run, error, backtest }) {
         <div style={gridScroll}>
           <table style={gridWrap}>
             <colgroup>
-              <col style={{ width: "13%" }} />
+              <col style={{ width: "10%" }} />
               <col style={{ width: "11%" }} />
-              <col style={{ width: "9%" }} />
-              <col style={{ width: "13%" }} />
+              <col style={{ width: "8%" }} />
               <col style={{ width: "12%" }} />
-              <col style={{ width: "42%" }} />
+              <col style={{ width: "10%" }} />
+              <col style={{ width: "21%" }} />
+              <col style={{ width: "28%" }} />
             </colgroup>
             <thead>
               <tr>
@@ -1799,7 +1812,8 @@ function WhaleActionPanel({ whales, run, error, backtest }) {
                 <th style={gridHead("right")}>Score</th>
                 <th style={gridHead("right")}>Volume</th>
                 <th style={gridHead("right")}>vs {items[0].basis === "avg" ? "avg" : "OI"}</th>
-                <th style={gridHead()}>Flow</th>
+                <th style={gridHead("right")}>Calls / puts</th>
+                <th style={gridHead()}>Expiries</th>
               </tr>
             </thead>
             <tbody>
@@ -1821,20 +1835,32 @@ function WhaleActionPanel({ whales, run, error, backtest }) {
                   <td style={gridCell("right")}>
                     {w.mult === null ? "\u2014" : `${w.mult.toFixed(2)}\u00d7`}
                   </td>
+                  {/* The stored `flow` sentence restated Volume and vs-OI,
+                      which a card had to do and a grid must not: three columns
+                      saying the same thing is how a table stops being read.
+                      Its two remaining facts get columns of their own, and the
+                      full sentence survives as the row's tooltip so nothing
+                      the scan wrote is lost. */}
+                  <td style={gridCell("right")} title={w.flow}>
+                    {w.calls === null || w.puts === null
+                      ? "\u2014"
+                      : `${countText(w.calls)} / ${countText(w.puts)}`}
+                  </td>
                   <td
                     style={{
                       ...gridCell(),
-                      fontFamily: B.sans,
+                      fontFamily: B.mono,
                       fontWeight: 400,
-                      fontSize: 12.5,
-                      color: B.muted,
+                      fontSize: 11.5,
+                      color: B.dim,
                       whiteSpace: "normal",
                       lineHeight: 1.45,
                     }}
+                    title={w.flow}
                   >
-                    {w.flow || "\u2014"}
+                    {w.expiries || "\u2014"}
                     {w.note && (
-                      <div style={{ color: B.dim, marginTop: 4 }}>{w.note}</div>
+                      <div style={{ color: B.muted, marginTop: 4 }}>{w.note}</div>
                     )}
                     {/* only when the header can't speak for every row — one
                         date in two places is noise, one date standing for two
@@ -1979,16 +2005,32 @@ function episodeOf(raw) {
   const anchor = numValue(e.anchor_price);
   const days = numValue(e.days);
   if (!start) return null;
-  return { start, anchor, days, anchorSpy: numValue(e.anchor_spy), spy: numValue(e.spy) };
+  return {
+    start,
+    anchor,
+    days,
+    anchorSpy: numValue(e.anchor_spy),
+    spy: numValue(e.spy),
+    // The session the anchor price came from. Needed to tell a stock that
+    // went nowhere from one that has not printed a new close yet.
+    anchorPxAsOf: asText(e.anchor_px_as_of).trim(),
+  };
 }
 
 // Needs the row's current price, so it can't live inside episodeOf().
+//
+// `stale` is the case that matters. A scan run before the open re-reads the
+// previous close, so a name on its second scan can be priced off the very
+// session it was anchored on. The arithmetic then yields exactly 0.0%, which
+// renders as "went nowhere" when the truth is "no new close yet" — opposite
+// readings to a trader watching for confirmation.
 function episodeDrift(s) {
   const e = s.episode;
   if (!e || !e.anchor || s.price === null) return null;
+  const stale = Boolean(e.anchorPxAsOf && s.pxAsOf && e.anchorPxAsOf === s.pxAsOf);
   const pct = (s.price / e.anchor - 1) * 100;
   const tape = e.anchorSpy && e.spy ? (e.spy / e.anchorSpy - 1) * 100 : null;
-  return { pct, vsSpy: tape === null ? null : pct - tape };
+  return { pct, vsSpy: tape === null ? null : pct - tape, stale };
 }
 
 function buzzOf(raw) {
@@ -2179,18 +2221,25 @@ function BuzzChip({ buzz }) {
 // since the anchor does carry a direction.
 function DriftChip({ s, drift }) {
   const first = s.episode.days !== null && s.episode.days <= 1;
+  // Nothing to report: either day one, or no new close since the anchor.
+  const quiet = first || drift.stale;
   const up = drift.pct >= 0;
   // Same text-safe pair the Dashboard's figures use; B.green / B.red are dot
   // colors and read poorly at 11px.
-  const tone = first ? B.muted : up ? B.greenText : "oklch(0.75 0.18 25)";
+  const tone = quiet ? B.muted : up ? B.greenText : "oklch(0.75 0.18 25)";
   const body = first
     ? "listed today"
+    : drift.stale
+    ? "no new close"
     : `${up ? "+" : "\u2212"}${Math.abs(drift.pct).toFixed(1)}% since listed`;
   return (
     <span
       title={
         first
           ? `First appeared ${dayLabel(s.episode.start)}`
+          : drift.stale
+          ? `Anchored ${dayLabel(s.episode.start)} at ${priceText(s.episode.anchor)}` +
+            ` \u00b7 still priced off that same session (${dayLabel(s.pxAsOf)}) \u2014 no move to report yet`
           : `Anchored ${dayLabel(s.episode.start)} at ${priceText(s.episode.anchor)}` +
             ` \u00b7 ${s.episode.days} scan${s.episode.days === 1 ? "" : "s"} listed` +
             (drift.vsSpy === null ? "" : ` \u00b7 SPY-adjusted ${drift.vsSpy >= 0 ? "+" : "\u2212"}${Math.abs(drift.vsSpy).toFixed(1)}%`)
@@ -2210,7 +2259,7 @@ function DriftChip({ s, drift }) {
       }}
     >
       {body}
-      {!first && drift.vsSpy !== null && (
+      {!quiet && drift.vsSpy !== null && (
         // The tape-adjusted figure is the one that says whether anything
         // name-specific happened, so it sits right next to the raw move
         // rather than hiding in the tooltip.
@@ -2230,8 +2279,8 @@ function DriftChip({ s, drift }) {
 function SqueezeRow({ s, showOwnDates }) {
   const drift = episodeDrift(s);
   const dates = [
-    s.asOf ? `SI ${dayLabel(s.asOf)}` : "",
-    s.pxAsOf ? `PX ${dayLabel(s.pxAsOf)}` : "",
+    showOwnDates.si && s.asOf ? `SI ${dayLabel(s.asOf)}` : "",
+    showOwnDates.px && s.pxAsOf ? `PX ${dayLabel(s.pxAsOf)}` : "",
   ].filter(Boolean);
   return (
     <>
@@ -2280,7 +2329,7 @@ function SqueezeRow({ s, showOwnDates }) {
       {/* A note or a disagreeing date gets its own full-width line under the
           row rather than a column, because both are prose-shaped and would
           force every numeric column narrower to fit the longest one. */}
-      {(s.note || (showOwnDates && dates.length > 0)) && (
+      {(s.note || dates.length > 0) && (
         <tr>
           <td
             colSpan={6}
@@ -2294,7 +2343,7 @@ function SqueezeRow({ s, showOwnDates }) {
                 {s.note}
               </div>
             )}
-            {showOwnDates && dates.length > 0 && (
+            {dates.length > 0 && (
               <div
                 style={{
                   fontFamily: B.mono,
@@ -2355,8 +2404,11 @@ function SqueezePanel({ squeezes, run, error, backtest }) {
       stale: daysOld(buzzCommon) > PX_STALE_DAYS,
     });
 
-  // Tiles repeat the dates only when the header can't speak for every row.
-  const showOwnDates = !siCommon || !pxCommon;
+  // Rows repeat a date only for the vintage the header can't speak for. When
+  // every settlement agrees but the prices don't, stamping "SI AUG 31" on all
+  // 52 rows is pure noise — the header already said it once, and the eye has
+  // to find the one column that actually varies.
+  const showOwnDates = { si: !siCommon, px: !pxCommon };
 
   const Section = ({ label, hint, rows, empty }) => (
     <div>

@@ -153,6 +153,45 @@ def upsert_candidates(rows):
     _raise_for_status(resp)
 
 
+def prune_candidates(owner, kind, as_ofs, keep_tickers):
+    """Delete this kind's rows at `as_ofs` whose ticker is not in the current
+    screen. Returns the number of rows removed.
+
+    `erebor_candidates` is keyed on the DATA's date, which for a squeeze is the
+    short-interest settlement — the same date for two to four weeks. Upserting
+    each run therefore corrected the tickers it re-screened and left every
+    ticker it no longer screened sitting there. By 2026-09-23 the panel was
+    drawing 52 names under one Aug 31 settlement, 40 of them dropped from the
+    universe days earlier and carrying prices up to five sessions stale, and
+    the trader had no way to tell them from the 12 the screen actually found.
+
+    So this table means "the current screen" and the pruning is what makes it
+    true. History is not lost: `erebor_snapshots` keeps every run's reading
+    keyed on the run date, which is what the backtest reads.
+
+    Only ever called with a non-empty `keep_tickers` — a screen whose source
+    broke returns no rows, and wiping the panel on a dead feed would turn a
+    visible failure into an empty one.
+    """
+    if not as_ofs or not keep_tickers:
+        return 0
+    quoted = ",".join(f'"{t}"' for t in sorted(keep_tickers))
+    resp = requests.delete(
+        f"{SUPABASE_URL}/rest/v1/erebor_candidates",
+        headers=_supabase_headers(prefer="return=representation"),
+        params={
+            "user_id": f"eq.{owner}",
+            "kind": f"eq.{kind}",
+            "as_of": f"in.({','.join(sorted(as_ofs))})",
+            "ticker": f"not.in.({quoted})",
+            "select": "ticker",
+        },
+        timeout=REQUEST_TIMEOUT,
+    )
+    _raise_for_status(resp)
+    return len(resp.json())
+
+
 def upsert_run(row):
     """One row per user per day, recording that a scan happened at all.
 
@@ -256,6 +295,7 @@ def load_prior_episode_anchors(kind, before_date):
             "episode_start": r["episode_start"],
             "anchor_price": r.get("anchor_price"),
             "anchor_spy": r.get("anchor_spy"),
+            "anchor_px_as_of": ep.get("anchor_px_as_of"),
             # Scans the name has been listed for, not calendar days: a holiday
             # or a skipped run should not inflate how long a setup has been
             # sitting there. Carried rather than counted so the panel needs no
@@ -1540,15 +1580,38 @@ def run(dry_run=False):
         if c["kind"] != "squeeze":
             continue
         prev = anchors.get(c["ticker"])
-        c["metrics"]["episode"] = {
+        ep = {
             "start": prev["episode_start"] if prev else as_of,
             "anchor_price": _json_safe(prev["anchor_price"] if prev else c["price"]),
             "anchor_spy": _json_safe(prev["anchor_spy"] if prev else spy_close),
             "spy": _json_safe(spy_close),
             "days": (prev["days"] + 1) if prev else 1,
         }
+        # The SESSION the anchor price came from, not the day it was recorded.
+        # A scan run before the open re-reads the previous close, so a name on
+        # its second scan can be priced off the same session it was anchored
+        # on — and a drift computed across that is structurally 0.0%, which
+        # reads as "went nowhere" when it means "no new close yet".
+        ep["anchor_px_as_of"] = (
+            prev.get("anchor_px_as_of") if prev else c.get("price_as_of")
+        )
+        c["metrics"]["episode"] = ep
 
     upsert_candidates(candidates)
+
+    # Now that this run's rows are in, drop the ones it superseded. After the
+    # write rather than before, so a failure here leaves a panel with extra
+    # names rather than no names.
+    for kind in ("squeeze", "whale", "merger_arb"):
+        mine = [c for c in candidates if c["kind"] == kind]
+        if not mine:
+            continue  # source broke or screen was clean; never wipe on that
+        removed = prune_candidates(
+            owner, kind, {c["as_of"] for c in mine}, {c["ticker"] for c in mine}
+        )
+        if removed:
+            print(f"[erebor] pruned {removed} superseded {kind} row(s)")
+
     snaps = snapshot_rows(candidates, as_of, anchors, spy_close)
     upsert_snapshots(snaps)
     fresh = sum(1 for r in snaps if r["kind"] == "squeeze" and r["episode_start"] == as_of)
