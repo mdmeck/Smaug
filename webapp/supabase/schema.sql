@@ -352,6 +352,10 @@ create table if not exists erebor_candidates (
   --               share — single-name option volume is structurally
   --               call-heavy and the raw share made the panel bullish on
   --               every row. `lean_basis` says which rule judged the row.
+  --               Also top {side, strike, expiry, volume, open_interest, iv,
+  --               last} (the single busiest contract), earnings_date (next
+  --               report, absent for ETFs), and episode (same shape as
+  --               squeeze's) so the panel can show the move since flagged.
   metrics jsonb not null default '{}'::jsonb,
   note text default '',
   created_at timestamptz not null default now()
