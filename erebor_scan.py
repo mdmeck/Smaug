@@ -783,7 +783,14 @@ def screen_squeeze(owner, universe, flow=None):
         if f:
             metrics["call_vol"] = f["call_volume"]
             metrics["call_oi"] = f["call_oi"]
-            metrics["flow_lean"] = _lean(f["call_volume"], f["put_volume"])
+            metrics["put_vol"] = f["put_volume"]
+            metrics["put_oi"] = f["put_oi"]
+            lean, skew, basis = _lean(
+                f["call_volume"], f["put_volume"], f["call_oi"], f["put_oi"]
+            )
+            metrics["flow_lean"] = lean
+            metrics["flow_skew"] = skew
+            metrics["flow_basis"] = basis
         score, parts = score_squeeze(metrics)
         metrics["score_version"] = SCORE_VERSION
         metrics["score_parts"] = parts
@@ -870,11 +877,13 @@ MAX_WHALES = 8
 # is a hit, not a miss.
 #
 #   newness     volume / open interest   0.2 -> 0, 1.5 -> 1
-#   conviction  |call share - 0.5| * 2   0.3 -> 0, 0.9 -> 1  (0.65/0.35 bands
-#               are already required upstream, so this grades past the gate)
+#   conviction  |lean skew - 0.5| * 2    0.3 -> 0, 0.9 -> 1  (0.65/0.35 bands
+#               are already required upstream, so this grades past the gate).
+#               wh2: the skew is each side's volume over its OWN open interest,
+#               not the raw call share — see _lean().
 #   size        total contracts          2k  -> 0, 50k -> 1  (log-scaled: the
 #               step from 2k to 10k means far more than 42k to 50k)
-WHALE_SCORE_VERSION = "wh1"
+WHALE_SCORE_VERSION = "wh2"
 WHALE_SCORE_WEIGHTS = {"newness": 40, "conviction": 35, "size": 25}
 WHALE_SCORE_RAMPS = {
     "newness": (0.2, 1.5),
@@ -889,9 +898,15 @@ def score_whale(metrics):
     vol, oi = metrics.get("volume"), metrics.get("open_interest")
     if not vol or not oi:
         return None, {}
-    cv, pv = metrics.get("call_volume") or 0, metrics.get("put_volume") or 0
-    total = cv + pv
-    conviction = abs(cv / total - 0.5) * 2 if total else None
+    # Grade the same quantity the lean was judged on, or the two disagree:
+    # under wh1 this used the raw volume share while the lean used it too, and
+    # both carried the call-heavy bias. `lean_skew` is already normalised by
+    # open interest where that was possible, and says so in `lean_basis`.
+    skew = metrics.get("lean_skew")
+    if skew is None:
+        cv, pv = metrics.get("call_volume") or 0, metrics.get("put_volume") or 0
+        skew = cv / (cv + pv) if (cv + pv) else None
+    conviction = abs(skew - 0.5) * 2 if skew is not None else None
     parts = {
         "newness": _ramp(vol / oi, *WHALE_SCORE_RAMPS["newness"]),
         "conviction": _ramp(conviction, *WHALE_SCORE_RAMPS["conviction"]),
@@ -958,13 +973,41 @@ def fetch_option_flow(tickers):
     return data, failures
 
 
-def _lean(cv, pv):
+def _lean(cv, pv, coi=None, poi=None):
+    """(lean, skew, basis) from call/put volume, normalised by open interest.
+
+    The first version compared raw volume: calls >= 65% of contracts was
+    bullish. Single-name equity option volume is structurally call-heavy, so
+    that band mostly detected the baseline — over the first days of readings
+    it returned bullish 19 times, mixed 9 and bearish 3, and the whale panel
+    was bullish on every row it ever drew. A directional screen that only ever
+    says one direction is not discriminating between names, it is reporting
+    what the asset class does.
+
+    So each side is divided by its OWN open interest first, and the sides are
+    compared on that. The question becomes "which side is opening more new
+    positions relative to what is already standing there", which is both free
+    of the level bias and much closer to the quantity with actual evidence
+    behind it — Pan & Poteshman's result is about volume that OPENS positions,
+    not volume in total.
+
+    Falls back to the raw share when either side has no open interest to
+    divide by, and says which rule judged it so a row is never ambiguous.
+    """
     tot = cv + pv
     if tot <= 0:
-        return "mixed"
-    share = cv / tot
+        return "mixed", None, "none"
+    if coi and poi:
+        ct, pt = cv / coi, pv / poi
+        skew = ct / (ct + pt) if (ct + pt) > 0 else None
+        basis = "oi_turnover"
+    else:
+        skew, basis = cv / tot, "volume_share"
+    if skew is None:
+        return "mixed", None, basis
     # Wide bands on purpose: 60/40 is ordinary two-way trade, not a lean.
-    return "bullish" if share >= 0.65 else ("bearish" if share <= 0.35 else "mixed")
+    lean = "bullish" if skew >= 0.65 else ("bearish" if skew <= 0.35 else "mixed")
+    return lean, round(skew, 4), basis
 
 
 def screen_whale(owner, flow, failures, session_date):
@@ -986,7 +1029,9 @@ def screen_whale(owner, flow, failures, session_date):
         if vol < WHALE_MIN_VOLUME or oi <= 0:
             continue
         ratio = vol / oi
-        lean = _lean(d["call_volume"], d["put_volume"])
+        lean, skew, lean_basis = _lean(
+            d["call_volume"], d["put_volume"], d["call_oi"], d["put_oi"]
+        )
         if lean == "mixed":
             continue
         exps = d["expiries"]
@@ -1007,9 +1052,16 @@ def screen_whale(owner, flow, failures, session_date):
                 "score": None,   # filled just below, once metrics exist
                 "metrics": {
                     "lean": lean,
+                    # What the lean was judged on, and by which rule. Stored so
+                    # the call is checkable against the four raw figures beside
+                    # it rather than having to be taken on trust.
+                    "lean_skew": skew,
+                    "lean_basis": lean_basis,
                     "volume": vol,
                     "call_volume": d["call_volume"],
                     "put_volume": d["put_volume"],
+                    "call_oi": d["call_oi"],
+                    "put_oi": d["put_oi"],
                     "open_interest": oi,
                     "vol_oi_ratio": round(ratio, 3),
                     "expiries": d["expiries"],
@@ -1541,6 +1593,23 @@ def run(dry_run=False):
     wh_rows, wh_sources, wh_errors = screen_whale(owner, flow, flow_failures, as_of)
     sources.update(wh_sources)
     errors.extend(wh_errors)
+    # Priced after the cut, so only the names that made the panel cost a
+    # lookup. Without a price a whale snapshot has no base for
+    # compute_outcome(), and every whale row through 2026-09-23 was written
+    # unpriced — the whale report card could never grade a single one.
+    if wh_rows:
+        wh_prices, wh_px_failures = fetch_prices([r["ticker"] for r in wh_rows])
+        sources["yfinance_whale_prices"] = (
+            "ok" if not wh_px_failures
+            else ("failed" if not wh_prices else "partial")
+        )
+        for t, why in sorted(wh_px_failures.items()):
+            errors.append({"ticker": t, "stage": "whale_price", "error": why})
+        for r in wh_rows:
+            q = wh_prices.get(r["ticker"])
+            if q:
+                r["price"] = _json_safe(q["price"])
+                r["price_as_of"] = q["as_of"]
     candidates.extend(wh_rows)
     print(f"[erebor] whale: {len(wh_rows)} name(s) over {len(set(wh_tickers))} looked up")
 
