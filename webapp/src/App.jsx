@@ -1458,6 +1458,8 @@ function whaleItems(whales) {
       return {
         ticker: asText(w.ticker ?? w.symbol).trim().toUpperCase(),
         lean: leanKey(w.lean ?? w.bias ?? w.sentiment ?? w.direction),
+        leanSkew: numValue(w.lean_skew),
+        leanBasis: asText(w.lean_basis).trim(),
         vol,
         mult,
         // Which denominator the multiple used, so the column header can name
@@ -1515,10 +1517,27 @@ function whaleItems(whales) {
 
 // Compact cousin of TonePill — same 14% wash and dot, sized to sit inline with
 // a ticker rather than to head a card.
-function LeanTag({ lean }) {
+//
+// `title` carries what the lean was judged on. The call used to be the raw
+// call share, which is structurally high for single-name equity options and
+// made the panel bullish on every row it drew; it is now each side's volume
+// over its own open interest. Which rule ran is stored per row, so a name
+// whose chain had no put open interest is visibly a fallback rather than
+// quietly judged by a different standard.
+function LeanTag({ lean, skew, basis }) {
   const c = TONE[lean] || TONE.neutral;
+  const label =
+    skew === null || skew === undefined
+      ? undefined
+      : `${Math.round(skew * 100)}% call-side` +
+        (basis === "oi_turnover"
+          ? " (volume over each side's own open interest)"
+          : basis === "volume_share"
+          ? " (raw volume share \u2014 no put open interest to normalise by)"
+          : "");
   return (
     <span
+      title={label}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -1563,6 +1582,8 @@ function adaptWhale(row) {
   return {
     ticker: row.ticker,
     lean: m.lean,
+    lean_skew: m.lean_skew,
+    lean_basis: m.lean_basis,
     volume: m.volume,
     avg_volume: m.avg_volume,
     open_interest: m.open_interest,
@@ -1823,7 +1844,7 @@ function WhaleActionPanel({ whales, run, error, backtest }) {
                     {w.ticker || "\u2014"}
                   </td>
                   <td style={gridCell()}>
-                    <LeanTag lean={w.lean} />
+                    <LeanTag lean={w.lean} skew={w.leanSkew} basis={w.leanBasis} />
                   </td>
                   <td style={gridCell("right")} title={w.scoreTitle}>
                     {w.score === null ? "\u2014" : Math.round(w.score)}

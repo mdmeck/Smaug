@@ -344,8 +344,14 @@ create table if not exists erebor_candidates (
   --               pass, absent when the name has no readable chain),
   --               score_version, score_parts {trapped, fuel, spark,
   --               accelerant, pressing}
-  --   whale:      lean, volume, call_volume, put_volume, open_interest,
-  --               vol_oi_ratio, expiries, flow
+  --   whale:      lean, lean_skew, lean_basis, volume, call_volume,
+  --               put_volume, call_oi, put_oi, open_interest, vol_oi_ratio,
+  --               expiries, flow, score_version, score_parts
+  --               {newness, conviction, size}. `lean_skew` is each side's
+  --               volume over its OWN open interest (wh2), not the raw call
+  --               share — single-name option volume is structurally
+  --               call-heavy and the raw share made the panel bullish on
+  --               every row. `lean_basis` says which rule judged the row.
   metrics jsonb not null default '{}'::jsonb,
   note text default '',
   created_at timestamptz not null default now()
