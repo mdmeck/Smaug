@@ -1255,6 +1255,30 @@ def fill_outcomes(dry_run=False):
     if not pending:
         print("[erebor] outcomes: nothing pending")
         return 0
+
+    # A row with no base price can never be scored — compute_outcome() has
+    # nothing to measure a return against — so it would otherwise sit in the
+    # pending set forever, costing a yfinance fetch every run and adding a
+    # permanent floor to the "still pending" count. A count with junk under it
+    # stops being a number anyone reads. These get a terminal marker instead:
+    # the row is kept, because it is a true record of what the panel showed,
+    # but it stops being asked a question it cannot answer.
+    unscorable = [r for r in pending if not r.get("price")]
+    pending = [r for r in pending if r.get("price")]
+    if unscorable and not dry_run:
+        for r in unscorable:
+            patch_snapshot(
+                r["id"],
+                {
+                    "outcome": {"unscorable": True, "reason": "no base price"},
+                    "outcome_as_of": datetime.now(ZoneInfo("America/New_York")).date().isoformat(),
+                },
+            )
+        print(f"[erebor] outcomes: {len(unscorable)} row(s) marked unscorable (no base price)")
+    if not pending:
+        print("[erebor] outcomes: nothing left pending")
+        return 0
+
     by_ticker = {}
     for r in pending:
         by_ticker.setdefault(r["ticker"], []).append(r)
@@ -1365,7 +1389,11 @@ def backtest(kind="squeeze", quiet=False):
     say = (lambda *a: None) if quiet else print
     rows = [
         r for r in load_snapshots({"kind": f"eq.{kind}", "outcome": "not.is.null"})
-        if r.get("score") is not None and r.get("outcome")
+        # `ret_max_pct` rather than a truthy outcome: an unscorable row carries
+        # a terminal marker, not a reading, and _directional() would raise on
+        # it. Checking for the field keeps the two apart by what is actually
+        # there rather than by a flag that has to be remembered.
+        if r.get("score") is not None and (r.get("outcome") or {}).get("ret_max_pct") is not None
     ]
     if not rows:
         say(f"[erebor] backtest: no scored {kind} snapshots with outcomes yet")
@@ -1487,6 +1515,8 @@ def report_episodes(kind="squeeze", quiet=False):
         peak = max((r["score"] for r in rs if r.get("score") is not None), default=None)
         # The forward window on the LAST listed day is what carries past the
         # end of the episode, which is exactly where a squeeze tends to land.
+        # None for an unscorable last row, which is correct: the episode has
+        # no measured forward move, as distinct from one measured at zero.
         fwd = (last.get("outcome") or {}).get("ret_max_pct")
         fmt = lambda v, suf="%": "     —" if v is None else f"{v:+6.1f}{suf}"
         say(f"  {t:<7} {start}  {len(rs):4d}  "
