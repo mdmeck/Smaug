@@ -851,6 +851,9 @@ WHALE_EXPIRIES = 3        # expiries aggregated per name, after the skip below
 WHALE_MIN_DAYS = 7        # skip expiries closer than this
 WHALE_MIN_VOLUME = 2000   # contracts; below this vol/OI is noise on a tiny book
 MAX_WHALES = 8
+# Screens whose names carry an episode (first-flagged date, anchor price and
+# SPY) from scan to scan. Merger arb doesn't: its anchor is the deal terms.
+EPISODE_KINDS = ("squeeze", "whale")
 
 # Whale score. Same contract as the squeeze score — 0-100, versioned, derived
 # only from figures stored on the row — but the evidence behind it is THINNER
@@ -957,20 +960,60 @@ def fetch_option_flow(tickers):
                 failures[t] = "no options listed beyond the front week"
                 continue
             cv = pv = co = po = 0
+            top = None
             for e in exps:
                 ch = tk.option_chain(e)
                 cv += int(ch.calls["volume"].fillna(0).sum())
                 co += int(ch.calls["openInterest"].fillna(0).sum())
                 pv += int(ch.puts["volume"].fillna(0).sum())
                 po += int(ch.puts["openInterest"].fillna(0).sum())
+                for side, df in (("C", ch.calls), ("P", ch.puts)):
+                    c = _top_contract(df, side, e)
+                    if c and (top is None or c["volume"] > top["volume"]):
+                        top = c
             data[t] = {
                 "call_volume": cv, "put_volume": pv,
                 "call_oi": co, "put_oi": po,
                 "expiries": exps,
+                "top": top,
             }
         except Exception as exc:  # noqa: BLE001
             failures[t] = f"{type(exc).__name__}: {exc}"
     return data, failures
+
+
+def _top_contract(df, side, expiry):
+    """The single busiest contract in one side of one expiry, or None.
+
+    The chain totals say a name is busy; this says where. On 2026-09-23 U
+    printed 190K calls, and a quarter of them were one Oct 16 $46 sweep —
+    the strike and expiry are what decide whether following it is still a
+    trade, and the totals cannot show them. Raw figures only: the % out of
+    the money is left to the panel, which has the price beside it.
+    """
+    if df is None or df.empty:
+        return None
+    vol = df["volume"].fillna(0)
+    i = vol.idxmax()
+    if vol[i] <= 0:
+        return None
+    row = df.loc[i]
+
+    def num(col, places=4):
+        v = row.get(col)
+        return None if v is None else _json_safe(round(float(v), places))
+
+    return {
+        "side": side,
+        "strike": num("strike"),
+        "expiry": expiry,
+        "volume": int(vol[i]),
+        "open_interest": int(num("openInterest", 0) or 0),
+        # yfinance's IV is a fraction and is unreliable on illiquid strikes;
+        # stored as printed and labelled as yfinance's in the panel tooltip.
+        "iv": num("impliedVolatility"),
+        "last": num("lastPrice"),
+    }
 
 
 def _lean(cv, pv, coi=None, poi=None):
@@ -1065,6 +1108,7 @@ def screen_whale(owner, flow, failures, session_date):
                     "open_interest": oi,
                     "vol_oi_ratio": round(ratio, 3),
                     "expiries": d["expiries"],
+                    "top": d.get("top"),
                     "flow": flow_text,
                 },
                 "note": "",
@@ -1084,6 +1128,27 @@ def screen_whale(owner, flow, failures, session_date):
     return rows[:MAX_WHALES], sources, errors
 
 
+def fetch_earnings_dates(tickers):
+    """Ticker -> next earnings date (ISO) on or after today, where yfinance has
+    one. Best-effort and silent on a miss: ETFs have none, and an absent date
+    must never cost the scan. It matters because earnings inside the flow's
+    expiry window turn a directional bet into an IV-crush bet."""
+    import yfinance as yf
+
+    today = datetime.now(ZoneInfo("America/New_York")).date()
+    out = {}
+    for t in tickers:
+        try:
+            cal = yf.Ticker(t).calendar or {}
+            dates = cal.get("Earnings Date") if isinstance(cal, dict) else None
+            upcoming = sorted(d for d in (dates or []) if d >= today)
+            if upcoming:
+                out[t] = upcoming[0].isoformat()
+        except Exception:  # noqa: BLE001 - optional context, never fatal
+            continue
+    return out
+
+
 # ----------------------------------------------------------------------
 # Outcomes and backtest
 # ----------------------------------------------------------------------
@@ -1092,14 +1157,14 @@ def snapshot_rows(candidates, run_date, anchors=None, spy=None):
     Same figures, same score — nothing recomputed, so the snapshot is exactly
     the reading the panel rendered.
 
-    `anchors` maps ticker -> the prior scan's episode anchor. Present means
-    the streak continues and the original anchor is carried forward unchanged;
-    absent means this row opens a new episode anchored on today.
+    `anchors` maps kind -> ticker -> the prior scan's episode anchor. Present
+    means the streak continues and the original anchor is carried forward
+    unchanged; absent means this row opens a new episode anchored on today.
     """
     anchors = anchors or {}
     rows = []
     for c in candidates:
-        prev = anchors.get(c["ticker"]) if c["kind"] == "squeeze" else None
+        prev = (anchors.get(c["kind"]) or {}).get(c["ticker"])
         if prev:
             start = prev["episode_start"]
             anchor_price = prev["anchor_price"]
@@ -1605,11 +1670,13 @@ def run(dry_run=False):
         )
         for t, why in sorted(wh_px_failures.items()):
             errors.append({"ticker": t, "stage": "whale_price", "error": why})
+        earnings = fetch_earnings_dates([r["ticker"] for r in wh_rows])
         for r in wh_rows:
             q = wh_prices.get(r["ticker"])
             if q:
                 r["price"] = _json_safe(q["price"])
                 r["price_as_of"] = q["as_of"]
+            r["metrics"]["earnings_date"] = earnings.get(r["ticker"])
     candidates.extend(wh_rows)
     print(f"[erebor] whale: {len(wh_rows)} name(s) over {len(set(wh_tickers))} looked up")
 
@@ -1640,15 +1707,18 @@ def run(dry_run=False):
     # rather than failing the scan.
     spy_prices, _ = fetch_prices(["SPY"])
     spy_close = (spy_prices.get("SPY") or {}).get("price")
-    anchors = load_prior_episode_anchors("squeeze", as_of)
+    # Whales get episodes too, so the panel can say how far a name has run
+    # since it was first flagged. That is the "am I late?" question, and the
+    # flow columns alone can't answer it.
+    anchors = {k: load_prior_episode_anchors(k, as_of) for k in EPISODE_KINDS}
 
     # The episode rides in `metrics` as well as its own columns, because the
     # panel reads `erebor_candidates` and would otherwise need a second query
     # against the snapshots to draw a drift the scan already knows.
     for c in candidates:
-        if c["kind"] != "squeeze":
+        if c["kind"] not in EPISODE_KINDS:
             continue
-        prev = anchors.get(c["ticker"])
+        prev = anchors[c["kind"]].get(c["ticker"])
         ep = {
             "start": prev["episode_start"] if prev else as_of,
             "anchor_price": _json_safe(prev["anchor_price"] if prev else c["price"]),

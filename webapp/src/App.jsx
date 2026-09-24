@@ -1425,6 +1425,40 @@ function daysOld(ymdStr) {
   return (Date.now() - d.getTime()) / 86400000;
 }
 
+// The busiest single contract in the flow: the strike and expiry the whale
+// actually bought, which the chain totals can't show. `otm` is worked out here
+// from the stored strike and the row's price, so it's always a figure the
+// trader can re-derive. Positive means out of the money on either side.
+function topContractOf(raw, price) {
+  const t = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : null;
+  if (!t) return null;
+  const strike = numValue(t.strike);
+  const side = t.side === "P" ? "P" : t.side === "C" ? "C" : null;
+  if (strike === null || !side) return null;
+  const otm =
+    price > 0 ? (side === "C" ? strike / price - 1 : 1 - strike / price) * 100 : null;
+  return {
+    side,
+    strike,
+    expiry: asText(t.expiry).trim(),
+    volume: countValue(t.volume),
+    oi: countValue(t.open_interest),
+    iv: numValue(t.iv),
+    last: numValue(t.last),
+    otm,
+  };
+}
+
+function topContractTitle(t) {
+  return [
+    `${countText(t.volume) || "—"} contracts on ${countText(t.oi) || "0"} open interest`,
+    t.last === null ? "" : `last $${t.last.toFixed(2)}`,
+    t.iv === null ? "" : `IV ${Math.round(t.iv * 100)}% (yfinance, rough on thin strikes)`,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 // The contract is a bare array of objects; the wrapper forms and the key
 // aliases are the same defensive read the week calendar had to grow after the
 // 2026-08-20 run (see docs/smaug-project-knowledge.md).
@@ -1455,6 +1489,11 @@ function whaleItems(whales) {
       const basis = vol > 0 && avg > 0 ? "avg" : vol > 0 && oi > 0 ? "OI" : null;
       const mult = basis === "avg" ? vol / avg : basis === "OI" ? vol / oi : null;
       const parts = w.score_parts && typeof w.score_parts === "object" ? w.score_parts : null;
+      const price = numValue(w.price);
+      const lastExpiry = Array.isArray(w.expiries)
+        ? asText(w.expiries[w.expiries.length - 1]).trim()
+        : "";
+      const earnings = asText(w.earnings_date).trim();
       return {
         ticker: asText(w.ticker ?? w.symbol).trim().toUpperCase(),
         lean: leanKey(w.lean ?? w.bias ?? w.sentiment ?? w.direction),
@@ -1501,6 +1540,18 @@ function whaleItems(whales) {
         // a Monday brief reports Friday's tape. Stamping the panel with
         // `generated_at` alone reads as "this is today's flow", which it isn't.
         asOf: asText(w.as_of ?? w.date ?? w.session).trim(),
+        // The three fields below answer "is this still a trade?", which the
+        // flow columns can't. Field names match the squeeze items so
+        // episodeDrift() and DriftChip work on both.
+        price,
+        pxAsOf: asText(w.price_as_of).trim(),
+        episode: episodeOf(w.episode),
+        top: topContractOf(w.top, price),
+        earnings,
+        // Earnings on or before the last expiry the flow sat in means the
+        // position carries the report, and its IV crush, whether or not
+        // the buyer meant it to. ISO dates compare correctly as strings.
+        earningsInWindow: Boolean(earnings && lastExpiry && earnings <= lastExpiry),
       };
     })
     .filter((w) => w.ticker || w.flow)
@@ -1597,6 +1648,11 @@ function adaptWhale(row) {
     score_version: m.score_version,
     // the session the flow was seen in, not the day the scan ran
     as_of: row.as_of,
+    price: row.price,
+    price_as_of: row.price_as_of,
+    top: m.top,
+    earnings_date: m.earnings_date,
+    episode: m.episode,
   };
 }
 
@@ -1816,15 +1872,19 @@ function WhaleActionPanel({ whales, run, error, backtest }) {
         />
       ) : (
         <div style={gridScroll}>
-          <table style={gridWrap}>
+          {/* Nine columns don't fit a phone; the min width hands the overflow
+              to gridScroll's horizontal scroll instead of crushing them. */}
+          <table style={{ ...gridWrap, minWidth: 1040 }}>
             <colgroup>
+              <col style={{ width: "7%" }} />
               <col style={{ width: "10%" }} />
-              <col style={{ width: "11%" }} />
+              <col style={{ width: "6%" }} />
               <col style={{ width: "8%" }} />
+              <col style={{ width: "7%" }} />
               <col style={{ width: "12%" }} />
-              <col style={{ width: "10%" }} />
-              <col style={{ width: "21%" }} />
-              <col style={{ width: "28%" }} />
+              <col style={{ width: "18%" }} />
+              <col style={{ width: "16%" }} />
+              <col style={{ width: "16%" }} />
             </colgroup>
             <thead>
               <tr>
@@ -1834,6 +1894,8 @@ function WhaleActionPanel({ whales, run, error, backtest }) {
                 <th style={gridHead("right")}>Volume</th>
                 <th style={gridHead("right")}>vs {items[0].basis === "avg" ? "avg" : "OI"}</th>
                 <th style={gridHead("right")}>Calls / puts</th>
+                <th style={gridHead()}>Top contract</th>
+                <th style={gridHead()}>Since flagged</th>
                 <th style={gridHead()}>Expiries</th>
               </tr>
             </thead>
@@ -1867,6 +1929,41 @@ function WhaleActionPanel({ whales, run, error, backtest }) {
                       ? "\u2014"
                       : `${countText(w.calls)} / ${countText(w.puts)}`}
                   </td>
+                  <td style={gridCell()} title={w.top ? topContractTitle(w.top) : undefined}>
+                    {w.top ? (
+                      <>
+                        {dayLabel(w.top.expiry)} ${w.top.strike}
+                        {w.top.side}
+                        <div style={{ color: B.dim, fontWeight: 400, fontSize: 11.5, marginTop: 3 }}>
+                          {[
+                            countText(w.top.volume),
+                            w.top.otm === null
+                              ? ""
+                              : w.top.otm >= 0
+                              ? `${w.top.otm.toFixed(1)}% OTM`
+                              : `${Math.abs(w.top.otm).toFixed(1)}% ITM`,
+                            w.top.iv === null ? "" : `IV ${Math.round(w.top.iv * 100)}%`,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </div>
+                      </>
+                    ) : (
+                      <span style={{ color: B.ghost }}>{"—"}</span>
+                    )}
+                  </td>
+                  {/* Same chip and arithmetic as the squeeze grid, so "+4%
+                      since listed" means the same thing on both panels. */}
+                  <td style={gridCell()}>
+                    {(() => {
+                      const drift = episodeDrift(w);
+                      return drift ? (
+                        <DriftChip s={w} drift={drift} />
+                      ) : (
+                        <span style={{ color: B.ghost }}>{"—"}</span>
+                      );
+                    })()}
+                  </td>
                   <td
                     style={{
                       ...gridCell(),
@@ -1880,6 +1977,23 @@ function WhaleActionPanel({ whales, run, error, backtest }) {
                     title={w.flow}
                   >
                     {w.expiries || "\u2014"}
+                    {w.earnings && (
+                      <div
+                        title={
+                          w.earningsInWindow
+                            ? "Earnings land before the last expiry: this flow carries the report and its IV crush"
+                            : "Earnings fall after every expiry in this flow"
+                        }
+                        style={{
+                          marginTop: 4,
+                          fontWeight: 600,
+                          color: w.earningsInWindow ? B.amber : B.muted,
+                        }}
+                      >
+                        ER {dayLabel(w.earnings)}
+                        {w.earningsInWindow ? " \u00b7 in window" : ""}
+                      </div>
+                    )}
                     {w.note && (
                       <div style={{ color: B.muted, marginTop: 4 }}>{w.note}</div>
                     )}
