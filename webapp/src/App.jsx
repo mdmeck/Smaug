@@ -2713,10 +2713,18 @@ function BacktestBlock({ bt }) {
         </div>
       </div>
 
-      {r.mixed_versions && (
-        <div style={{ fontFamily: B.mono, fontSize: 11.5, color: B.amber, marginBottom: 10 }}>
-          Mixed score versions in this series — the formula changed partway, so
-          these pooled figures compare two different numbers.
+      {/* The report is built from one formula's outcomes only. Saying which
+          rows were left out matters: without it the series looks like it began
+          when the current formula did, and a low n reads as "nothing has
+          happened yet" rather than "the formula changed and the clock
+          restarted". */}
+      {r.superseded && Object.keys(r.superseded).length > 0 && (
+        <div style={{ fontFamily: B.mono, fontSize: 11.5, color: B.faint, marginBottom: 10 }}>
+          Excludes{" "}
+          {Object.entries(r.superseded)
+            .map(([v, n]) => `${n} on ${v}`)
+            .join(", ")}{" "}
+          — an earlier formula's outcomes are not this one's.
         </div>
       )}
 

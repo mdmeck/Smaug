@@ -1398,11 +1398,33 @@ def backtest(kind="squeeze", quiet=False):
     if not rows:
         say(f"[erebor] backtest: no scored {kind} snapshots with outcomes yet")
         return None
-    versions = sorted({r.get("score_version") or "?" for r in rows})
-    say(f"[erebor] backtest: {len(rows)} {kind} snapshot(s), score version(s) {versions}")
-    if len(versions) > 1:
-        say("  WARNING: mixed score versions — the formula changed mid-series;"
-            " read per-version numbers, not the pooled ones.")
+    # Score a formula against its OWN outcomes, never a blend of two.
+    #
+    # The first real report card came back n=35, trustworthy, and pooled 17 sq1
+    # rows with 18 sq2 ones — two formulas that rank names differently (sq1 led
+    # with short float, sq2 with days to cover), averaged into a single "score"
+    # column and then declared solid because 35 > 30. Neither version had 30 of
+    # its own. A warning line under a confident number is not enough: the
+    # number itself has to be of one thing.
+    #
+    # So the report is built from the newest version present, and the older
+    # ones are counted out loud rather than silently folded in. The question
+    # worth answering is whether the CURRENT formula works.
+    all_versions = sorted({r.get("score_version") or "?" for r in rows})
+    primary = all_versions[-1]
+    superseded = {
+        v: sum(1 for r in rows if (r.get("score_version") or "?") == v)
+        for v in all_versions[:-1]
+    }
+    rows = [r for r in rows if (r.get("score_version") or "?") == primary]
+    versions = [primary]
+    say(f"[erebor] backtest: {len(rows)} {kind} snapshot(s) on {primary}")
+    if superseded:
+        say("  excluding " + ", ".join(f"{n} on {v}" for v, n in superseded.items())
+            + " — an earlier formula's outcomes are not this one's.")
+    if not rows:
+        say(f"  nothing scored on {primary} yet")
+        return None
 
     scores = [r["score"] for r in rows]
     pairs = [_directional(r["outcome"], kind, r.get("metrics") or {}) for r in rows]
@@ -1469,7 +1491,10 @@ def backtest(kind="squeeze", quiet=False):
         "kind": kind,
         "n": len(rows),
         "score_versions": versions,
-        "mixed_versions": len(versions) > 1,
+        # Kept so the panel can say what was left out rather than implying the
+        # series began when the current formula did.
+        "superseded": superseded,
+        "mixed_versions": False,
         "window": win,
         "threshold_pct": thr,
         "base_rate": round(base, 3),
