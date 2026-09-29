@@ -7876,6 +7876,354 @@ function EreborTab() {
 }
 
 
+// ---------- Erebor: History ----------
+// Every reading the screen has ever taken, from `erebor_snapshots`. The Screen
+// tab shows what is dislocated NOW and is pruned to exactly that; this is the
+// other half, and the distinction is the point. Names leave the screen partly
+// BECAUSE they worked — the settlement updates, the chatter moves on, the flow
+// normalises — so a view built only from current members is biased toward the
+// ones that did nothing. Nothing here is ever pruned.
+//
+// Styled with `T`, like the rest of the app and like the Screen tab beside it.
+// The `B` palette stops at the Morning Brief and Dashboard (docs/design.md).
+
+const HIST_KINDS = [
+  ["all", "All"],
+  ["squeeze", "Squeeze"],
+  ["whale", "Whale"],
+  ["merger_arb", "Merger arb"],
+];
+
+const histPct = (v) =>
+  v === null || v === undefined || !Number.isFinite(v)
+    ? "—"
+    : `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}%`;
+
+// Green/red is earned here in a way it is not on the Screen tab's magnitudes:
+// a realised price move does carry a direction.
+const histTone = (v) =>
+  v === null || v === undefined || !Number.isFinite(v)
+    ? T.faint
+    : v > 0
+    ? T.green
+    : v < 0
+    ? T.red
+    : T.dim;
+
+// One listing episode: an unbroken run of scans that carried the same ticker.
+// Derived from the rows rather than stored, so it can never drift out of step
+// with them, and keyed the same way erebor_scan.py keys it.
+function buildEpisodes(rows) {
+  const eps = new Map();
+  for (const r of rows) {
+    // Rows written before episode tracking existed have no anchor; they are
+    // still real readings, so they group under their own run date rather than
+    // being dropped, and simply show no drift.
+    const start = r.episode_start || r.run_date;
+    const key = `${r.ticker}|${r.kind}|${start}`;
+    if (!eps.has(key)) eps.set(key, []);
+    eps.get(key).push(r);
+  }
+  return [...eps.values()]
+    .map((rs) => {
+      rs.sort((a, b) => String(a.run_date).localeCompare(String(b.run_date)));
+      const first = rs[0];
+      const last = rs[rs.length - 1];
+      const anchor = first.anchor_price ?? first.price;
+      const drift = anchor && last.price ? (last.price / anchor - 1) * 100 : null;
+      const aSpy = first.anchor_spy;
+      const lSpy = last.spy;
+      const tape = aSpy && lSpy ? (lSpy / aSpy - 1) * 100 : null;
+      const scores = rs.map((r) => r.score).filter((v) => typeof v === "number");
+      // A terminal marker is not a reading — same check erebor_scan.py's
+      // backtest uses, for the same reason.
+      const o =
+        last.outcome && last.outcome.ret_max_pct !== undefined ? last.outcome : null;
+      const start = first.episode_start || first.run_date;
+      return {
+        key: `${first.ticker}|${first.kind}|${start}`,
+        ticker: first.ticker,
+        kind: first.kind,
+        start,
+        lastRun: last.run_date,
+        scans: rs.length,
+        peak: scores.length ? Math.max(...scores) : null,
+        anchor,
+        price: last.price,
+        drift,
+        vsSpy: drift === null || tape === null ? null : drift - tape,
+        outcome: o,
+      };
+    })
+    .sort(
+      (a, b) =>
+        String(b.start).localeCompare(String(a.start)) ||
+        (b.drift ?? -Infinity) - (a.drift ?? -Infinity)
+    );
+}
+
+const hThead = {
+  fontFamily: T.mono,
+  fontSize: 10,
+  letterSpacing: "0.08em",
+  textTransform: "uppercase",
+  color: T.faint,
+  textAlign: "left",
+  padding: "0 10px 8px",
+  borderBottom: `1px solid ${T.panelEdge}`,
+  whiteSpace: "nowrap",
+};
+const hCell = {
+  fontFamily: T.mono,
+  fontSize: 12.5,
+  color: T.ink,
+  padding: "9px 10px",
+  borderBottom: `1px solid ${T.panelEdge}`,
+  whiteSpace: "nowrap",
+};
+const hRight = { ...hCell, textAlign: "right" };
+
+function HistPill({ active, children, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        fontFamily: T.mono,
+        fontSize: 11,
+        letterSpacing: "0.06em",
+        textTransform: "uppercase",
+        padding: "5px 11px",
+        borderRadius: 6,
+        cursor: "pointer",
+        background: active ? T.amber : "transparent",
+        color: active ? "#141414" : T.dim,
+        border: `1px solid ${active ? T.amber : T.panelEdge}`,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function EreborHistoryTab() {
+  const [rows, setRows] = useState([]);
+  const [state, setState] = useState("loading");
+  const [error, setError] = useState(null);
+  const [kind, setKind] = useState("all");
+  const [view, setView] = useState("episodes");
+  const [day, setDay] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        // Paged: PostgREST caps a response at 1000 rows and this table grows by
+        // a couple of dozen every weekday, forever.
+        const all = await fetchAllRows("erebor_snapshots", {
+          orderBy: "run_date",
+          ascending: false,
+        });
+        setRows(all);
+        setState("ready");
+      } catch (e) {
+        // Read the error rather than render an empty table: a failed query and
+        // a screen that found nothing must never look the same.
+        setError(e.message || String(e));
+        setState("ready");
+      }
+    })();
+  }, []);
+
+  const filtered = useMemo(
+    () => (kind === "all" ? rows : rows.filter((r) => r.kind === kind)),
+    [rows, kind]
+  );
+  const episodes = useMemo(() => buildEpisodes(filtered), [filtered]);
+  const days = useMemo(
+    () => [...new Set(rows.map((r) => r.run_date))].sort().reverse(),
+    [rows]
+  );
+  const activeDay = day || days[0] || "";
+  const dayRows = useMemo(
+    () =>
+      filtered
+        .filter((r) => r.run_date === activeDay)
+        .sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity)),
+    [filtered, activeDay]
+  );
+
+  if (state === "loading") {
+    return <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 12 }}>Loading…</div>;
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: T.dim, marginBottom: 14, lineHeight: 1.6 }}>
+        Every reading the screen has taken, kept as it was shown. The Screen tab
+        is pruned to what is dislocated now; nothing here is ever removed, which
+        is what makes it possible to ask whether a flag was any good. Names drop
+        off the screen partly <em>because</em> they worked, so judging the screen
+        by its current members would flatter the ones that did nothing.
+      </div>
+
+      {error && (
+        <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>
+          Could not read the history — {error}. This is a failed query, not an
+          empty result.
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 16 }}>
+        <div style={{ display: "flex", gap: 6 }}>
+          {HIST_KINDS.map(([k, label]) => (
+            <HistPill key={k} active={kind === k} onClick={() => setKind(k)}>
+              {label}
+            </HistPill>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <HistPill active={view === "episodes"} onClick={() => setView("episodes")}>
+            By episode
+          </HistPill>
+          <HistPill active={view === "day"} onClick={() => setView("day")}>
+            By day
+          </HistPill>
+        </div>
+        {view === "day" && days.length > 0 && (
+          <select
+            value={activeDay}
+            onChange={(e) => setDay(e.target.value)}
+            style={{
+              fontFamily: T.mono,
+              fontSize: 11.5,
+              background: T.panel,
+              color: T.ink,
+              border: `1px solid ${T.panelEdge}`,
+              borderRadius: 6,
+              padding: "5px 9px",
+            }}
+          >
+            {days.map((d) => (
+              <option key={d} value={d}>
+                {d}
+              </option>
+            ))}
+          </select>
+        )}
+      </div>
+
+      {!rows.length ? (
+        <div style={{ color: T.dim, fontSize: 13 }}>
+          {error ? "Nothing to show — the read above failed." : "No scan has run yet."}
+        </div>
+      ) : view === "episodes" ? (
+        <div style={{ overflowX: "auto" }}>
+          <div
+            style={{
+              fontFamily: T.mono,
+              fontSize: 10.5,
+              color: T.faint,
+              letterSpacing: "0.06em",
+              marginBottom: 10,
+            }}
+          >
+            {episodes.length} EPISODE{episodes.length === 1 ? "" : "S"} · ANCHORED ON
+            THE FIRST SCAN OF EACH UNBROKEN RUN
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={hThead}>Ticker</th>
+                <th style={hThead}>Kind</th>
+                <th style={hThead}>Flagged</th>
+                <th style={{ ...hThead, textAlign: "right" }}>Scans</th>
+                <th style={{ ...hThead, textAlign: "right" }}>Peak score</th>
+                <th style={{ ...hThead, textAlign: "right" }}>Anchor</th>
+                <th style={{ ...hThead, textAlign: "right" }}>Latest</th>
+                <th style={{ ...hThead, textAlign: "right" }}>Since flagged</th>
+                <th style={{ ...hThead, textAlign: "right" }}>vs SPY</th>
+                <th style={{ ...hThead, textAlign: "right" }}>Fwd max</th>
+              </tr>
+            </thead>
+            <tbody>
+              {episodes.map((e) => (
+                <tr key={e.key}>
+                  <td style={{ ...hCell, color: T.blue, fontWeight: 700 }}>{e.ticker}</td>
+                  <td style={{ ...hCell, color: T.dim }}>{e.kind}</td>
+                  <td style={{ ...hCell, color: T.dim }}>{e.start}</td>
+                  <td style={hRight}>{e.scans}</td>
+                  <td style={hRight}>{e.peak === null ? "—" : Math.round(e.peak)}</td>
+                  <td style={hRight}>{e.anchor ? `$${e.anchor.toFixed(2)}` : "—"}</td>
+                  <td style={hRight}>{e.price ? `$${e.price.toFixed(2)}` : "—"}</td>
+                  <td style={{ ...hRight, color: histTone(e.drift), fontWeight: 700 }}>
+                    {histPct(e.drift)}
+                  </td>
+                  <td style={{ ...hRight, color: histTone(e.vsSpy) }}>{histPct(e.vsSpy)}</td>
+                  {/* The forward window keeps running after a name leaves the
+                      screen, which is exactly where a squeeze tends to land.
+                      Blank until the full window has printed — never partial. */}
+                  <td style={{ ...hRight, color: histTone(e.outcome && e.outcome.ret_max_pct) }}>
+                    {e.outcome ? histPct(e.outcome.ret_max_pct) : "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <div
+            style={{
+              fontFamily: T.mono,
+              fontSize: 10.5,
+              color: T.faint,
+              letterSpacing: "0.06em",
+              marginBottom: 10,
+            }}
+          >
+            {dayRows.length} ROW{dayRows.length === 1 ? "" : "S"} AS SHOWN ON {activeDay}
+          </div>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={hThead}>Ticker</th>
+                <th style={hThead}>Kind</th>
+                <th style={{ ...hThead, textAlign: "right" }}>Score</th>
+                <th style={{ ...hThead, textAlign: "right" }}>Price</th>
+                <th style={hThead}>Priced</th>
+                <th style={hThead}>Episode from</th>
+                <th style={{ ...hThead, textAlign: "right" }}>Fwd max</th>
+              </tr>
+            </thead>
+            <tbody>
+              {dayRows.map((r) => {
+                const o =
+                  r.outcome && r.outcome.ret_max_pct !== undefined ? r.outcome : null;
+                return (
+                  <tr key={r.id}>
+                    <td style={{ ...hCell, color: T.blue, fontWeight: 700 }}>{r.ticker}</td>
+                    <td style={{ ...hCell, color: T.dim }}>{r.kind}</td>
+                    <td style={hRight}>
+                      {typeof r.score === "number" ? Math.round(r.score) : "—"}
+                    </td>
+                    <td style={hRight}>{r.price ? `$${r.price.toFixed(2)}` : "—"}</td>
+                    {/* The session the price is from, which is not the run date
+                        when a scan ran before the open. */}
+                    <td style={{ ...hCell, color: T.dim }}>{r.price_as_of || "—"}</td>
+                    <td style={{ ...hCell, color: T.dim }}>{r.episode_start || "—"}</td>
+                    <td style={{ ...hRight, color: histTone(o && o.ret_max_pct) }}>
+                      {o ? histPct(o.ret_max_pct) : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 const NAV = [
   { label: "Morning Brief" },
   { label: "Dashboard" },
@@ -7883,7 +8231,10 @@ const NAV = [
   { label: "Modeling", children: ["Charts", "Training Data", "Indicator"] },
   // Erebor is its own group, not a child of Modeling: it screens single names
   // for event dislocations and has nothing to do with the SPY entry model.
-  { label: "Erebor", children: ["Screen"] },
+  // Screen is what is dislocated now; History is every name ever flagged,
+  // including the ones that have since dropped off — which is the only way to
+  // ask whether a flag was any good.
+  { label: "Erebor", children: ["Screen", "History"] },
   { label: "Resources" },
 ];
 
@@ -8198,6 +8549,7 @@ export default function Smaug() {
         {tab === "Training Data" && <TrainingDataTab />}
         {tab === "Indicator" && <ModelTab />}
         {tab === "Screen" && <EreborTab />}
+        {tab === "History" && <EreborHistoryTab />}
         {tab === "Resources" && <ResourcesTab />}
           </div>
         </div>
