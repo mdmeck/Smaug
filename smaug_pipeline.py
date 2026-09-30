@@ -7,6 +7,9 @@ Run once per day after the close (scheduled). Each run:
   2. Computes indicator features per bar and upserts them alongside the
      bars (full retained window, every run, so the stored features
      self-heal if this file's feature formulas ever change).
+  2b. Replays the newest entry_models rules over the latest session and
+     grades each L/S signal Good/Bad by its dollar path, inserting the
+     clear-cut ones into training_examples as strategy 'Auto'.
   3. Builds forward-move targets at several horizons.
   4. Runs correlation, OLS regression (time-based train/test split),
      and decile analysis, and inserts the result as a new row in
@@ -75,6 +78,24 @@ RETENTION_DAYS = 60             # prune bars older than this so the table stays 
 # means fewer, cleaner swings confirmed later; lowering them approaches noise.
 SWING_LEFT = 5
 SWING_RIGHT = 5
+# Auto-grading of the indicator's own L/S signals, in SPY dollars from the
+# entry fill. A signal is Bad when price goes AUTO_BAD_STOP against it before
+# AUTO_BAD_TARGET in its favour, and Good when it goes AUTO_GOOD_TARGET in its
+# favour before AUTO_GOOD_STOP against it. The two are mutually exclusive (a
+# Good path reaches +$1 before -$0.25, so it can't have hit -$0.50 first), and
+# the gap between them is left unlabeled on purpose — only clear-cut signals
+# become training examples.
+AUTO_BAD_STOP = 0.50
+AUTO_BAD_TARGET = 1.00
+AUTO_GOOD_STOP = 0.25
+AUTO_GOOD_TARGET = 2.00
+# `strategy` value on auto-graded rows. Load-bearing: it's how pruning tells
+# these apart from the trader's hand labels, which pin their sessions forever
+# while auto rows expire with their bars — see prune_old_bars_supabase().
+AUTO_STRATEGY = "Auto"
+# training_examples is owner-only and user_id is NOT NULL DEFAULT auth.uid(),
+# which is NULL under the service-role key — so it must be passed explicitly.
+OWNER_USER_ID = "c0b48756-5f94-4862-886a-8ecdb7099ef6"
 SUPABASE_PAGE_SIZE = 1000       # PostgREST's default max rows per request
 SUPABASE_BATCH_SIZE = 500       # rows per upsert request
 
@@ -193,11 +214,18 @@ def _protected_session_dates():
     so dropping the bars silently makes the example useless. The trader's hand
     labels are the scarcest data here and can't be regenerated, unlike bars.
 
+    Auto-graded rows don't pin: they land on nearly every session, so letting
+    them pin would stop pruning altogether. They expire with their bars instead.
+    `neq` alone would also drop rows whose strategy is NULL, hence the `or`.
+
     Read with the service-role key, which bypasses the RLS on this table."""
     resp = requests.get(
         f"{SUPABASE_URL}/rest/v1/training_examples",
         headers=_supabase_headers(),
-        params={"select": "entry_at,exit_at"},
+        params={
+            "select": "entry_at,exit_at",
+            "or": f"(strategy.is.null,strategy.neq.{AUTO_STRATEGY})",
+        },
         timeout=30,
     )
     _raise_for_status(resp)
@@ -250,6 +278,18 @@ def prune_old_bars_supabase(days=RETENTION_DAYS):
             f"{SUPABASE_URL}/rest/v1/bars",
             headers=headers,
             params={"ts": [f"gte.{start.isoformat()}", f"lt.{end.isoformat()}"]},
+            timeout=30,
+        )
+        _raise_for_status(resp)
+        # the session's auto-graded examples go with it — without their bars
+        # the routine can't join a snapshot, so they'd be dangling rows
+        resp = requests.delete(
+            f"{SUPABASE_URL}/rest/v1/training_examples",
+            headers=headers,
+            params={
+                "strategy": f"eq.{AUTO_STRATEGY}",
+                "entry_at": [f"gte.{start.isoformat()}", f"lt.{end.isoformat()}"],
+            },
             timeout=30,
         )
         _raise_for_status(resp)
@@ -1125,6 +1165,155 @@ def write_bars_json(bars):
 # ----------------------------------------------------------------------
 # Main
 # ----------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Auto-grading the indicator's signals into training_examples
+# ----------------------------------------------------------------------
+_RULE_OPS = {
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+}
+
+
+def load_latest_entry_model():
+    """Newest entry_models row (rules + generated_at), or None. The table is
+    owner-only; the service-role key bypasses RLS to read it."""
+    resp = requests.get(
+        f"{SUPABASE_URL}/rest/v1/entry_models",
+        headers=_supabase_headers(),
+        params={"select": "rules,generated_at", "order": "generated_at.desc", "limit": 1},
+        timeout=30,
+    )
+    _raise_for_status(resp)
+    rows = resp.json()
+    return rows[0] if rows else None
+
+
+def _rules_hold(feats, rules):
+    """Per-bar boolean for an and-ed rule list. Mirrors rulesHold() in the
+    webapp's Indicator Preview: an empty list never fires, and a missing or
+    NaN feature fails its rule rather than firing on no evidence."""
+    out = pd.Series(False, index=feats.index)
+    if not isinstance(rules, list) or not rules:
+        return out
+    out[:] = True
+    for r in rules:
+        fn = _RULE_OPS.get(r.get("op"))
+        col = r.get("feature")
+        if fn is None or col not in feats.columns:
+            return pd.Series(False, index=feats.index)
+        v = feats[col].astype(float)
+        with np.errstate(invalid="ignore"):
+            out &= v.notna() & fn(v, float(r["value"]))
+    return out
+
+
+def derive_signals(feats, rules):
+    """(ts, direction) for every L/S the indicator prints in one session.
+    Edge-triggered like markers.pine and deriveSignals() in the webapp: a
+    signal is the bar where a rule list BECOMES true, not every bar it stays
+    true."""
+    sigs = []
+    for key, direction in (("long_entry", "Long"), ("short_entry", "Short")):
+        on = _rules_hold(feats, rules.get(key))
+        edge = on & ~on.shift(1, fill_value=False)
+        sigs.extend((ts, direction) for ts in feats.index[edge])
+    return sorted(sigs)
+
+
+def _first_touch_dollars(path, entry, direction, stop, target):
+    """Walk `path` bar by bar from `entry` and report which of the stop
+    (`stop` dollars against) or target (`target` dollars in favour) is hit
+    first: ("target", ts), ("stop", ts), or (None, None) if the session ends
+    first. A bar whose range spans both resolves to the stop, the same
+    pessimistic tie rule as _first_touch()."""
+    sign = 1.0 if direction == "Long" else -1.0
+    for ts, bar in path.iterrows():
+        best = (bar.high - entry) if sign > 0 else (entry - bar.low)
+        worst = (entry - bar.low) if sign > 0 else (bar.high - entry)
+        if worst >= stop:
+            return "stop", ts
+        if best >= target:
+            return "target", ts
+    return None, None
+
+
+def grade_signal(path, entry, direction):
+    """("Bad", None), ("Good", exit_ts), or (None, None) for the gap between.
+    Bad and Good can't both hold — see AUTO_* constants."""
+    hit, _ = _first_touch_dollars(path, entry, direction, AUTO_BAD_STOP, AUTO_BAD_TARGET)
+    if hit == "stop":
+        return "Bad", None
+    hit, ts = _first_touch_dollars(path, entry, direction, AUTO_GOOD_STOP, AUTO_GOOD_TARGET)
+    if hit == "target":
+        return "Good", ts
+    return None, None
+
+
+def auto_grade_latest_session(bars, feats, model):
+    """training_examples rows for the latest session's graded L/S signals.
+
+    Uses the newest entry_models rules, which at pipeline time (after the
+    close) is the indicator the trader had on the chart that session. The
+    signal fires at the candle's close, so the fill is the next bar's open,
+    and the path runs from that bar to the RTH close — same-session only.
+    `entry_at` is the signal candle, so the routine's snapshot join lands on
+    the bar the rules actually fired on."""
+    if bars.empty or not model or not model.get("rules"):
+        return []
+    session = bars.index[-1].date()
+    day = bars[bars.index.date == session]
+    mod = day.index.hour * 60 + day.index.minute
+    rth = (mod >= 9 * 60 + 30) & (mod < 16 * 60)
+    rth_bars = day[rth]
+    rows = []
+    for ts, direction in derive_signals(feats.loc[day.index], model["rules"]):
+        if ts not in rth_bars.index:
+            continue  # premarket signal — not a tradeable 0DTE entry
+        path = rth_bars[rth_bars.index > ts]
+        if path.empty:
+            continue
+        entry = float(path.iloc[0].open)
+        quality, exit_ts = grade_signal(path, entry, direction)
+        if quality is None:
+            continue
+        if quality == "Good":
+            outcome = (f"+${AUTO_GOOD_TARGET:.2f} at {exit_ts:%H:%M} "
+                       f"before -${AUTO_GOOD_STOP:.2f}")
+        else:
+            outcome = f"-${AUTO_BAD_STOP:.2f} before +${AUTO_BAD_TARGET:.2f}"
+        rows.append({
+            "user_id": OWNER_USER_ID,
+            "entry_at": ts.isoformat(),
+            "exit_at": exit_ts.isoformat() if exit_ts is not None else None,
+            "ticker": TICKER,
+            "direction": direction,
+            "quality": quality,
+            "strategy": AUTO_STRATEGY,
+            "notes": (f"Auto-graded {direction} signal at {ts:%H:%M} ET · "
+                      f"fill {entry:.2f} (next open) · {outcome} · "
+                      f"model {model.get('generated_at')}"),
+        })
+    return rows
+
+
+def insert_auto_examples_supabase(rows):
+    """Insert, skipping any signal that already has a row — a label the trader
+    set by hand in the Indicator Preview always wins over the auto grade, and
+    re-running the pipeline on the same session is a no-op."""
+    if not rows:
+        return
+    resp = requests.post(
+        f"{SUPABASE_URL}/rest/v1/training_examples",
+        headers=_supabase_headers(prefer="resolution=ignore-duplicates,return=minimal"),
+        params={"on_conflict": "user_id,entry_at,direction"},
+        json=rows,
+        timeout=30,
+    )
+    _raise_for_status(resp)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-fetch", action="store_true",
@@ -1157,6 +1346,13 @@ def main():
     feats = compute_features(bars)
     n_feat = upsert_features_supabase(bars, feats)
     print(f"upserted features for {n_feat} bars")
+
+    # never on --synthetic: fake bars must not become training examples
+    if not args.synthetic:
+        graded = auto_grade_latest_session(bars, feats, load_latest_entry_model())
+        insert_auto_examples_supabase(graded)
+        good = sum(r["quality"] == "Good" for r in graded)
+        print(f"auto-graded {len(graded)} signal(s): {good} Good, {len(graded) - good} Bad")
 
     results = run_analysis(bars)
     insert_analysis_run_supabase(results)
