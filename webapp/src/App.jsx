@@ -2705,8 +2705,16 @@ function BacktestBlock({ bt }) {
         }}
       >
         <div style={eyebrow(B.faint, 11)}>Has the score worked?</div>
+        {/* Rows and episodes are both shown, and the trust threshold is read
+            against episodes. A name listed five days running files five rows
+            whose outcomes are near-copies; counting those as five observations
+            is how n=56 once cleared a threshold of 30 while being 37 tickers
+            over four days. The gap between the two numbers is the warning. */}
         <div style={{ fontFamily: B.mono, fontSize: 11, color: dim ? B.amber : B.faint }}>
-          n={bt.n}
+          {r.n_episodes !== undefined && r.n_episodes !== bt.n
+            ? `${r.n_episodes} episodes (${bt.n} rows)`
+            : `n=${bt.n}`}
+          {r.n_days ? ` \u00b7 ${r.n_days} resolved day${r.n_days === 1 ? "" : "s"}` : ""}
           {dim && r.min_n ? ` \u00b7 too few to trust (need ${r.min_n})` : ""}
           {r.window ? ` \u00b7 ${r.window}-session window` : ""}
           {bt.score_version ? ` \u00b7 ${bt.score_version}` : ""}

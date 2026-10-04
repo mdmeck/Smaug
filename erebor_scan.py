@@ -1479,17 +1479,30 @@ def backtest(kind="squeeze", quiet=False):
         say(f"    raw  {raw:<20}{r2:+.2f}  (n={n2})" if r2 is not None
             else f"    raw  {raw:<20}n/a")
 
-    # Stated in the report itself, not just at the terminal, because the panel
-    # renders this and "n=14" has to arrive with its own health warning.
-    trustworthy = len(rows) >= BACKTEST_MIN_N
+    # Count INDEPENDENT observations, not rows. A name listed five days running
+    # files five rows whose outcomes are near-copies of each other, and the
+    # readings taken on one day all share that day's market. Counting rows let
+    # 56 of them clear a threshold of 30 when they were 37 tickers over four
+    # resolved days — and the same five hits, three of which landed on a single
+    # day. That is the same error as pooling two score versions: a number that
+    # looks like evidence because of how it was tallied.
+    episodes = {(r["ticker"], r.get("episode_start") or r["run_date"]) for r in rows}
+    days = {r["run_date"] for r in rows}
+    n_eff = len(episodes)
+    trustworthy = n_eff >= BACKTEST_MIN_N
+    say(f"  {len(rows)} rows = {n_eff} episode(s) over {len(days)} resolved day(s)")
     if not trustworthy:
-        say(f"  ({len(rows)} rows is too few to trust any of this; it is a smoke test"
-            f" of the plumbing until there are {BACKTEST_MIN_N}+)")
+        say(f"  ({n_eff} episodes is too few to trust any of this; it is a smoke"
+            f" test of the plumbing until there are {BACKTEST_MIN_N}+)")
 
     episodes = report_episodes(kind, quiet=quiet) if kind == "squeeze" else None
     return {
         "kind": kind,
         "n": len(rows),
+        # What the trust threshold is actually judged on. Kept beside `n` so
+        # the panel can show both and the gap between them stays visible.
+        "n_episodes": n_eff,
+        "n_days": len(days),
         "score_versions": versions,
         # Kept so the panel can say what was left out rather than implying the
         # series began when the current formula did.
