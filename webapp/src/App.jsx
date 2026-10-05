@@ -2780,6 +2780,48 @@ function BacktestBlock({ bt }) {
               ))}
             </tbody>
           </table>
+          {/* The two checks that stop a tercile table being read as proof.
+              Both run every scan rather than when someone thinks to look,
+              because the first fortnight's correlation rested almost entirely
+              on a single name and nobody would have known. */}
+          {r.robustness && r.robustness.dropped && (
+            <div
+              style={{
+                fontFamily: B.mono,
+                fontSize: 11.5,
+                color: r.robustness.fragile ? B.amber : B.faint,
+                marginTop: 9,
+              }}
+            >
+              Rank correlation {r.robustness.rho >= 0 ? "+" : "\u2212"}
+              {Math.abs(r.robustness.rho).toFixed(2)}, or{" "}
+              {r.robustness.rho_ex_top >= 0 ? "+" : "\u2212"}
+              {Math.abs(r.robustness.rho_ex_top).toFixed(2)} without{" "}
+              {r.robustness.dropped} alone (it moved{" "}
+              {r.robustness.dropped_ret_pct >= 0 ? "+" : "\u2212"}
+              {Math.abs(r.robustness.dropped_ret_pct).toFixed(0)}%)
+              {r.robustness.fragile
+                ? " \u2014 more than halves on one deletion, so it is one name rather than a finding."
+                : "."}
+            </div>
+          )}
+          {r.split && (
+            <div
+              style={{
+                fontFamily: B.mono,
+                fontSize: 11.5,
+                color: r.split.significant ? B.greenText : B.faint,
+                marginTop: 6,
+              }}
+            >
+              Chatter: {r.split.hits_with}/{r.split.n_with} hit with it vs{" "}
+              {r.split.hits_without}/{r.split.n_without} without \u00b7 p=
+              {r.split.p_one_tailed.toFixed(3)}
+              {r.split.significant
+                ? " \u2014 clears 0.05."
+                : " \u2014 a direction, not yet a result."}
+            </div>
+          )}
           <div style={{ fontSize: 12, color: B.ghost, marginTop: 9, lineHeight: 1.5 }}>
             A hit is a move of {r.threshold_pct}% or more in the direction the
             screen flagged, within {r.window} sessions. Base rate across every

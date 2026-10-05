@@ -817,10 +817,23 @@ def screen_squeeze(owner, universe, flow=None):
     # Two sections, capped separately, both ranked by score. The loud names
     # are the actionable half and are usually few; the quiet baseline is
     # capped so the panel stays a screen rather than a table.
+    #
+    # EVERY qualifying row is returned, with `displayed` marking the ones that
+    # make the panel. The short interest behind the rest was already fetched —
+    # the screen looks at the whole chatter universe and then kept 12 of it —
+    # so recording them costs their price lookups and nothing else. With five
+    # positive events in the first fortnight, sample size is the only thing
+    # standing between this screen and an answer, and the discarded rows are
+    # also the only source of low-scoring names to populate the bottom of the
+    # range. A ranking measured only over its own top decile cannot be shown
+    # to rank.
     rows.sort(key=lambda r: -(r["score"] or 0))
     loud = [r for r in rows if "buzz" in r["metrics"]][:MAX_LOUD]
     quiet = [r for r in rows if "buzz" not in r["metrics"]][:MAX_QUIET]
-    return loud + quiet, sources, errors
+    shown = {id(r) for r in loud + quiet}
+    for r in rows:
+        r["displayed"] = id(r) in shown
+    return rows, sources, errors
 
 
 # ----------------------------------------------------------------------
@@ -1188,6 +1201,9 @@ def snapshot_rows(candidates, run_date, anchors=None, spy=None):
                 "anchor_price": _json_safe(anchor_price),
                 "anchor_spy": _json_safe(anchor_spy),
                 "spy": _json_safe(spy),
+                # Defaults true so merger-arb and whale rows, which are not
+                # capped this way, keep meaning what they always did.
+                "displayed": c.get("displayed", True),
             }
         )
     return rows
@@ -1374,6 +1390,47 @@ def _directional(outcome, kind, metrics):
     return r, (None if spy is None else r - spy)
 
 
+def _fisher_right(N, K, n, k):
+    """One-tailed Fisher exact: P(X >= k), X ~ Hypergeometric(N, K, n).
+
+    Written out rather than imported because the workflow installs yfinance
+    and requests and nothing else, and pulling in scipy to evaluate a few
+    binomial coefficients would be the heaviest dependency in the project.
+    """
+    if n <= 0 or K <= 0 or N <= 0:
+        return None
+    total = math.comb(N, n)
+    if not total:
+        return None
+    return sum(
+        math.comb(K, x) * math.comb(N - K, n - x) / total
+        for x in range(k, min(K, n) + 1)
+        if 0 <= n - x <= N - K
+    )
+
+
+def _leave_one_out(xs, ys):
+    """(rho, worst_rho, index_of_most_influential).
+
+    A rank correlation over 40-odd points can rest almost entirely on one of
+    them. It did here: on the first fortnight of squeeze data the score
+    correlated +0.23 with the forward move, and dropping KOD alone — which
+    went +213% — took it to +0.09, with days-to-cover falling from +0.42 to
+    +0.06. That is not a correlation, it is an anecdote with a decimal point.
+    Reporting it every run rather than when someone thinks to check is the
+    difference between a number that can mislead and one that cannot.
+    """
+    base = _spearman(xs, ys)
+    if base is None or len(xs) < 5:
+        return base, None, None
+    worst, worst_i = base, None
+    for i in range(len(xs)):
+        r = _spearman(xs[:i] + xs[i + 1:], ys[:i] + ys[i + 1:])
+        if r is not None and abs(r) < abs(worst):
+            worst, worst_i = r, i
+    return base, worst, worst_i
+
+
 def backtest(kind="squeeze", quiet=False):
     """Did the score predict a move in the direction it flagged?
 
@@ -1467,6 +1524,26 @@ def backtest(kind="squeeze", quiet=False):
     r0, n0 = rho_of(scores)
     corr["score"] = {"rho": None if r0 is None else round(r0, 3), "n": n0}
     say(f"    score            {r0:+.2f}" if r0 is not None else "    score            n/a")
+
+    # How much of that rests on one name. Reported on the score itself because
+    # that is the number anyone would act on.
+    base_rho, loo_rho, loo_i = _leave_one_out(scores, ret)
+    robustness = None
+    if loo_rho is not None and loo_i is not None:
+        robustness = {
+            "rho": round(base_rho, 3),
+            "rho_ex_top": round(loo_rho, 3),
+            "dropped": rows[loo_i].get("ticker"),
+            "dropped_ret_pct": round(ret[loo_i], 1),
+            # A correlation that more than halves on one deletion is one
+            # observation wearing a statistic's clothes.
+            "fragile": abs(base_rho) > 0.01 and abs(loo_rho) < abs(base_rho) / 2,
+        }
+        say(f"    ex-{robustness['dropped']:<12}{loo_rho:+.2f}"
+            f"  (that one name moved {robustness['dropped_ret_pct']:+.0f}%)")
+        if robustness["fragile"]:
+            say("    ^ the correlation more than halves without it — one name,"
+                " not a finding")
     weights = WHALE_SCORE_WEIGHTS if kind == "whale" else SCORE_WEIGHTS
     for part in weights:
         r1, n1 = rho_of([(r["metrics"].get("score_parts") or {}).get(part) for r in rows])
@@ -1478,6 +1555,32 @@ def backtest(kind="squeeze", quiet=False):
         corr[f"raw.{raw}"] = {"rho": None if r2 is None else round(r2, 3), "n": n2}
         say(f"    raw  {raw:<20}{r2:+.2f}  (n={n2})" if r2 is not None
             else f"    raw  {raw:<20}n/a")
+
+    # Is the one thing that survived every robustness check actually there?
+    # Chatter was the sturdiest signal in the first fortnight — median +6.5%
+    # against +2.9%, and unlike the correlations it held up when the biggest
+    # mover was removed — but at 3 hits in 13 it was p=0.17, which is a
+    # direction and not a result. Computed every run so the day it clears
+    # stops depending on anyone remembering to look.
+    split = None
+    if kind == "squeeze":
+        with_buzz = [i for i, r in enumerate(rows) if (r.get("metrics") or {}).get("buzz")]
+        k_hits = sum(hits[i] for i in with_buzz)
+        p = _fisher_right(len(rows), sum(hits), len(with_buzz), k_hits)
+        if p is not None and with_buzz:
+            split = {
+                "on": "buzz",
+                "n_with": len(with_buzz),
+                "hits_with": k_hits,
+                "n_without": len(rows) - len(with_buzz),
+                "hits_without": sum(hits) - k_hits,
+                "p_one_tailed": round(p, 4),
+                "significant": p < 0.05,
+            }
+            say(f"  chatter split: {k_hits}/{len(with_buzz)} hit with buzz vs "
+                f"{split['hits_without']}/{split['n_without']} without"
+                f" — Fisher p={p:.3f}"
+                f"{' (SIGNIFICANT)' if p < 0.05 else ''}")
 
     # Count INDEPENDENT observations, not rows. A name listed five days running
     # files five rows whose outcomes are near-copies of each other, and the
@@ -1515,6 +1618,8 @@ def backtest(kind="squeeze", quiet=False):
         "trustworthy": trustworthy,
         "terciles": terciles,
         "spearman": corr,
+        "robustness": robustness,
+        "split": split,
         "episodes": episodes,
     }
 
@@ -1718,9 +1823,14 @@ def run(dry_run=False):
     sq_rows, sq_sources, sq_errors = screen_squeeze(owner, universe, flow)
     sources.update(sq_sources)
     errors.extend(sq_errors)
-    candidates.extend(sq_rows)
-    loud = sum(1 for r in sq_rows if "buzz" in r["metrics"])
-    print(f"[erebor] squeeze: {len(sq_rows)} name(s), {loud} with chatter")
+    # Only the displayed rows become candidates — that table IS the panel, and
+    # the prune below would delete anything not in it anyway. The full set goes
+    # to snapshots further down.
+    sq_shown = [r for r in sq_rows if r.get("displayed")]
+    candidates.extend(sq_shown)
+    loud = sum(1 for r in sq_shown if "buzz" in r["metrics"])
+    print(f"[erebor] squeeze: {len(sq_shown)} shown of {len(sq_rows)} qualifying,"
+          f" {loud} with chatter")
 
     kinds.append("whale")
     wh_rows, wh_sources, wh_errors = screen_whale(owner, flow, flow_failures, as_of)
@@ -1780,10 +1890,16 @@ def run(dry_run=False):
     # flow columns alone can't answer it.
     anchors = {k: load_prior_episode_anchors(k, as_of) for k in EPISODE_KINDS}
 
+    # Everything that gets recorded, displayed or not. The undisplayed squeeze
+    # rows never reach `erebor_candidates` (that table is the panel) but they
+    # do need episodes and anchors, because the backtest reads them and a row
+    # with no anchor cannot be measured from where it was first seen.
+    recorded = candidates + [r for r in sq_rows if not r.get("displayed")]
+
     # The episode rides in `metrics` as well as its own columns, because the
     # panel reads `erebor_candidates` and would otherwise need a second query
     # against the snapshots to draw a drift the scan already knows.
-    for c in candidates:
+    for c in recorded:
         if c["kind"] not in EPISODE_KINDS:
             continue
         prev = anchors[c["kind"]].get(c["ticker"])
@@ -1819,11 +1935,13 @@ def run(dry_run=False):
         if removed:
             print(f"[erebor] pruned {removed} superseded {kind} row(s)")
 
-    snaps = snapshot_rows(candidates, as_of, anchors, spy_close)
+    snaps = snapshot_rows(recorded, as_of, anchors, spy_close)
     upsert_snapshots(snaps)
     fresh = sum(1 for r in snaps if r["kind"] == "squeeze" and r["episode_start"] == as_of)
     held = sum(1 for r in snaps if r["kind"] == "squeeze") - fresh
+    shown = sum(1 for r in snaps if r["displayed"])
     print(f"[erebor] episodes: {fresh} new, {held} continuing")
+    print(f"[erebor] snapshots: {len(snaps)} recorded, {shown} of them displayed")
     upsert_run(
         {
             "user_id": owner,

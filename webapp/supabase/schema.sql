@@ -421,6 +421,18 @@ create table if not exists erebor_snapshots (
   episode_start date,
   anchor_price double precision,
   anchor_spy double precision,
+  -- Whether this reading was one the trader actually saw. The screen keeps
+  -- every name that clears its thresholds but shows only the top few, and the
+  -- discarded ones were costing nothing to compute and everything to throw
+  -- away: with five positive events in the first fortnight, the binding
+  -- constraint on learning anything is sample size, not data access.
+  --
+  -- Both questions stay answerable because the flag is stored rather than
+  -- implied. "Does the score rank names correctly" wants every row, including
+  -- the low scores that populate the bottom of the range. "Did the screen as
+  -- shown work" wants displayed only. Conflating them would quietly answer
+  -- the easier one.
+  displayed boolean not null default true,
   -- SPY's close on this run's session. Stored on every row because a name
   -- that rose while the whole tape rose is not squeezing, and that comparison
   -- cannot be reconstructed later once the panel only has the name's price.
