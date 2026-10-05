@@ -82,13 +82,19 @@ SWING_RIGHT = 5
 # entry fill. A signal is Bad when price goes AUTO_BAD_STOP against it before
 # AUTO_BAD_TARGET in its favour, and Good when it goes AUTO_GOOD_TARGET in its
 # favour before AUTO_GOOD_STOP against it. The two are mutually exclusive (a
-# Good path reaches +$1 before -$0.25, so it can't have hit -$0.50 first), and
+# Good path reaches +$1 on its way to +$1.50 without touching -$0.50), and
 # the gap between them is left unlabeled on purpose — only clear-cut signals
 # become training examples.
+#
+# Good is 1:3 risk:reward. It was +$2 before -$0.25 at first, but a 1-minute
+# RTH bar's full range averages ~$0.25, so that stop sat inside one candle's
+# noise: ~11% of random entries passed, and a 3-round walk-forward search
+# (2026-10-04) found no rule set that beat random out of sample. At $0.50 the
+# stop clears ordinary bar noise and a random entry passes ~25% of the time.
 AUTO_BAD_STOP = 0.50
 AUTO_BAD_TARGET = 1.00
-AUTO_GOOD_STOP = 0.25
-AUTO_GOOD_TARGET = 2.00
+AUTO_GOOD_STOP = 0.50
+AUTO_GOOD_TARGET = 1.50
 # `strategy` value on auto-graded rows. Load-bearing: it's how pruning tells
 # these apart from the trader's hand labels, which pin their sessions forever
 # while auto rows expire with their bars — see prune_old_bars_supabase().

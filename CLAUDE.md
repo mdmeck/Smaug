@@ -49,7 +49,7 @@ Key invariants:
 - **PostgREST caps responses at 1000 rows.** Always page. Python: `load_all_bars_supabase()`. JS: `fetchAllRows()` in `App.jsx`.
 - Write patterns differ per table and are deliberate: `bars` upsert `on_conflict=ts`; `analysis_runs` and `entry_models` are **append-only** (history is the point — you can see the model evolve); `daily_briefs` and `trade_feedback` are one row per user, upserted `on_conflict=user_id` with no history.
 - `bars` is pruned to a 60-day window each run, except sessions pinned by a hand-entered training example.
-- **The pipeline also writes `training_examples`**: after each session it grades the indicator's L/S signals ($0.50-against-before-$1 = Bad, $2-before-$0.25-against = Good) and inserts them with `strategy = 'Auto'`, `user_id` explicit, ignore-duplicates so a hand label always wins. `Auto` rows don't pin their session and are deleted with its bars. Thresholds are the `AUTO_*` constants.
+- **The pipeline also writes `training_examples`**: after each session it grades the indicator's L/S signals ($0.50-against-before-$1 = Bad, $1.50-before-$0.50-against = Good, 1:3) and inserts them with `strategy = 'Auto'`, `user_id` explicit, ignore-duplicates so a hand label always wins. `Auto` rows don't pin their session and are deleted with its bars. Thresholds are the `AUTO_*` constants.
 
 ## Pipeline conventions
 
