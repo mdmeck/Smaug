@@ -12,7 +12,7 @@ There is no server-side app code. The "AI routine" is a Claude Code routine / cl
 
 Read these before changing anything they cover; they are the contract the AI routine is written against, so edits here change routine behavior:
 
-- **`docs/smaug-project-knowledge.md`** — the full spec: data sources, every feature and target definition, how training examples join to bar snapshots, the PineScript generation requirements, and the `entry_models` output schema. This file is pinned into the claude.ai Project knowledge.
+- **`docs/smaug-project-knowledge.md`** — the full spec: data sources, every feature and target definition, how training examples join to bar snapshots, the PineScript generation requirements, and the `entry_models` output schema. The scheduled Smaug routine fetches it from `main` on GitHub every run (via `docs/routine-prompt.md`), so a merged edit takes effect at the next run — no re-upload needed. Only a hand-pasted claude.ai conversation (the `CopyPasteAI` fallback) would need a fresh copy.
 - **`pinescript/README.md`** — the fragment assembly contract (fetch order, naming prefixes, label style). See "PineScript fragments" below.
 
 ## Commands
