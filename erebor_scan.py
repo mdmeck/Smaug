@@ -129,6 +129,20 @@ def load_open_deals():
     return rows
 
 
+# The columns `erebor_candidates` actually has. Rows are projected onto this
+# before being sent, for two reasons. PostgREST rejects a batch whose objects
+# do not all carry identical keys ("All object keys must match"), so one row
+# picking up a working field the others lack fails the whole write — which is
+# exactly how `displayed`, a snapshot-only concept, took down a scan once it
+# started being set on squeeze rows and not on whale ones. And a key the table
+# has no column for is an error either way, so dropping it here beats
+# discovering it in a 400.
+CANDIDATE_COLUMNS = (
+    "user_id", "as_of", "ticker", "kind", "company",
+    "price", "price_as_of", "score", "metrics", "note",
+)
+
+
 def upsert_candidates(rows):
     """Upsert on (user_id, as_of, ticker, kind).
 
@@ -140,6 +154,16 @@ def upsert_candidates(rows):
     """
     if not rows:
         return
+    payload = [{k: r[k] for k in CANDIDATE_COLUMNS if k in r} for r in rows]
+    keysets = {frozenset(r) for r in payload}
+    if len(keysets) > 1:
+        # Should be unreachable after the projection; if it ever fires, the
+        # 400 it prevents is far harder to read than this is.
+        missing = set().union(*keysets) - set.intersection(*map(set, keysets))
+        raise RuntimeError(
+            f"candidate rows disagree on columns {sorted(missing)} — "
+            "PostgREST requires identical keys across a batch"
+        )
     headers = _supabase_headers(
         prefer="resolution=merge-duplicates,return=minimal"
     )
@@ -147,7 +171,7 @@ def upsert_candidates(rows):
         f"{SUPABASE_URL}/rest/v1/erebor_candidates",
         headers=headers,
         params={"on_conflict": "user_id,as_of,ticker,kind"},
-        json=rows,
+        json=payload,
         timeout=REQUEST_TIMEOUT,
     )
     _raise_for_status(resp)
