@@ -6,7 +6,9 @@ implemented in `webapp/src/App.jsx` as the `B` token object plus the
 `WeekCalendar` / `TimelineItem` / `BriefPanel` / `SentimentBody` / `CasesBody`
 components.
 
-**Scope: the Morning Brief tab only.** The rest of the app still uses `T` (the
+**Scope: the Morning Brief and Dashboard tabs, plus the Whale Action and
+Roaring Kitty scanner pages** (each is a single `B` panel moved out of the
+brief). The rest of the app still uses `T` (the
 "Apex Forge" theme — Bebas Neue display, Lato, warm neutrals). The two are
 deliberately not merged. This system is cooler, more spacious, and sets body
 copy roughly 10% larger; applying it halfway would read as a bug rather than a

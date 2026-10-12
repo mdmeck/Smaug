@@ -1272,7 +1272,7 @@ function CasesBody({ data }) {
 // ---------- Morning Brief tab ----------
 // Styled from the imported Claude Design system (`B` tokens, docs/design.md)
 // rather than the app-wide `T` — see the note on `B` for why the two coexist.
-function MorningBriefTab({ panels, lastRun, ereborPanels, ereborRun, ereborError, ereborBacktests }) {
+function MorningBriefTab({ panels, lastRun }) {
   return (
     <div
       style={{
@@ -1311,26 +1311,6 @@ function MorningBriefTab({ panels, lastRun, ereborPanels, ereborRun, ereborError
         </BriefPanel>
       </div>
 
-      {/* Market context, below the trader's own read of the day. Both are
-          routine-written jsonb, so each gets its own boundary — a shape break
-          in one must not take the other, or the rest of the brief, with it. */}
-      <PanelBoundary>
-        <WhaleActionPanel
-          whales={ereborPanels.whales}
-          run={ereborRun}
-          error={ereborError}
-          backtest={ereborBacktests.whale}
-        />
-      </PanelBoundary>
-      <PanelBoundary>
-        <SqueezePanel
-          squeezes={ereborPanels.squeezes}
-          run={ereborRun}
-          error={ereborError}
-          backtest={ereborBacktests.squeeze}
-        />
-      </PanelBoundary>
-
       <div
         style={{
           textAlign: "center",
@@ -1344,6 +1324,21 @@ function MorningBriefTab({ panels, lastRun, ereborPanels, ereborRun, ereborError
         actionable against your platform before trading. Informational only,
         not financial advice.
       </div>
+    </div>
+  );
+}
+
+// ---------- scanner pages (Whale Action, Roaring Kitty) ----------
+// Each Erebor panel used to sit at the foot of the Morning Brief; they are now
+// their own pages under Scanners, beside Merger Arb and Scanner History, so all
+// of Erebor's output is in one place. The panels keep `B` — they were drawn in
+// it — and nothing else is on these pages, so no tab mixes the two palettes.
+// Each keeps its own boundary: a shape break in routine-written jsonb must not
+// blank the page chrome with it.
+function ScannerPage({ children }) {
+  return (
+    <div style={{ fontFamily: B.sans, color: B.ink }}>
+      <PanelBoundary>{children}</PanelBoundary>
     </div>
   );
 }
@@ -5322,48 +5317,6 @@ function TrainingDataTab() {
 }
 
 // ---------- candlestick chart ----------
-const EMPTY_BARS = [];
-
-function aggregateBars(bars, minutes) {
-  if (minutes <= 1) {
-    return bars.map((b) => ({
-      time: Math.floor(new Date(b.ts).getTime() / 1000),
-      open: b.o,
-      high: b.h,
-      low: b.l,
-      close: b.c,
-    }));
-  }
-  const out = [];
-  let bucket = null;
-  let bucketStart = null;
-  for (const b of bars) {
-    const minuteOfDay = (() => {
-      const d = new Date(b.ts);
-      return d.getHours() * 60 + d.getMinutes();
-    })();
-    // bucket boundaries anchored to the 9:30 session open
-    const bucketKey = Math.floor((minuteOfDay - 9 * 60 - 30) / minutes);
-    if (bucketKey !== bucketStart) {
-      if (bucket) out.push(bucket);
-      bucketStart = bucketKey;
-      bucket = {
-        time: Math.floor(new Date(b.ts).getTime() / 1000),
-        open: b.o,
-        high: b.h,
-        low: b.l,
-        close: b.c,
-      };
-    } else {
-      bucket.high = Math.max(bucket.high, b.h);
-      bucket.low = Math.min(bucket.low, b.l);
-      bucket.close = b.c;
-    }
-  }
-  if (bucket) out.push(bucket);
-  return out;
-}
-
 // ET wall-clock minutes for a chart time (unix seconds). Resolved in market
 // time rather than the browser's, so the session boundary lands correctly for
 // a trader whose machine isn't on ET.
@@ -5560,85 +5513,6 @@ function CandleChart({ data, markers, onMarkerClick }) {
   }, [markers]);
 
   return <div ref={containerRef} style={{ width: "100%" }} />;
-}
-
-function DailyCandles({ dayBars, dayIndex, setDayIndex, timeframe, setTimeframe }) {
-  const day = dayBars && dayBars.days[dayIndex];
-  const bars = (dayBars && dayBars.byDay.get(day)) || EMPTY_BARS;
-  const data = useMemo(() => aggregateBars(bars, timeframe), [bars, timeframe]);
-
-  if (!dayBars || dayBars.days.length === 0) return null;
-  const navBtn = (disabled) => ({
-    ...retryBtn,
-    padding: "4px 10px",
-    opacity: disabled ? 0.35 : 1,
-    cursor: disabled ? "default" : "pointer",
-  });
-
-  return (
-    <div
-      style={{
-        background: T.panel,
-        border: `1px solid ${T.panelEdge}`,
-        borderRadius: 10,
-        padding: 14,
-        marginBottom: 14,
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          flexWrap: "wrap",
-          alignItems: "center",
-          gap: 10,
-          marginBottom: 12,
-        }}
-      >
-        <button
-          onClick={() => setDayIndex((i) => Math.max(0, i - 1))}
-          disabled={dayIndex === 0}
-          style={navBtn(dayIndex === 0)}
-        >
-          ← Prev
-        </button>
-        <span style={{ fontFamily: T.mono, fontSize: 12, color: T.ink, minWidth: 90, textAlign: "center" }}>
-          {day}
-        </span>
-        <button
-          onClick={() => setDayIndex((i) => Math.min(dayBars.days.length - 1, i + 1))}
-          disabled={dayIndex === dayBars.days.length - 1}
-          style={navBtn(dayIndex === dayBars.days.length - 1)}
-        >
-          Next →
-        </button>
-        <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
-          {[1, 5, 15].map((m) => {
-            const active = m === timeframe;
-            return (
-              <button
-                key={m}
-                onClick={() => setTimeframe(m)}
-                style={{
-                  background: active ? T.amber : "transparent",
-                  color: active ? "#141414" : T.dim,
-                  border: `1px solid ${active ? T.amber : T.panelEdge}`,
-                  borderRadius: 6,
-                  padding: "5px 12px",
-                  fontFamily: T.mono,
-                  fontSize: 11,
-                  fontWeight: active ? 700 : 400,
-                  cursor: "pointer",
-                }}
-              >
-                {m} min
-              </button>
-            );
-          })}
-        </div>
-      </div>
-      <CandleChart data={data} />
-    </div>
-  );
 }
 
 // ---------- Technicals tab ----------
@@ -5855,31 +5729,6 @@ function TechnicalsTab() {
   const [fetching, setFetching] = useState(false);
   const [target, setTarget] = useState(null);
   const [ai, setAi] = useState({ status: "idle", data: null, prompt: null });
-  const [dayBars, setDayBars] = useState(null); // { days: ["2026-07-10", ...], byDay: Map }
-  const [dayIndex, setDayIndex] = useState(0);
-  const [timeframe, setTimeframe] = useState(1);
-
-  useEffect(() => {
-    (async () => {
-      try {
-        const rows = await fetchAllRows("bars", {
-          select: "ts,open,high,low,close,volume",
-          orderBy: "ts",
-        });
-        const byDay = new Map();
-        for (const r of rows) {
-          const day = r.ts.slice(0, 10);
-          if (!byDay.has(day)) byDay.set(day, []);
-          byDay.get(day).push({ ts: r.ts, o: r.open, h: r.high, l: r.low, c: r.close, v: r.volume });
-        }
-        const days = [...byDay.keys()].sort();
-        setDayBars({ days, byDay });
-        setDayIndex(days.length - 1);
-      } catch {
-        // no candle data available — chart section stays hidden
-      }
-    })();
-  }, []);
 
   useEffect(() => {
     (async () => {
@@ -6069,15 +5918,6 @@ function TechnicalsTab() {
           {showPaste ? "Cancel" : results ? "Update data" : "Paste results"}
         </button>
       </div>
-
-      {/* candlestick chart */}
-      <DailyCandles
-        dayBars={dayBars}
-        dayIndex={dayIndex}
-        setDayIndex={setDayIndex}
-        timeframe={timeframe}
-        setTimeframe={setTimeframe}
-      />
 
       {/* paste box */}
       {showPaste && (
@@ -7678,11 +7518,10 @@ function ModelTab() {
 // Sidebar nav. Items with `children` render as an expandable group; `tab`
 // always holds a leaf name, never a group name, so the content switch below
 // only ever matches leaves.
-// ---------- erebor: screen tab ----------
-// Erebor's own surface. The two Morning Brief panels show Erebor's routine-fed
-// screens because that is where the trader already looks in the morning; this
-// tab is the module's own view, and the only place merger-arb candidates
-// appear at all.
+// ---------- erebor: merger arb tab ----------
+// The merger-arb screen. Whale flow and squeezes have their own Scanner pages
+// (the `B` panels above), so this tab shows only `merger_arb` candidates — the
+// one kind with no other surface.
 //
 // Deliberately styled with `T`, not `B`. `B` is the Morning Brief / Dashboard
 // palette imported from the Claude Design project and is contracted by
@@ -7860,6 +7699,7 @@ function EreborTab() {
   const latest = useMemo(() => {
     const seen = new Map();
     for (const r of rows) {
+      if (r.kind !== "merger_arb") continue;
       const key = `${r.ticker}|${r.kind}`;
       if (!seen.has(key)) seen.set(key, r); // rows arrive newest-first
     }
@@ -7877,11 +7717,10 @@ function EreborTab() {
   return (
     <div>
       <div style={{ fontSize: 12, color: T.dim, marginBottom: 14, lineHeight: 1.6 }}>
-        Single-name event screening — separate from the SPY model. Merger arb is
-        computed by <code style={{ fontFamily: T.mono }}>erebor_scan.py</code> from
-        published deal terms; squeezes and whale flow come from the Erebor routine.
-        The multiple is what the tape implies the combined company is worth
-        against the price the deal was actually struck at.
+        Single-name event screening — separate from the SPY model. Computed by{" "}
+        <code style={{ fontFamily: T.mono }}>erebor_scan.py</code> from published
+        deal terms. The multiple is what the tape implies the combined company is
+        worth against the price the deal was actually struck at.
       </div>
 
       {loadError && (
@@ -7919,7 +7758,7 @@ function EreborTab() {
           {loadError
             ? "Nothing to show — the read above failed."
             : run
-            ? "Scan ran and found nothing to flag."
+            ? "Scan ran and found no merger-arb dislocations."
             : "No scan has run yet. Add a deal to erebor_deals, then run erebor_scan.py."}
         </div>
       ) : (
@@ -7934,16 +7773,16 @@ function EreborTab() {
 }
 
 
-// ---------- Erebor: History ----------
-// Every reading the screen has ever taken, from `erebor_snapshots`. The Screen
-// tab shows what is dislocated NOW and is pruned to exactly that; this is the
+// ---------- Erebor: Scanner History ----------
+// Every reading the screen has ever taken, from `erebor_snapshots`. The
+// per-scanner pages show what is dislocated NOW and is pruned to exactly that; this is the
 // other half, and the distinction is the point. Names leave the screen partly
 // BECAUSE they worked — the settlement updates, the chatter moves on, the flow
 // normalises — so a view built only from current members is biased toward the
 // ones that did nothing. Nothing here is ever pruned.
 //
-// Styled with `T`, like the rest of the app and like the Screen tab beside it.
-// The `B` palette stops at the Morning Brief and Dashboard (docs/design.md).
+// Styled with `T`, like the rest of the app and like the Merger Arb tab.
+// `B` is confined to the tabs docs/design.md scopes it to.
 
 const HIST_KINDS = [
   ["all", "All"],
@@ -7957,7 +7796,7 @@ const histPct = (v) =>
     ? "—"
     : `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}%`;
 
-// Green/red is earned here in a way it is not on the Screen tab's magnitudes:
+// Green/red is earned here in a way it is not on the Merger Arb tab's magnitudes:
 // a realised price move does carry a direction.
 const histTone = (v) =>
   v === null || v === undefined || !Number.isFinite(v)
@@ -8116,8 +7955,8 @@ function EreborHistoryTab() {
   return (
     <div>
       <div style={{ fontSize: 12, color: T.dim, marginBottom: 14, lineHeight: 1.6 }}>
-        Every reading the screen has taken, kept as it was shown. The Screen tab
-        is pruned to what is dislocated now; nothing here is ever removed, which
+        Every reading the scanners have taken, kept as it was shown. The scanner
+        pages are pruned to what is flagged now; nothing here is ever removed, which
         is what makes it possible to ask whether a flag was any good. Names drop
         off the screen partly <em>because</em> they worked, so judging the screen
         by its current members would flatter the ones that did nothing.
@@ -8283,16 +8122,21 @@ function EreborHistoryTab() {
 }
 
 const NAV = [
-  { label: "Morning Brief" },
-  { label: "Dashboard" },
-  { label: "Journal" },
-  { label: "Modeling", children: ["Charts", "Training Data", "Indicator"] },
-  // Erebor is its own group, not a child of Modeling: it screens single names
-  // for event dislocations and has nothing to do with the SPY entry model.
-  // Screen is what is dislocated now; History is every name ever flagged,
-  // including the ones that have since dropped off — which is the only way to
-  // ask whether a flag was any good.
-  { label: "Erebor", children: ["Screen", "History"] },
+  { label: "Reports", children: ["Morning Brief", "Dashboard", "Journal"] },
+  // Everything behind the SPY entry model: the synthesized rules + preview, the
+  // labeled examples they are fit on, and the pipeline's feature analysis.
+  {
+    label: "Indicators",
+    children: ["Indicator", "Training Data", "Feature Analysis"],
+  },
+  // Erebor's single-name screens, which have nothing to do with the SPY model.
+  // One page per scanner shows what is flagged now; Scanner History is every
+  // name ever flagged, including the ones that have since dropped off — which
+  // is the only way to ask whether a flag was any good.
+  {
+    label: "Scanners",
+    children: ["Whale Action", "Roaring Kitty", "Merger Arb", "Scanner History"],
+  },
   { label: "Resources" },
 ];
 
@@ -8589,25 +8433,41 @@ export default function Smaug() {
           <MorningBriefTab
             panels={panels}
             lastRun={lastRun}
-            ereborPanels={ereborPanels}
-            ereborRun={ereborRun}
-            ereborError={ereborError}
-            ereborBacktests={ereborBacktests}
           />
         )}
         {tab === "Dashboard" && (
 <DashboardTab />
         )}
         {tab === "Journal" && <JournalTab />}
-        {tab === "Charts" && (
+        {tab === "Indicator" && <ModelTab />}
+        {tab === "Training Data" && <TrainingDataTab />}
+        {tab === "Feature Analysis" && (
           <div style={{ maxWidth: 1100, margin: "0 auto" }}>
             <TechnicalsTab />
           </div>
         )}
-        {tab === "Training Data" && <TrainingDataTab />}
-        {tab === "Indicator" && <ModelTab />}
-        {tab === "Screen" && <EreborTab />}
-        {tab === "History" && <EreborHistoryTab />}
+        {tab === "Whale Action" && (
+          <ScannerPage>
+            <WhaleActionPanel
+              whales={ereborPanels.whales}
+              run={ereborRun}
+              error={ereborError}
+              backtest={ereborBacktests.whale}
+            />
+          </ScannerPage>
+        )}
+        {tab === "Roaring Kitty" && (
+          <ScannerPage>
+            <SqueezePanel
+              squeezes={ereborPanels.squeezes}
+              run={ereborRun}
+              error={ereborError}
+              backtest={ereborBacktests.squeeze}
+            />
+          </ScannerPage>
+        )}
+        {tab === "Merger Arb" && <EreborTab />}
+        {tab === "Scanner History" && <EreborHistoryTab />}
         {tab === "Resources" && <ResourcesTab />}
           </div>
         </div>
