@@ -1255,6 +1255,13 @@ def compute_outcome(hist, base_date, base_price, spy_hist=None):
     max_high = float(fwd["High"].max())
     min_low = float(fwd["Low"].min())
     last_close = float(fwd["Close"].iloc[-1])
+    # yfinance returns NaN bars for halted sessions and for names that delist
+    # mid-window, and a NaN here poisons every figure downstream. Python's json
+    # then writes a bare NaN token, which PostgREST rejects — the same hazard
+    # _json_safe() exists for, reached by a different road. Returning None
+    # leaves the row pending rather than filing an unscorable reading.
+    if not all(math.isfinite(v) for v in (max_high, min_low, last_close)):
+        return None
     ret_max = (max_high / base_price - 1.0) * 100.0
     spy_ret = None
     if spy_hist is not None and not spy_hist.empty:
@@ -1323,7 +1330,8 @@ def fill_outcomes(dry_run=False):
     for r in pending:
         by_ticker.setdefault(r["ticker"], []).append(r)
 
-    filled, today = 0, datetime.now(ZoneInfo("America/New_York")).date()
+    filled, failed = 0, 0
+    today = datetime.now(ZoneInfo("America/New_York")).date()
     # One SPY pull covering every pending row, so each outcome can be stated
     # against the tape it happened in. A failure here degrades to unbenchmarked
     # outcomes rather than costing the pass — the raw figures still stand.
@@ -1351,15 +1359,35 @@ def fill_outcomes(dry_run=False):
             out = compute_outcome(hist, base_date, r.get("price"), spy_hist)
             if out is None:
                 continue
-            filled += 1
+            # Belt as well as braces: every value is passed through _json_safe
+            # before it can reach the wire. One non-finite float used to abort
+            # the WHOLE pass — the exception escaped fill_outcomes, run()
+            # caught and printed it, the scan went on reporting success, and
+            # outcomes silently stopped filling for a fortnight while 700 rows
+            # piled up pending. A scan that looks healthy while its only
+            # measurement quietly dies is the exact failure this module was
+            # built to stop happening elsewhere.
+            out = _json_safe_deep(out)
             tag = "POP " if out["pop"] else "    "
             vs = ("" if out["ret_max_vs_spy_pct"] is None
                   else f"  vs SPY {out['ret_max_vs_spy_pct']:+6.1f}%")
+            if not dry_run:
+                try:
+                    patch_snapshot(
+                        r["id"], {"outcome": out, "outcome_as_of": today.isoformat()}
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    # One row's write must never cost the other 700. The row
+                    # stays pending and is retried tomorrow.
+                    failed += 1
+                    print(f"  [outcome] {t} {base_date}: {type(exc).__name__}: {exc}",
+                          file=sys.stderr)
+                    continue
+            filled += 1
             print(f"  [{tag}] {t:<6} {base_date}  max {out['ret_max_pct']:+6.1f}%"
                   f"  close {out['ret_close_pct']:+6.1f}%{vs}")
-            if not dry_run:
-                patch_snapshot(r["id"], {"outcome": out, "outcome_as_of": today.isoformat()})
-    print(f"[erebor] outcomes: {filled} filled, {len(pending) - filled} still pending")
+    print(f"[erebor] outcomes: {filled} filled, {len(pending) - filled} still pending"
+          + (f", {failed} write(s) failed" if failed else ""))
     return filled
 
 
