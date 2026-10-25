@@ -220,6 +220,18 @@ create policy "analysis_runs_public_read"
   for select
   using (true);
 
+-- One row per date that has bars, so the webapp can build its day picker in
+-- one request. Paging `select ts` over the whole table did the same job but
+-- costs one request per 1000 bars, which at a year of retention (~170k rows)
+-- is ~170 sequential round trips before the tab can render. UTC date, to
+-- match the webapp's `${day}T00:00:00Z` range filters — every stored bar
+-- (04:00-20:00 ET) falls on the same date in UTC and ET. security_invoker so
+-- the view reads through `bars`' own public-read policy rather than as owner.
+create or replace view bar_days with (security_invoker = true) as
+  select distinct (ts at time zone 'UTC')::date as day from bars;
+
+grant select on bar_days to anon, authenticated;
+
 
 -- =====================================================================
 -- Erebor — single-name event screening

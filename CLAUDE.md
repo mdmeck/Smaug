@@ -48,8 +48,8 @@ Key invariants:
 - The anon key in `webapp/src/supabaseClient.js` is public by design — RLS is what protects the data, not secrecy. `createClient()` throws synchronously on a malformed URL and would crash the whole app, so keep it a well-formed URL.
 - **PostgREST caps responses at 1000 rows.** Always page. Python: `load_all_bars_supabase()`. JS: `fetchAllRows()` in `App.jsx`.
 - Write patterns differ per table and are deliberate: `bars` upsert `on_conflict=ts`; `analysis_runs` and `entry_models` are **append-only** (history is the point — you can see the model evolve); `daily_briefs` and `trade_feedback` are one row per user, upserted `on_conflict=user_id` with no history.
-- `bars` is pruned to a 60-day window each run, except sessions pinned by a hand-entered training example.
-- **The pipeline also writes `training_examples`**: after each session it grades the indicator's L/S signals ($0.50-against-before-$1 = Bad, $1.50-before-$0.50-against = Good, 1:3) and inserts them with `strategy = 'Auto'`, `user_id` explicit, ignore-duplicates so a hand label always wins. `Auto` rows don't pin their session and are deleted with its bars. Thresholds are the `AUTO_*` constants.
+- `bars` is pruned to a 1-year window each run (`RETENTION_DAYS`), except sessions pinned by a hand-entered training example. At full depth that's ~170k rows, so the webapp never loads the whole table: day pickers read the `bar_days` view and fetch one day's bars at a time (`fetchBarDays()` / `fetchDayBars()`).
+- **The pipeline also writes `training_examples`**: after each session it grades the indicator's L/S signals ($0.50-against-before-$1 = Bad, $1.50-before-$0.50-against = Good, 1:3) and inserts them with `strategy = 'Auto'`, `user_id` explicit, ignore-duplicates so a hand label always wins. `Auto` rows don't pin their session and expire after `AUTO_RETENTION_DAYS` (60), well before their bars, so the routine's reading set stays small. Thresholds are the `AUTO_*` constants.
 
 ## Pipeline conventions
 

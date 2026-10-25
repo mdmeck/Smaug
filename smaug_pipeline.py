@@ -69,7 +69,8 @@ RTH_ONLY = True                 # keep regular trading hours only (9:30-16:00 ET
 TEST_FRACTION = 0.25            # most recent 25% of data held out for testing
 MIN_ROWS = 500                  # refuse to run analysis on less than this
 MIN_PATTERN_HITS = 30           # don't report a candlestick pattern that fired less often
-RETENTION_DAYS = 60             # prune bars older than this so the table stays bounded
+RETENTION_DAYS = 365            # prune bars older than this so the table stays bounded
+AUTO_RETENTION_DAYS = 60        # Auto-graded training examples expire much sooner — see prune_old_auto_examples_supabase()
 # Swing-pivot window for the market-structure features. A pivot must be the
 # extreme of a (LEFT + RIGHT + 1) bar window, and is only *knowable* RIGHT bars
 # after it forms — that lag is load-bearing, see compute_features(). At 5/5 on
@@ -97,7 +98,8 @@ AUTO_GOOD_STOP = 0.50
 AUTO_GOOD_TARGET = 1.50
 # `strategy` value on auto-graded rows. Load-bearing: it's how pruning tells
 # these apart from the trader's hand labels, which pin their sessions forever
-# while auto rows expire with their bars — see prune_old_bars_supabase().
+# while auto rows expire after AUTO_RETENTION_DAYS — see
+# prune_old_auto_examples_supabase().
 AUTO_STRATEGY = "Auto"
 # training_examples is owner-only and user_id is NOT NULL DEFAULT auth.uid(),
 # which is NULL under the service-role key — so it must be passed explicitly.
@@ -221,7 +223,8 @@ def _protected_session_dates():
     labels are the scarcest data here and can't be regenerated, unlike bars.
 
     Auto-graded rows don't pin: they land on nearly every session, so letting
-    them pin would stop pruning altogether. They expire with their bars instead.
+    them pin would stop pruning altogether. They expire on their own, shorter
+    clock instead (prune_old_auto_examples_supabase), well before their bars.
     `neq` alone would also drop rows whose strategy is NULL, hence the `or`.
 
     Read with the service-role key, which bypasses the RLS on this table."""
@@ -287,20 +290,29 @@ def prune_old_bars_supabase(days=RETENTION_DAYS):
             timeout=30,
         )
         _raise_for_status(resp)
-        # the session's auto-graded examples go with it — without their bars
-        # the routine can't join a snapshot, so they'd be dangling rows
-        resp = requests.delete(
-            f"{SUPABASE_URL}/rest/v1/training_examples",
-            headers=headers,
-            params={
-                "strategy": f"eq.{AUTO_STRATEGY}",
-                "entry_at": [f"gte.{start.isoformat()}", f"lt.{end.isoformat()}"],
-            },
-            timeout=30,
-        )
-        _raise_for_status(resp)
 
     return len(stale_dates - protected), len(stale_dates & protected)
+
+
+def prune_old_auto_examples_supabase(days=AUTO_RETENTION_DAYS):
+    """Drop Auto-graded training examples older than `days`. On a much shorter
+    clock than the bars: the routine reads every training example each run,
+    and a year of Auto rows (5-15 a session) would bury the hand labels and
+    bloat its context. Recent signals are also the relevant ones — the rules
+    that produced an old Auto row have usually been retuned since."""
+    cutoff = pd.Timestamp.now(tz="America/New_York") - pd.Timedelta(days=days)
+    resp = requests.delete(
+        f"{SUPABASE_URL}/rest/v1/training_examples",
+        headers=_supabase_headers(prefer="return=representation"),
+        params={
+            "strategy": f"eq.{AUTO_STRATEGY}",
+            "entry_at": f"lt.{cutoff.isoformat()}",
+            "select": "id",
+        },
+        timeout=30,
+    )
+    _raise_for_status(resp)
+    return len(resp.json())
 
 
 def load_all_bars_supabase():
@@ -1342,6 +1354,9 @@ def main():
 
     dropped, pinned = prune_old_bars_supabase()
     print(f"pruned {dropped} stale session(s); kept {pinned} pinned by training examples")
+    if not args.synthetic:
+        print(f"pruned {prune_old_auto_examples_supabase()} Auto example(s) "
+              f"older than {AUTO_RETENTION_DAYS} days")
 
     bars = load_all_bars_supabase()
     if len(bars) < MIN_ROWS:

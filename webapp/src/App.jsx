@@ -22,6 +22,26 @@ async function fetchAllRows(table, { select = "*", orderBy, ascending = true } =
   return all;
 }
 
+// Dates ("YYYY-MM-DD", UTC) that have bars, oldest first — from the bar_days
+// view, so a day picker costs one request instead of paging every bar's ts.
+async function fetchBarDays() {
+  const rows = await fetchAllRows("bar_days", { select: "day", orderBy: "day" });
+  return rows.map((r) => r.day);
+}
+
+// One UTC day's bars. Every stored bar (04:00-20:00 ET) falls on the same date
+// in UTC and ET, so this is exactly one session.
+async function fetchDayBars(day, select) {
+  const { data, error } = await supabase
+    .from("bars")
+    .select(select)
+    .gte("ts", `${day}T00:00:00Z`)
+    .lt("ts", `${day}T23:59:59.999Z`)
+    .order("ts", { ascending: true });
+  if (error) throw new Error(error.message);
+  return data;
+}
+
 // ---------- theme (Apex Forge) ----------
 const T = {
   bg: "#141414",
@@ -6544,35 +6564,52 @@ function ResourcesTab() {
 }
 
 // ---------- Raw Data tab ----------
+// Day list first, then the selected day's bars on demand. It used to pull every
+// bar with its feature blob up front, which at a year of retention (~170k
+// rows) is far too much for one page load.
 function RawDataTab() {
-  const [dayBars, setDayBars] = useState(null);
+  const [days, setDays] = useState(null);
   const [dayIndex, setDayIndex] = useState(0);
   const [loadState, setLoadState] = useState("loading");
+  const [dayData, setDayData] = useState({ day: null, bars: [], featureCols: [] });
 
   useEffect(() => {
     (async () => {
       try {
-        const rows = await fetchAllRows("bars", { orderBy: "ts" });
-        const featureColSet = new Set();
-        const byDay = new Map();
-        for (const row of rows) {
-          const day = row.ts.slice(0, 10);
-          if (!byDay.has(day)) byDay.set(day, []);
-          const features = row.features || {};
-          Object.keys(features).forEach((k) => featureColSet.add(k));
-          byDay.get(day).push({
-            ts: row.ts, o: row.open, h: row.high, l: row.low, c: row.close, v: row.volume, features,
-          });
-        }
-        const days = [...byDay.keys()].sort();
-        setDayBars({ days, byDay, featureCols: [...featureColSet] });
-        setDayIndex(days.length - 1);
+        const d = await fetchBarDays();
+        setDays(d);
+        setDayIndex(Math.max(0, d.length - 1));
       } catch {
         // no bar data available
       }
       setLoadState("ready");
     })();
   }, []);
+
+  const day = days && days[dayIndex];
+
+  useEffect(() => {
+    if (!day) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const rows = await fetchDayBars(day, "ts,open,high,low,close,volume,features");
+        if (cancelled) return;
+        const featureColSet = new Set();
+        const bars = rows.map((row) => {
+          const features = row.features || {};
+          Object.keys(features).forEach((k) => featureColSet.add(k));
+          return { ts: row.ts, o: row.open, h: row.high, l: row.low, c: row.close, v: row.volume, features };
+        });
+        setDayData({ day, bars, featureCols: [...featureColSet] });
+      } catch {
+        if (!cancelled) setDayData({ day, bars: [], featureCols: [] });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [day]);
 
   if (loadState === "loading") {
     return (
@@ -6582,7 +6619,7 @@ function RawDataTab() {
     );
   }
 
-  if (!dayBars || dayBars.days.length === 0) {
+  if (!days || days.length === 0) {
     return (
       <div style={{ color: T.dim, fontSize: 13 }}>
         No bar data found. Run the pipeline to populate the bars table.
@@ -6590,8 +6627,11 @@ function RawDataTab() {
     );
   }
 
-  const day = dayBars.days[dayIndex];
-  const bars = dayBars.byDay.get(day) || [];
+  // until the selected day's fetch lands, show nothing rather than the
+  // previous day's rows under the new day's label
+  const current = dayData.day === day;
+  const bars = current ? dayData.bars : [];
+  const dayBars = { days, featureCols: current ? dayData.featureCols : [] };
   const navBtn = (disabled) => ({
     ...retryBtn,
     padding: "4px 10px",
@@ -6845,13 +6885,12 @@ function IndicatorPreview({ model }) {
   const [showHidden, setShowHidden] = useState(false); // reveal Bad-tagged signals
   const rowRefs = useRef({}); // key -> row node, so a marker click can scroll to it
 
-  // day list first (ts only — cheap), then the selected day's bars with
+  // day list first (bar_days view — one request), then the selected day's bars with
   // features on demand, so we never pull ~10k feature blobs at once
   useEffect(() => {
     (async () => {
       try {
-        const rows = await fetchAllRows("bars", { select: "ts", orderBy: "ts" });
-        const uniq = [...new Set(rows.map((r) => r.ts.slice(0, 10)))].sort();
+        const uniq = await fetchBarDays();
         setDays(uniq);
         setDayIndex(Math.max(0, uniq.length - 1));
       } catch (e) {
