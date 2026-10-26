@@ -545,44 +545,92 @@ MAX_QUIET = 8           # shorted-but-quiet baseline
 # bearish list. Nothing in this score contradicts that; it ranks candidates
 # within a screen the trader has already chosen to look at.
 #
-# sq2 weights follow the evidence rather than intuition. sq1 led with short
-# float (40) over days to cover (25), which is backwards:
-#   - Hong, Li, Ni, Scheinkman & Yan (NBER w21166): short interest alone is a
-#     weak predictor; days-to-cover — short interest over daily volume — is
-#     the robust one. The volume denominator carries the signal.
-#   - Boehmer, Huszar, Wang & Zhang, 38 countries: days-to-cover is the most
-#     robust of eight short-selling variables, and once borrow fees and
-#     utilization enter the regression short interest stops predicting at all.
-#   - Every historical squeeze (VW 2008, GME 2021 and 2024, AMC, OPEN 2025)
-#     needed a dated spark and was accelerated by short-dated call buying
-#     forcing dealer hedging. None of them started because short interest was
-#     high; that only set how far the move ran.
-# So: days to cover leads, short float is demoted to a necessary-but-weak
-# condition, and the call-side flow the whale screen already measures enters
-# as its own term. Borrow fee and utilization are the two inputs the evidence
-# rates highest that no free source publishes — their absence is the main
-# known gap in this score, not an oversight.
+# sq3 weights are measured, not reasoned. sq1 led with short float (40) over
+# days to cover (25); sq2 corrected that to 30/20 from the literature. sq3 is
+# the first version fitted to this screen's OWN recorded outcomes — 384
+# episodes over 21 trading days, scored at the episode level.
+#
+# What the evidence said (episode-level Spearman against the 5-session excess
+# return, cluster-bootstrapped by ticker so one busy name cannot carry it):
+#
+#   input                    vs max excursion   vs close-to-close
+#   days to cover (trapped)      +0.129 **         +0.192 ***
+#   short % float (fuel)         +0.128 **         -0.024
+#   chatter (spark)              +0.001            -0.093
+#   call vol / OI (accelerant)   +0.021            -0.085
+#   short-interest chg (press)   -0.020            +0.061
+#   sq2 composite                +0.105            +0.045
+#
+# Three findings forced the rewrite:
+#
+#  1. Days to cover is the only input that predicts BOTH the spike and where
+#     the name closes. That is exactly Hong/Li/Ni/Scheinkman/Yan (NBER w21166)
+#     and Boehmer/Huszar/Wang/Zhang: the volume denominator carries the signal.
+#  2. Short float predicts the SPIKE and not the CLOSE (+0.128 / -0.024).
+#     Heavily shorted names jump and give it back — Asquith/Pathak/Ritter's
+#     result, visible in our own data. It is a magnitude term, not a direction
+#     term, so it keeps a weight but a smaller one.
+#  3. Chatter, call-volume surge and rising short interest are worth zero or
+#     less. sq2 put 50 of its 100 points on them, which is why the sq2
+#     composite (+0.045 against the close) ranked worse than days to cover
+#     alone. Dropping them is most of the improvement.
+#
+# The one structural effect is a CONJUNCTION, not a ramp: names clearing both
+# days-to-cover >= 5 and short float >= 24% behave differently in kind.
+#
+#   primed    92 episodes / 37 tickers   9.8% pop   close -0.0%   53% beat SPY
+#   rest     292 episodes / 169 tickers  5.5% pop   close -3.9%   31% beat SPY
+#
+# rho +0.183 against the close (cluster p = 0.0003) and +0.236 against the
+# spike (p < 0.0001). Leave-one-ticker-out moves the close-return gap only
+# between +3.6 and +4.4 points across all 37 primed names, it replicated on a
+# held-out second half of the sample, and all 20 cells of a threshold grid beat
+# the ungated baseline — so it is a plateau, not a fitted point. The 5 and 24
+# here sit mid-plateau rather than on its peak, deliberately.
+#
+# READ THIS BEFORE TRADING OFF THE SCORE. The screened universe loses to SPY:
+# median 5-session excess return -3.0%, only 36% of episodes beat the index,
+# and that held in 19 of 21 start dates, so it is not one bad fortnight. The
+# median name spikes +3.7% and bottoms -7.0% in the same window. This screen
+# finds volatility, not direction. A high score means "less bad, with a bigger
+# spike to sell into" — the primed group is the only cut that gets excess
+# return back to roughly flat. Score it as a shortlist for a trade you still
+# have to time, never as a buy-and-hold list.
+#
+# Borrow fee and utilization remain the two inputs the literature rates
+# highest that no free source publishes. That is still the main known gap.
 #
 # Each input is clamped to a 0-1 ramp between a floor and a ceiling:
-#   trapped     days to cover           1  -> 0, 10  -> 1
-#   fuel        short % of float       10% -> 0, 50% -> 1
-#   spark       chatter present         0 or 1
-#   accelerant  call volume / call OI  0.2 -> 0, 1.0 -> 1; zero if flow is
-#               leaning bearish, None when the name has no readable chain
-#   pressing    shares short vs prior -20% -> 0, +20% -> 1 (flat = 0.5)
-SCORE_VERSION = "sq2"
-SCORE_WEIGHTS = {"trapped": 30, "fuel": 20, "spark": 20, "accelerant": 15, "pressing": 15}
+#   trapped     days to cover      2  -> 0, 12  -> 1
+#   fuel        short % of float  15% -> 0, 40% -> 1
+#   primed      both gates met     0 or 1
+SCORE_VERSION = "sq3"
+SCORE_WEIGHTS = {"trapped": 49, "fuel": 21, "primed": 30}
 SCORE_RAMPS = {
-    "fuel": (10.0, 50.0),
-    "trapped": (1.0, 10.0),
-    "pressing": (-0.20, 0.20),
-    "accelerant": (0.2, 1.0),
+    "fuel": (15.0, 40.0),
+    "trapped": (2.0, 12.0),
 }
+# The conjunction gate. Mid-plateau values, not the grid's best cell.
+PRIMED_MIN_DTC = 5.0
+PRIMED_MIN_SHORT_FLOAT = 24.0
 
 # Outcome window for the backtest: a "pop" is the max high over the next
 # POP_WINDOW sessions clearing POP_THRESHOLD_PCT above the snapshot price.
 POP_WINDOW = 5
 POP_THRESHOLD_PCT = 15.0
+
+# sq3 and wh3 were FITTED on the episodes recorded up to and including this
+# date. Backtesting them against those same episodes measures the curve-fit,
+# not the edge, and would report a number that cannot be earned twice.
+#
+# The history is still re-scored on the new formula — every input sq3 and wh3
+# use was recorded per-snapshot at scan time, so recomputing is deterministic
+# and involves no lookahead, and it is worth having the panel's table
+# populated from day one. But the backtest draws its headline from episodes
+# that START AFTER this date, and says plainly when it is still falling back
+# on the fitted ones. Moving this date forward without re-fitting is the one
+# edit here that would quietly turn a fit into a claim.
+SCORE_FIT_THROUGH = "2026-10-25"
 
 # Below this many scored-and-resolved snapshots, the backtest is plumbing
 # rather than evidence, and both the terminal and the panel say so. Roughly a
@@ -603,33 +651,35 @@ def score_squeeze(metrics):
     scores zero for its part rather than dropping the row — a name with no
     days-to-cover figure is still a candidate, just an unproven one, and the
     part is recorded as None rather than 0 so the backtest can tell "absent"
-    from "measured and low"."""
+    from "measured and low".
+
+    sq3 scores two inputs and a gate. Chatter, call-volume surge and
+    short-interest growth are deliberately NOT scored — measured against this
+    screen's own outcomes they are worth zero or less (see the table above).
+    They are still recorded in `metrics` by the screen, so they stay available
+    to re-test as the sample grows; they just no longer move the number.
+    """
     pct = metrics.get("short_percent_float")
     if pct is None:
         return None, {}
-    ss, prior = metrics.get("shares_short"), metrics.get("shares_short_prior")
-    growth = (ss / prior - 1.0) if ss and prior else None
-    # Call volume against standing call OI: new call buying is what forces a
-    # dealer to hedge by buying stock, which is the accelerant every historical
-    # squeeze had. Flow leaning bearish scores zero rather than None — that is
-    # a real reading that the accelerant is absent, not a missing one.
-    accel = None
-    cv, coi = metrics.get("call_vol"), metrics.get("call_oi")
-    if cv is not None and coi:
-        accel = (
-            0.0 if metrics.get("flow_lean") == "bearish"
-            else _ramp(cv / coi, *SCORE_RAMPS["accelerant"])
-        )
+    dtc = metrics.get("days_to_cover")
+    # The conjunction that actually separates the two populations. Needs both
+    # readings present — a missing days-to-cover is not a passed gate.
+    primed = (
+        1.0 if (dtc is not None
+                and float(dtc) >= PRIMED_MIN_DTC
+                and float(pct) >= PRIMED_MIN_SHORT_FLOAT)
+        else 0.0
+    )
     parts = {
-        "trapped": _ramp(metrics.get("days_to_cover"), *SCORE_RAMPS["trapped"]),
+        "trapped": _ramp(dtc, *SCORE_RAMPS["trapped"]),
         "fuel": _ramp(pct, *SCORE_RAMPS["fuel"]),
-        "spark": 1.0 if metrics.get("buzz") else 0.0,
-        "accelerant": accel,
-        "pressing": _ramp(growth, *SCORE_RAMPS["pressing"]),
+        "primed": primed,
     }
     total = sum(SCORE_WEIGHTS[k] * (v or 0.0) for k, v in parts.items())
     parts = {k: (None if v is None else round(v, 3)) for k, v in parts.items()}
     return round(total, 1), parts
+
 
 # ETFs create and redeem shares on demand and cannot squeeze; their short-float
 # readings (XBI once showed 118%) are an artifact of that mechanism. Crypto
@@ -916,20 +966,64 @@ EPISODE_KINDS = ("squeeze", "whale")
 # the backtest scores each row in its own direction — a bearish flag that fell
 # is a hit, not a miss.
 #
-#   newness     volume / open interest   0.2 -> 0, 1.5 -> 1
-#   conviction  |lean skew - 0.5| * 2    0.3 -> 0, 0.9 -> 1  (0.65/0.35 bands
-#               are already required upstream, so this grades past the gate).
-#               wh2: the skew is each side's volume over its OWN open interest,
-#               not the raw call share — see _lean().
-#   size        total contracts          2k  -> 0, 50k -> 1  (log-scaled: the
-#               step from 2k to 10k means far more than 42k to 50k)
-WHALE_SCORE_VERSION = "wh2"
-WHALE_SCORE_WEIGHTS = {"newness": 40, "conviction": 35, "size": 25}
+# wh3 weights, like sq3's, are fitted to this screen's own outcomes — 152
+# whale episodes over 20 trading days, scored at the episode level.
+#
+#   input                      vs max excursion   vs close-to-close
+#   volume / OI (newness)          +0.121             +0.144
+#   conviction (|skew|)            -0.115             -0.166
+#   size (total contracts)         -0.128             -0.113
+#   wh2 composite                  -0.032             -0.043
+#
+# wh2 cancelled itself out. It spent 40 points on the one input that works and
+# 60 on two that point the wrong way, which is why the composite scored worse
+# than its own best part. Both are dropped:
+#
+#  - size is a liquidity proxy, not a signal. Big option books belong to
+#    mega-caps, and a mega-cap cannot move 15% in a week, so weighting size
+#    ranked the least promising names highest.
+#  - conviction grades how one-sided the flow is, past a 0.65/0.35 gate the
+#    screen already applies. Past that gate, more lopsided is mildly WORSE.
+#    The gate stays — it is what makes a name a whale print rather than
+#    two-way churn — but it no longer earns points.
+#
+# What is left is volume over open interest, and it is the strongest single
+# result in this module. Non-ETF episodes, by vol/OI tercile:
+#
+#   tercile          n    pop rate   mean spike   close vs SPY   beat SPY
+#   0.03 - 0.29     40      2.5%       +4.1%         -2.2%         30%
+#   0.30 - 0.69     39     12.8%       +6.1%         +0.2%         51%
+#   0.70 - 4.19     39     25.6%      +14.6%         +0.7%         54%
+#
+# Monotone on every column. Above the 0.70 gate: 10 pops in 39 episodes vs 6
+# in 79 below (Fisher p = 0.0095), and it REPLICATED out of sample — fitted on
+# the first ten days, the held-out eleven ran 30.0% vs 2.8% (p = 0.0064).
+# Dropping GLND, the best name, leaves 21.6%, so it is not one print.
+#
+# Two things make this more than "small names move more". The downside is
+# flat across all three terciles (median trough -3.3% to -3.5%) while the
+# upside triples, so the payoff is asymmetric rather than merely wider. And
+# an open-interest floor makes it WORSE, not better: requiring OI >= 10k cuts
+# the median spike from +5.6% to +3.0%. The tiny books are where the moves
+# are, so there is deliberately no size floor.
+#
+# Index and sector ETFs are excluded from this screen entirely. They ran 5.9%
+# pops against 13.6% for single names and cannot have the event the screen is
+# looking for; Erebor is a single-name screen by intent.
+#
+# NOTE ON DIRECTION: this scores signal STRENGTH, not bullishness. A bearish
+# name with a high score is a strong bearish read. `lean` carries the sign and
+# the backtest scores each row in its own direction — a bearish flag that fell
+# is a hit, not a miss.
+#
+#   newness   volume / open interest   0.1 -> 0, 1.5 -> 1
+#   primed    volume / OI >= 0.70      0 or 1
+WHALE_SCORE_VERSION = "wh3"
+WHALE_SCORE_WEIGHTS = {"newness": 70, "primed": 30}
 WHALE_SCORE_RAMPS = {
-    "newness": (0.2, 1.5),
-    "conviction": (0.3, 0.9),
+    "newness": (0.1, 1.5),
 }
-WHALE_SIZE_RAMP = (2_000.0, 50_000.0)
+WHALE_PRIMED_MIN_VOL_OI = 0.70
 
 
 def score_whale(metrics):
@@ -938,29 +1032,15 @@ def score_whale(metrics):
     vol, oi = metrics.get("volume"), metrics.get("open_interest")
     if not vol or not oi:
         return None, {}
-    # Grade the same quantity the lean was judged on, or the two disagree:
-    # under wh1 this used the raw volume share while the lean used it too, and
-    # both carried the call-heavy bias. `lean_skew` is already normalised by
-    # open interest where that was possible, and says so in `lean_basis`.
-    skew = metrics.get("lean_skew")
-    if skew is None:
-        cv, pv = metrics.get("call_volume") or 0, metrics.get("put_volume") or 0
-        skew = cv / (cv + pv) if (cv + pv) else None
-    conviction = abs(skew - 0.5) * 2 if skew is not None else None
+    ratio = vol / oi
     parts = {
-        "newness": _ramp(vol / oi, *WHALE_SCORE_RAMPS["newness"]),
-        "conviction": _ramp(conviction, *WHALE_SCORE_RAMPS["conviction"]),
-        # Log-scaled: doubling a small book is a real change, adding the same
-        # contracts to an already-huge one is not.
-        "size": _ramp(
-            math.log10(max(vol, 1.0)),
-            math.log10(WHALE_SIZE_RAMP[0]),
-            math.log10(WHALE_SIZE_RAMP[1]),
-        ),
+        "newness": _ramp(ratio, *WHALE_SCORE_RAMPS["newness"]),
+        "primed": 1.0 if ratio >= WHALE_PRIMED_MIN_VOL_OI else 0.0,
     }
     total_score = sum(WHALE_SCORE_WEIGHTS[k] * (v or 0.0) for k, v in parts.items())
     parts = {k: (None if v is None else round(v, 3)) for k, v in parts.items()}
     return round(total_score, 1), parts
+
 
 # WHALE_MIN_DAYS exists because the first version of this screen ranked TSLA,
 # AAPL, AMZN, GOOGL and META at the top every day. Names with daily expiries
@@ -1162,7 +1242,42 @@ def screen_whale(owner, flow, failures, session_date):
     # and a 3x on 60,000 are not the same event, and the multiple alone put
     # them level.
     rows.sort(key=lambda r: -(r["score"] or 0))
-    return rows[:MAX_WHALES], sources, errors
+
+    # Walk the ranked list and keep single names only. Checked here, after
+    # ranking, rather than over the whole flow dict: this costs one yfinance
+    # lookup per candidate considered and stops as soon as the panel is full,
+    # instead of pricing every ticker the chains returned.
+    kept, dropped = [], []
+    for r in rows:
+        if len(kept) >= MAX_WHALES:
+            break
+        if r["ticker"] in ETF_SKIP or is_fund(r["ticker"]):
+            dropped.append(r["ticker"])
+            continue
+        kept.append(r)
+    if dropped:
+        sources["funds_excluded"] = ", ".join(dropped)
+    return kept, sources, errors
+
+
+def is_fund(ticker):
+    """True when yfinance calls this an ETF, mutual fund, or index.
+
+    ETF_SKIP is a hand-kept list and will always lag: the whale screen has
+    surfaced VOO, RSP, EWZ, IEF, XLP, SOXX, MSOS and a dozen single-theme
+    launches that were never in it. Funds ran 5.9% pops against 13.6% for
+    single names and cannot have the event this screen looks for, so the test
+    needs to be structural rather than a list someone has to remember to
+    update. Returns False on any lookup failure — a name is only excluded on a
+    positive identification, never because the fetch broke.
+    """
+    import yfinance as yf
+
+    try:
+        qt = (yf.Ticker(ticker).info or {}).get("quoteType") or ""
+    except Exception:  # noqa: BLE001
+        return False
+    return qt.upper() in {"ETF", "MUTUALFUND", "INDEX"}
 
 
 def fetch_earnings_dates(tickers):
@@ -1535,6 +1650,48 @@ def backtest(kind="squeeze", quiet=False):
         say(f"  nothing scored on {primary} yet")
         return None
 
+    # One row per episode, and it has to be the FIRST day — not just counted
+    # that way at the end.
+    #
+    # A name sits on the list for days, filing a row each day, and those rows
+    # share overlapping five-session windows onto the same move. Averaging over
+    # them counts one squeeze as many. That is not a rounding error: measured
+    # per row, the primed cut showed a 21.4% pop rate against a 3.8% baseline,
+    # a 5.6x lift that looked like the headline result of the whole project.
+    # Per episode the same cut is 10.3% against 5.9%. The extra lift was IBRX
+    # and NVAX being re-counted four and three times for one move each.
+    #
+    # The first day is also the only honest entry point: it is the day the
+    # screen actually told you something you did not already know. Later rows
+    # are the same call after the move has started.
+    by_episode = {}
+    for r in sorted(rows, key=lambda r: r["run_date"]):
+        by_episode.setdefault((r["ticker"], r.get("episode_start") or r["run_date"]), r)
+    n_rows = len(rows)
+    rows = list(by_episode.values())
+    if n_rows != len(rows):
+        say(f"  {n_rows} rows -> {len(rows)} episodes"
+            f" (first day of each; later days re-measure the same move)")
+
+    # Hold back the episodes the formula was fitted on. If there are enough
+    # genuinely out-of-sample ones, the report is built from those alone; if
+    # not, it falls back to the fitted set and says so in as many words rather
+    # than printing an in-sample number with no label on it.
+    fitted = [r for r in rows
+              if (r.get("episode_start") or r["run_date"]) <= SCORE_FIT_THROUGH]
+    holdout = [r for r in rows
+               if (r.get("episode_start") or r["run_date"]) > SCORE_FIT_THROUGH]
+    in_sample = len(holdout) < BACKTEST_MIN_N
+    if in_sample:
+        say(f"  {len(fitted)} of these episodes were used to FIT {primary}"
+            f" — this report is in-sample and overstates the edge.")
+        say(f"  {len(holdout)}/{BACKTEST_MIN_N} out-of-sample episodes so far"
+            f" (needs episode starts after {SCORE_FIT_THROUGH}).")
+    else:
+        rows = holdout
+        say(f"  out-of-sample only: {len(rows)} episode(s) starting after"
+            f" {SCORE_FIT_THROUGH}; {len(fitted)} fitted episode(s) excluded.")
+
     scores = [r["score"] for r in rows]
     pairs = [_directional(r["outcome"], kind, r.get("metrics") or {}) for r in rows]
     ret = [p[0] for p in pairs]
@@ -1641,23 +1798,33 @@ def backtest(kind="squeeze", quiet=False):
     # resolved days — and the same five hits, three of which landed on a single
     # day. That is the same error as pooling two score versions: a number that
     # looks like evidence because of how it was tallied.
-    episodes = {(r["ticker"], r.get("episode_start") or r["run_date"]) for r in rows}
     days = {r["run_date"] for r in rows}
-    n_eff = len(episodes)
-    trustworthy = n_eff >= BACKTEST_MIN_N
-    say(f"  {len(rows)} rows = {n_eff} episode(s) over {len(days)} resolved day(s)")
+    n_eff = len(rows)
+    # Fitted episodes never count toward trust, however many of them there are.
+    trustworthy = n_eff >= BACKTEST_MIN_N and not in_sample
+    say(f"  {n_eff} episode(s) from {n_rows} row(s) over {len(days)} start day(s)")
     if not trustworthy:
-        say(f"  ({n_eff} episodes is too few to trust any of this; it is a smoke"
-            f" test of the plumbing until there are {BACKTEST_MIN_N}+)")
+        if in_sample:
+            say(f"  (not evidence yet: {primary} was fitted on these episodes."
+                f" Trust resumes at {BACKTEST_MIN_N} out-of-sample ones.)")
+        else:
+            say(f"  ({n_eff} episodes is too few to trust any of this; it is a"
+                f" smoke test of the plumbing until there are"
+                f" {BACKTEST_MIN_N}+)")
 
     episodes = report_episodes(kind, quiet=quiet) if kind == "squeeze" else None
     return {
         "kind": kind,
-        "n": len(rows),
+        "n": n_rows,
         # What the trust threshold is actually judged on. Kept beside `n` so
         # the panel can show both and the gap between them stays visible.
         "n_episodes": n_eff,
         "n_days": len(days),
+        # So the panel can say "fitted on this" rather than implying evidence.
+        "in_sample": in_sample,
+        "n_fitted": len(fitted),
+        "n_holdout": len(holdout),
+        "fit_through": SCORE_FIT_THROUGH,
         "score_versions": versions,
         # Kept so the panel can say what was left out rather than implying the
         # series began when the current formula did.

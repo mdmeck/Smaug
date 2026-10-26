@@ -1529,13 +1529,13 @@ function whaleItems(whales) {
             : asText(w.expiries[0])
           : asText(w.expiries),
         score: numValue(w.score),
+        scorePrimed: isPrimed(parts),
         // Signal STRENGTH, not bullishness — `lean` carries the sign. A
         // bearish name with a high score is a strong bearish read.
         scoreTitle: parts
           ? [
               ["newness", "volume vs OI"],
-              ["conviction", "directional skew"],
-              ["size", "contracts"],
+              ["primed", "above 0.70x OI"],
             ]
               .map(([k, label]) => {
                 const v = parts[k];
@@ -1924,7 +1924,12 @@ function WhaleActionPanel({ whales, run, error, backtest }) {
                     <LeanTag lean={w.lean} skew={w.leanSkew} basis={w.leanBasis} />
                   </td>
                   <td style={gridCell("right")} title={w.scoreTitle}>
-                    {w.score === null ? "\u2014" : Math.round(w.score)}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
+                      {w.score === null ? "\u2014" : Math.round(w.score)}
+                      {w.scorePrimed && (
+                        <PrimedChip title="Volume \u2265 0.70\u00d7 open interest \u2014 25.6% popped vs 7.6% below the line, and it held out of sample (30.0% vs 2.8%)" />
+                      )}
+                    </div>
                   </td>
                   <td style={gridCell("right")}>{countText(w.vol) || "\u2014"}</td>
                   {/* The multiple is computed in whaleItems from the two raw
@@ -2083,16 +2088,18 @@ const dtcText = (n) => (n === null ? "" : n.toFixed(1));
 const scoreText = (n) => (n === null ? "" : Math.round(n).toString());
 
 // The 0-1 parts behind a score, in the weight order erebor_scan.py declares.
-// Hover text only: the number is the headline, this is its receipt. Days to
-// cover leads because it is the one short-selling measure with robust
-// evidence behind it; raw short float predicts weakly and, unconditionally,
-// in the wrong direction. See the SCORE block in erebor_scan.py.
+// Hover text only: the number is the headline, this is its receipt.
+//
+// sq3 scores three things where sq2 scored five. Chatter, call flow and
+// rising short interest were dropped because, measured against this screen's
+// own 384 recorded episodes, they are worth zero or less — sq2 spent half its
+// points on them and ranked worse than days-to-cover alone. "both gates" is
+// the conjunction (days to cover >= 5 AND short float >= 24%) that separates
+// the two populations; see the SCORE block in erebor_scan.py for the numbers.
 const SCORE_PART_LABELS = [
   ["trapped", "days to cover"],
   ["fuel", "short float"],
-  ["spark", "chatter"],
-  ["accelerant", "call flow"],
-  ["pressing", "shorts adding"],
+  ["primed", "both gates"],
 ];
 const scoreTitle = (s) => {
   if (!s.scoreParts) return s.scoreVersion ? `score ${s.scoreVersion}` : "";
@@ -2328,6 +2335,40 @@ function SqueezeStat({ label, value, title }) {
 // already means earnings on this tab, so a colored buzz chip would be reusing a
 // token that means something else two panels away. Emoji-as-marker is an
 // established deviation in this design system (docs/design.md, deviation 1).
+// The one cut of either screen that measured better out of sample. For a
+// squeeze that is days to cover >= 5 AND short float >= 24%; for whale flow
+// it is volume >= 0.70x open interest. Both come from `score_parts.primed`,
+// so the badge can never disagree with the score beside it.
+//
+// Deliberately quiet styling. It marks the better-odds slice of a universe
+// that still loses to SPY on average (median -3.0% over five sessions), so it
+// is a shortlist marker, not a buy signal, and it should not look like one.
+function PrimedChip({ title }) {
+  return (
+    <span
+      title={title}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        padding: "2px 7px",
+        borderRadius: 20,
+        border: `1px solid ${B.blue}`,
+        fontFamily: B.mono,
+        fontSize: 10,
+        fontWeight: 700,
+        letterSpacing: 0.4,
+        color: B.blue,
+        textTransform: "uppercase",
+        flexShrink: 0,
+      }}
+    >
+      primed
+    </span>
+  );
+}
+
+const isPrimed = (parts) => !!parts && Number(parts.primed) === 1;
+
 function BuzzChip({ buzz }) {
   const parts = buzz.trending
     ? [buzz.source, "on the trending list"]
@@ -2463,7 +2504,12 @@ function SqueezeRow({ s, showOwnDates }) {
             carried by row order. The drift chip is the one exception, and it
             earns it — a price move does have a direction. */}
         <td style={gridCell("right")} title={scoreTitle(s)}>
-          {scoreText(s.score) || "\u2014"}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
+            {scoreText(s.score) || "\u2014"}
+            {isPrimed(s.scoreParts) && (
+              <PrimedChip title="Days to cover \u2265 5 and short float \u2265 24% \u2014 9.8% popped vs 5.5% for the rest, and roughly flat against SPY instead of \u22123.9%" />
+            )}
+          </div>
         </td>
         <td style={gridCell("right")}>{pctText(s.pct) || "\u2014"}</td>
         <td style={gridCell("right")}>{dtcText(s.dtc) || "\u2014"}</td>
@@ -2730,11 +2776,47 @@ function BacktestBlock({ bt }) {
             ? `${r.n_episodes} episodes (${bt.n} rows)`
             : `n=${bt.n}`}
           {r.n_days ? ` \u00b7 ${r.n_days} resolved day${r.n_days === 1 ? "" : "s"}` : ""}
-          {dim && r.min_n ? ` \u00b7 too few to trust (need ${r.min_n})` : ""}
+          {dim && r.in_sample
+            ? ` \u00b7 in-sample`
+            : dim && r.min_n
+              ? ` \u00b7 too few to trust (need ${r.min_n})`
+              : ""}
           {r.window ? ` \u00b7 ${r.window}-session window` : ""}
           {bt.score_version ? ` \u00b7 ${bt.score_version}` : ""}
         </div>
       </div>
+
+      {/* The loudest caveat this panel can carry, so it goes above the table
+          rather than under it. sq3 and wh3 were fitted on the episodes
+          recorded through `fit_through`, so scoring them against those same
+          episodes measures the curve-fit and not the edge. The numbers below
+          are real arithmetic on real outcomes — they are just the arithmetic
+          the weights were chosen to make look good, and they cannot be earned
+          twice. The backtest switches to out-of-sample episodes on its own
+          once enough have resolved; until then this line has to be here. */}
+      {r.in_sample && (
+        <div
+          style={{
+            fontFamily: B.mono,
+            fontSize: 11.5,
+            color: B.amber,
+            lineHeight: 1.5,
+            marginBottom: 10,
+            padding: "8px 11px",
+            borderRadius: 6,
+            background: B.bg,
+            border: `1px solid ${B.edge}`,
+          }}
+        >
+          Fitted, not forecast. {bt.score_version} was tuned on these
+          {r.n_fitted !== undefined ? ` ${r.n_fitted}` : ""} episodes, so the
+          table below is in-sample and flatters itself.
+          {r.n_holdout !== undefined && r.min_n
+            ? ` ${r.n_holdout} of ${r.min_n} out-of-sample episodes have resolved`
+            : ""}
+          {r.fit_through ? ` (needs starts after ${r.fit_through})` : ""}.
+        </div>
+      )}
 
       {/* The report is built from one formula's outcomes only. Saying which
           rows were left out matters: without it the series looks like it began

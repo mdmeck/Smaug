@@ -34,6 +34,28 @@
 > objection was to a number an LLM invents from a borrow fee nobody can check,
 > not to a fixed formula over stored figures that a script can re-run.
 >
+> **sq3 / wh3 (2026-10-25) are fitted to recorded outcomes**, replacing the
+> literature-derived sq2/wh2. Measured over 384 squeeze and 152 whale episodes,
+> only two inputs predicted anything: days-to-cover for squeezes and
+> volume-over-open-interest for whale flow. Chatter, call-volume surge, rising
+> short interest, flow conviction and contract size were worth zero or less and
+> no longer score. Each screen also carries a conjunction gate, surfaced as a
+> `primed` badge: days-to-cover >= 5 with short float >= 24%, and whale volume
+> >= 0.70x open interest. Index and sector ETFs are now excluded from the whale
+> screen outright (`is_fund()`).
+>
+> Two things to know before quoting any of these numbers:
+>
+> - **The screened squeeze universe loses to SPY.** Median 5-session excess
+>   return -3.0%, only 36% of episodes beat the index, in 19 of 21 start dates.
+>   The median name spikes +3.7% and troughs -7.0% in the same window. This is
+>   a volatility screen; a high score means "less bad, with a bigger spike to
+>   sell into". The primed cut is the only one that gets back to roughly flat.
+> - **The backtest is in-sample until it says otherwise.** sq3/wh3 were tuned
+>   on episodes through `SCORE_FIT_THROUGH`, so `backtest()` holds those back
+>   and labels the report `in_sample` until 30 later episodes resolve. Do not
+>   repeat the fitted figures as evidence.
+>
 > The task list below is kept as the specification the Python screen was
 > written against, and for whenever a routine environment with open egress
 > becomes available. Do not re-enable it as-is.
