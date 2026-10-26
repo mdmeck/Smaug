@@ -86,11 +86,23 @@ The trader pastes broker order history and asks for it to be logged. Conventions
 - `notes` format follows the existing rows: `SPY 774C 0DTE · 1x · in 1.00 / out 1.10. Entry 10:09:49, exit 10:11:04.` plus a price-source clause.
 - The routine's connector runs as `postgres`, so **pass `user_id` explicitly** — see the RLS invariant above.
 
+## Lab (`lab/`)
+
+Claude's autonomous strategy desk: a scheduled routine (`docs/lab-routine-prompt.md`, fetched from `main` each run) researches short-dated options strategies and writes `lab_journal` / `lab_strategies`; `lab/runner.py` in GitHub Actions (`lab-runner.yml`, two jobs per session because Actions caps a job at 6h) paper-trades whatever is at status `paper` through Alpaca. Load-bearing rules:
+
+- **One implementation per strategy.** A strategy is a module in `lab/strategies/` whose `signals(day, ctx, params)` is called by both `backtest.py` and `runner.py`. Never re-implement a rule in the runner. `python -m lab.research causal <module>` checks for lookahead by replaying every prefix; run it after any change. Underscore modules (`_pulse`) are test fixtures.
+- **`broker.py` is the only code that calls `alpaca.submit_order`.** It re-reads `lab_controls` before every entry and allows only buy-to-open single options and sell-to-close up to the held qty. `lab_controls` is written by the trader from the Lab tab only; the routine's charter forbids writing it.
+- **Paper vs live is two switches:** `ALPACA_TRADING_URL` (defaults to paper) *and* `lab_controls.mode`, plus the strategy's own status `live`. Live keys never go in the routine's environment.
+- **Stock bars are split-adjusted only, never dividend-adjusted** — strikes are chosen from historical prices, and dividend adjustment shifts old SPY bars enough to pick contracts that barely traded. The cache path includes the adjustment for that reason.
+- Alpaca free plan: SIP history back to 2016 except the latest 15 minutes (the runner uses the real-time IEX feed); option bars from 2024-02-15; options accept no bracket/OCO orders, so exits are managed by the runner with a resting stop as the backstop.
+- The cost model in `lab/options.py` is deliberately pessimistic; `backtest.IV_MULT` (modeled pricing for pre-2024 periods only) comes from `research calibrate`.
+- Verify runner changes with `python -m lab.replay_test` (simulated sessions against a fake broker, no keys needed) — also run by the `lab-selftest.yml` workflow on pushes touching `lab/`, which additionally exercises the real Alpaca account.
+
 ## Webapp notes
 
 - `webapp/src/App.jsx` is one ~3700-line file holding every component, the theme object `T`, and all Supabase access. Follow the existing inline-style-object convention rather than introducing CSS files.
 - **Two themes coexist on purpose.** `T` ("Apex Forge" — Bebas Neue, Lato, warm neutrals) styles the whole app; `B` styles the Morning Brief and Dashboard tabs and the Whale Action / Roaring Kitty scanner pages, imported from a Claude Design project. `docs/design.md` is the contract for `B` — read it before touching either, and don't blend the two palettes into one tab.
-- Nav is the `NAV` array — a left sidebar where an item with `children` renders as a group: **Reports** (Morning Brief, Dashboard, Journal), **Indicators** (Indicator, Training Data, Feature Analysis), **Scanners** (Whale Action, Roaring Kitty, Merger Arb, Scanner History), Resources. `tab` state always holds a *leaf* name, never a group name. Component names still use old labels — Feature Analysis renders `TechnicalsTab`, Indicator renders `ModelTab` (backed by the `entry_models` table, so the UI label and schema name diverge by design), Merger Arb renders `EreborTab`, Scanner History renders `EreborHistoryTab`. Whale Action and Roaring Kitty are the Erebor panels (`WhaleActionPanel`/`SqueezePanel`), fed by data loaded once in `Smaug()`.
+- Nav is the `NAV` array — a left sidebar where an item with `children` renders as a group: **Reports** (Morning Brief, Dashboard, Journal), **Indicators** (Indicator, Training Data, Feature Analysis), **Scanners** (Whale Action, Roaring Kitty, Merger Arb, Scanner History), Lab, Resources. `tab` state always holds a *leaf* name, never a group name. Component names still use old labels — Feature Analysis renders `TechnicalsTab`, Indicator renders `ModelTab` (backed by the `entry_models` table, so the UI label and schema name diverge by design), Merger Arb renders `EreborTab`, Scanner History renders `EreborHistoryTab`. Whale Action and Roaring Kitty are the Erebor panels (`WhaleActionPanel`/`SqueezePanel`), fed by data loaded once in `Smaug()`.
 - Charts use `lightweight-charts` v5 (`createChart` + `CandlestickSeries`).
 - `vite.config.js` sets `base: "/Smaug/"` for GitHub Pages — don't drop it or asset paths break in production.
 - Deploy is automatic on push to `main` touching `webapp/**`.
