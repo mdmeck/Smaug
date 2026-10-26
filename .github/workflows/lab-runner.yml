@@ -1,0 +1,66 @@
+name: Lab runner
+
+# Intraday executor for Lab strategies at status paper/live. Two jobs a day
+# because Actions caps a job at 6h and RTH is 6.5h: morning (open -> 12:50 ET)
+# and afternoon (12:51 ET -> close). Each window has two cron entries, one per
+# DST offset — cron is UTC-only. The spare lands either before the window
+# (and sleeps) or while the real one runs (queued by the concurrency group,
+# then exits on the runner's own window/heartbeat checks).
+#
+# Does nothing unless lab_controls.trading_enabled is true AND a strategy is
+# at status paper/live: with trading off it still evaluates and records
+# signals as status=rejected, which is a free shadow forward-test.
+on:
+  schedule:
+    - cron: "7 13 * * 1-5"    # 09:07 EDT / 08:07 EST  morning
+    - cron: "7 14 * * 1-5"    # 10:07 EDT / 09:07 EST  morning (DST spare)
+    - cron: "37 16 * * 1-5"   # 12:37 EDT / 11:37 EST  afternoon
+    - cron: "37 17 * * 1-5"   # 13:37 EDT / 12:37 EST  afternoon (DST spare)
+  workflow_dispatch:
+    inputs:
+      window:
+        description: "morning | afternoon | auto"
+        default: auto
+      dry_run:
+        description: "evaluate and log only, never order"
+        type: boolean
+        default: false
+
+concurrency:
+  group: lab-runner
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install pandas numpy requests yfinance
+      - name: Restore bar cache
+        uses: actions/cache@v4
+        with:
+          path: lab/.cache
+          key: lab-cache-${{ github.run_id }}
+          restore-keys: lab-cache-
+      - name: Pick window
+        id: w
+        run: |
+          if [ -n "${{ inputs.window }}" ]; then
+            echo "window=${{ inputs.window }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "37 16 * * 1-5" ] || [ "${{ github.event.schedule }}" = "37 17 * * 1-5" ]; then
+            echo "window=afternoon" >> "$GITHUB_OUTPUT"
+          else
+            echo "window=morning" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
+          ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
+        run: python -m lab.runner --window ${{ steps.w.outputs.window }} ${{ inputs.dry_run && '--dry-run' || '' }}

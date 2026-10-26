@@ -1,0 +1,42 @@
+name: Lab selftest
+
+# Exercises the Lab against the real Alpaca account: data access probe, a
+# real-priced backtest, the lookahead check, and the IV calibration. Output
+# lands in the job log and as an artifact. Runs on pushes that touch lab/.
+on:
+  push:
+    paths: ["lab/**", ".github/workflows/lab-selftest.yml"]
+  workflow_dispatch: {}
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
+      ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pandas numpy requests yfinance
+      - uses: actions/cache@v4
+        with:
+          path: lab/.cache
+          key: lab-cache-${{ github.run_id }}
+          restore-keys: lab-cache-
+      - run: mkdir -p out
+      - name: Probe
+        run: python -m lab.research probe | tee out/probe.json
+      - name: Lookahead check
+        run: python -m lab.research causal orb --start 2025-06-01 --days 10 | tee out/causal.json
+      - name: Backtest (real option prices)
+        run: python -m lab.research backtest orb --start 2024-03-01 --save out/orb_trades.csv | tee out/orb.json
+      - name: IV calibration
+        run: python -m lab.research calibrate --days 60 | tee out/calibrate.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lab-selftest
+          path: out/

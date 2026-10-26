@@ -586,3 +586,180 @@ create policy "erebor_positions_owner_all"
   for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+
+-- =====================================================================
+-- Lab — Claude's autonomous strategy research + paper/live trading
+-- =====================================================================
+-- Separate module, like Erebor: nothing here joins to the Smaug or Erebor
+-- tables, and Lab trades never go in `journal_entries` (that table is the
+-- trader's own fills, reconciled against thinkorswim).
+--
+-- Who writes what:
+--   lab_journal, lab_strategies   the Lab routine (connector runs as
+--                                 postgres -> pass user_id explicitly)
+--   lab_trades, lab_runs          lab/runner.py in GitHub Actions
+--                                 (service-role key, user_id explicit)
+--   lab_controls                  the trader, from the webapp. The runner
+--                                 reads it before every order. The routine's
+--                                 charter forbids it from writing this table
+--                                 — its connector runs as postgres, so that
+--                                 rule is policy, not a permission. Limits
+--                                 are only limits if the thing they limit
+--                                 doesn't move them.
+-- All owner-only RLS.
+
+-- The research notebook and the routine's memory between runs. Append-only:
+-- a wrong conclusion is corrected by a later entry, not by editing the old
+-- one, so the reasoning that led somewhere stays readable.
+create table if not exists lab_journal (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  run_kind text not null default 'manual'
+    check (run_kind in ('premarket', 'postmarket', 'intraday', 'manual')),
+  kind text not null default 'note'
+    check (kind in ('hypothesis', 'experiment', 'result', 'decision', 'review', 'plan', 'note')),
+  title text not null default '',
+  -- markdown
+  body text not null default '',
+  strategy text default '',
+  -- raw command output (research.py JSON), so a number quoted in `body` can
+  -- be checked against what the backtest actually printed
+  data jsonb
+);
+
+create index if not exists lab_journal_user_created_idx on lab_journal (user_id, created_at desc);
+
+alter table lab_journal enable row level security;
+
+create policy "lab_journal_owner_all"
+  on lab_journal for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- One row per strategy. `module` names a file in lab/strategies/ and
+-- `params` its tunables, which is the whole definition: the runner executes
+-- exactly what the backtest measured, never a paraphrase.
+--
+-- status: idea -> backtest -> paper -> live -> retired. Only 'paper' and
+-- 'live' rows trade. 'live' additionally needs lab_controls.mode = 'live'
+-- AND a live Alpaca endpoint; promotion past paper is the trader's call.
+create table if not exists lab_strategies (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  name text not null,
+  module text not null,
+  params jsonb not null default '{}'::jsonb,
+  status text not null default 'idea'
+    check (status in ('idea', 'backtest', 'paper', 'live', 'retired')),
+  hypothesis text not null default '',
+  -- latest research.py backtest output (stats block), and the forward
+  -- paper record computed from lab_trades. Kept apart because only one of
+  -- them can have been overfit.
+  backtest jsonb,
+  forward jsonb,
+  contracts int not null default 1 check (contracts between 1 and 10),
+  notes text default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists lab_strategies_user_name_key on lab_strategies (user_id, name);
+
+alter table lab_strategies enable row level security;
+
+create policy "lab_strategies_owner_all"
+  on lab_strategies for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Every order the runner places, one row per round trip. Unique on
+-- (strategy, signal_ts) so a runner that restarts mid-session — the
+-- morning/afternoon job handoff does this daily — can never act on the same
+-- signal twice.
+create table if not exists lab_trades (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  strategy text not null,
+  mode text not null default 'paper' check (mode in ('paper', 'live')),
+  signal_ts timestamptz not null,
+  signal jsonb,
+  occ text not null,
+  direction text not null check (direction in ('long', 'short')),
+  contracts int not null default 1,
+  status text not null default 'pending'
+    check (status in ('pending', 'open', 'closed', 'canceled', 'rejected', 'error')),
+  entry_order_id text,
+  stop_order_id text,
+  exit_order_id text,
+  entry_ts timestamptz,
+  entry_price double precision,
+  stop_price double precision,
+  target_price double precision,
+  exit_ts timestamptz,
+  exit_price double precision,
+  exit_reason text default '',
+  -- dollars, net of the fees Alpaca reports (none on options) — so gross in
+  -- practice. NULL until closed.
+  pnl double precision,
+  notes text default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists lab_trades_user_strategy_signal_key
+  on lab_trades (user_id, strategy, signal_ts);
+create index if not exists lab_trades_user_created_idx on lab_trades (user_id, created_at desc);
+
+alter table lab_trades enable row level security;
+
+create policy "lab_trades_owner_all"
+  on lab_trades for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- The trader's hard limits and kill switch. One row per user. The runner
+-- re-reads it every loop, so flipping trading_enabled off takes effect within
+-- a minute: open entry orders are canceled and positions are flattened.
+create table if not exists lab_controls (
+  user_id uuid primary key default auth.uid() references auth.users(id) on delete cascade,
+  trading_enabled boolean not null default false,
+  mode text not null default 'paper' check (mode in ('paper', 'live')),
+  max_contracts int not null default 1 check (max_contracts between 1 and 10),
+  max_open_positions int not null default 1 check (max_open_positions between 1 and 5),
+  max_trades_per_day int not null default 4 check (max_trades_per_day between 0 and 20),
+  -- realized + unrealized, dollars. Hitting it flattens and stops for the day.
+  max_daily_loss double precision not null default 200 check (max_daily_loss > 0),
+  -- premium at risk on one entry (fill x 100 x contracts), dollars
+  max_premium_per_trade double precision not null default 400 check (max_premium_per_trade > 0),
+  updated_at timestamptz not null default now()
+);
+
+alter table lab_controls enable row level security;
+
+create policy "lab_controls_owner_all"
+  on lab_controls for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- One row per runner session (morning / afternoon job). A day with no row
+-- means the runner never started — distinguishable from a day it ran and
+-- found nothing, the same lesson as erebor_runs.
+create table if not exists lab_runs (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  as_of date not null,
+  session_window text not null default '',
+  started_at timestamptz not null default now(),
+  heartbeat_at timestamptz,
+  ended_at timestamptz,
+  status text not null default 'running',
+  strategies jsonb not null default '[]'::jsonb,
+  events jsonb not null default '[]'::jsonb,
+  errors jsonb not null default '[]'::jsonb
+);
+
+create index if not exists lab_runs_user_day_idx on lab_runs (user_id, as_of desc);
+
+alter table lab_runs enable row level security;
+
+create policy "lab_runs_owner_all"
+  on lab_runs for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);

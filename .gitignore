@@ -13,3 +13,6 @@ smaug_report.txt
 
 # morning brief — now lives in Supabase (daily_briefs table)
 smaug_brief.json
+
+# lab research cache (Alpaca bars, VIX)
+lab/.cache/
