@@ -7797,11 +7797,22 @@ function EreborTab() {
         // kind is the current one. Read separately from the candidates for the
         // same reason those are read separately from the brief — a missing
         // report must not blank the panel it sits under.
+        //
+        // Ordered by created_at as well as as_of, and this is load-bearing:
+        // the table is keyed (user, as_of, kind, score_version), so the day a
+        // formula changes files TWO rows for the same kind and day. Ordering
+        // by as_of alone leaves the tie unbroken, and whichever row Postgres
+        // happened to return first would win. On 2026-10-25 that meant a 50%
+        // chance of rendering the retired sq2 card — which carried
+        // trustworthy=true — above the live sq3 one, which is honestly
+        // labelled in-sample. The panel would have shown a confident report
+        // card for a formula that is no longer scoring anything.
         supabase
           .from("erebor_backtests")
           .select("*")
           .in("kind", ["whale", "squeeze"])
           .order("as_of", { ascending: false })
+          .order("created_at", { ascending: false })
           .limit(20),
       ]);
       // Read the error rather than discard it. An empty list and a failed
@@ -8355,11 +8366,22 @@ export default function Smaug() {
         // kind is the current one. Read separately from the candidates for the
         // same reason those are read separately from the brief — a missing
         // report must not blank the panel it sits under.
+        //
+        // Ordered by created_at as well as as_of, and this is load-bearing:
+        // the table is keyed (user, as_of, kind, score_version), so the day a
+        // formula changes files TWO rows for the same kind and day. Ordering
+        // by as_of alone leaves the tie unbroken, and whichever row Postgres
+        // happened to return first would win. On 2026-10-25 that meant a 50%
+        // chance of rendering the retired sq2 card — which carried
+        // trustworthy=true — above the live sq3 one, which is honestly
+        // labelled in-sample. The panel would have shown a confident report
+        // card for a formula that is no longer scoring anything.
         supabase
           .from("erebor_backtests")
           .select("*")
           .in("kind", ["whale", "squeeze"])
           .order("as_of", { ascending: false })
+          .order("created_at", { ascending: false })
           .limit(20),
       ]);
       // The error is read, not discarded. An earlier version destructured only
