@@ -41,16 +41,22 @@
 > short interest, flow conviction and contract size were worth zero or less and
 > no longer score. Each screen also carries a conjunction gate, surfaced as a
 > `primed` badge: days-to-cover >= 5 with short float >= 24%, and whale volume
-> >= 0.70x open interest. Index and sector ETFs are now excluded from the whale
-> screen outright (`is_fund()`).
+> >= 0.70x open interest. Funds are now excluded from the whale screen via
+> yfinance `quoteType` (`is_fund()`), not a hand-kept list — a list built by eye
+> wrongly excluded SPCX (SpaceX), SKHY, SKYD, XRPN, CBRS, FRVO and PENG, all
+> operating companies, and that error produced a wrong figure before it was
+> caught.
 >
 > Two things to know before quoting any of these numbers:
 >
-> - **The screened squeeze universe loses to SPY.** Median 5-session excess
->   return -3.0%, only 36% of episodes beat the index, in 19 of 21 start dates.
->   The median name spikes +3.7% and troughs -7.0% in the same window. This is
->   a volatility screen; a high score means "less bad, with a bigger spike to
->   sell into". The primed cut is the only one that gets back to roughly flat.
+> - **Both screens find volatility, not direction.** The squeeze universe
+>   loses to SPY: median 5-session excess return -3.0%, only 36% of episodes
+>   beat the index, in 19 of 21 start dates, and the median name spikes +3.7%
+>   while troughing -7.0% in the same window. The whale gate raises how often
+>   and how far a name spikes (22.6% pop vs 6.3%, mean spike +14.8% vs +4.7%)
+>   but does NOT improve where it closes (-1.7% vs -1.4%, inside the noise).
+>   Treat a high score on either screen as a spike to sell into, never a hold.
+>   Squeeze-primed is the only cut that gets excess return back to roughly flat.
 > - **The backtest is in-sample until it says otherwise.** sq3/wh3 were tuned
 >   on episodes through `SCORE_FIT_THROUGH`, so `backtest()` holds those back
 >   and labels the report `in_sample` until 30 later episodes resolve. Do not

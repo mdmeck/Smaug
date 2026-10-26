@@ -1927,7 +1927,7 @@ function WhaleActionPanel({ whales, run, error, backtest }) {
                     <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6 }}>
                       {w.score === null ? "\u2014" : Math.round(w.score)}
                       {w.scorePrimed && (
-                        <PrimedChip title="Volume \u2265 0.70\u00d7 open interest \u2014 25.6% popped vs 7.6% below the line, and it held out of sample (30.0% vs 2.8%)" />
+                        <PrimedChip title="Volume \u2265 0.70\u00d7 open interest \u2014 22.6% popped vs 6.3% below the line, mean spike +14.8% vs +4.7%, and it held out of sample (27.3% vs 2.6%). Predicts the spike, not the close." />
                       )}
                     </div>
                   </td>

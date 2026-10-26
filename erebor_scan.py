@@ -988,28 +988,45 @@ EPISODE_KINDS = ("squeeze", "whale")
 #    two-way churn — but it no longer earns points.
 #
 # What is left is volume over open interest, and it is the strongest single
-# result in this module. Non-ETF episodes, by vol/OI tercile:
+# result in this module. Single-name episodes, by vol/OI tercile:
 #
-#   tercile          n    pop rate   mean spike   close vs SPY   beat SPY
-#   0.03 - 0.29     40      2.5%       +4.1%         -2.2%         30%
-#   0.30 - 0.69     39     12.8%       +6.1%         +0.2%         51%
-#   0.70 - 4.19     39     25.6%      +14.6%         +0.7%         54%
+#   tercile          n    pop rate   mean spike   median trough   close vs SPY
+#   0.03 - 0.34     50      4.0%       +4.5%          -4.0%           -1.8%
+#   0.35 - 0.75     50     10.0%       +5.9%          -4.6%           -0.7%
+#   0.76 - 7.12     49     22.4%      +14.5%          -4.3%           -2.3%
 #
-# Monotone on every column. Above the 0.70 gate: 10 pops in 39 episodes vs 6
-# in 79 below (Fisher p = 0.0095), and it REPLICATED out of sample — fitted on
-# the first ten days, the held-out eleven ran 30.0% vs 2.8% (p = 0.0064).
-# Dropping GLND, the best name, leaves 21.6%, so it is not one print.
+# Read the columns separately, because they do not all say the same thing.
 #
-# Two things make this more than "small names move more". The downside is
-# flat across all three terciles (median trough -3.3% to -3.5%) while the
-# upside triples, so the payoff is asymmetric rather than merely wider. And
-# an open-interest floor makes it WORSE, not better: requiring OI >= 10k cuts
-# the median spike from +5.6% to +3.0%. The tiny books are where the moves
-# are, so there is deliberately no size floor.
+# Pop rate and mean spike are monotone and the effect is large: above the 0.70
+# gate, 12 pops in 53 episodes against 6 in 96 below (Fisher p = 0.0044), with
+# a mean spike of +14.8% against +4.7%. It REPLICATED out of sample — fitted on
+# the first ten days, the held-out eleven ran 27.3% against 2.6% (p = 0.0071).
+# Dropping GLND, the best name, still leaves 18.0% (p = 0.029), so it is not
+# one print.
 #
-# Index and sector ETFs are excluded from this screen entirely. They ran 5.9%
-# pops against 13.6% for single names and cannot have the event the screen is
-# looking for; Erebor is a single-name screen by intent.
+# Close-to-close is NOT improved and the comment here once claimed it was.
+# The gated median closes -1.7% against -1.4% for the rest: no edge, inside
+# the noise. An earlier cut of this table showed the gate turning the close
+# positive, which came from a hand-written ETF list that wrongly excluded
+# seven real companies — SPCX is SpaceX, and SKHY, SKYD, XRPN, CBRS, FRVO and
+# PENG are all operating names. One of them (XRPN) closed -57.8%. That is why
+# the fund test below reads quoteType instead of a list.
+#
+# So this gate predicts HOW OFTEN a name spikes and HOW FAR, not where it
+# settles — the same conclusion the squeeze score reaches, by a different
+# route. Trade it as a spike to sell into, not as a hold.
+#
+# What makes it more than "small names move more": the downside is flat across
+# all three terciles (median trough -4.0% to -4.6%) while the mean spike more
+# than triples, so the payoff is asymmetric rather than merely wider. And an
+# open-interest floor makes it WORSE: requiring OI >= 10k drops the pop rate
+# from 22.6% to 17.5% and the median spike from +5.6% to +2.9%. The tiny books
+# are where the moves are, so there is deliberately no size floor.
+#
+# Funds are excluded from this screen entirely. They ran 3.4% pops against
+# 12.1% for single names, with a median spike of +1.8% against +3.4%, and
+# cannot have the event the screen is looking for; Erebor is a single-name
+# screen by intent.
 #
 # NOTE ON DIRECTION: this scores signal STRENGTH, not bullishness. A bearish
 # name with a high score is a strong bearish read. `lean` carries the sign and
@@ -1264,12 +1281,17 @@ def is_fund(ticker):
     """True when yfinance calls this an ETF, mutual fund, or index.
 
     ETF_SKIP is a hand-kept list and will always lag: the whale screen has
-    surfaced VOO, RSP, EWZ, IEF, XLP, SOXX, MSOS and a dozen single-theme
-    launches that were never in it. Funds ran 5.9% pops against 13.6% for
-    single names and cannot have the event this screen looks for, so the test
-    needs to be structural rather than a list someone has to remember to
-    update. Returns False on any lookup failure — a name is only excluded on a
-    positive identification, never because the fetch broke.
+    surfaced VOO, RSP, EWZ, IEF, XLP, SOXX and MSOS, none of which were in it.
+    Funds ran 3.4% pops against 12.1% for single names and cannot have the
+    event this screen looks for, so the test needs to be structural.
+
+    It reads quoteType rather than matching names for a reason that cost a
+    wrong number once already: a four-letter ticker that looks like a fund
+    usually is not one. SPCX is SpaceX, and SKHY, SKYD, XRPN, CBRS, FRVO and
+    PENG are all operating companies. A list built by eye excluded all seven.
+
+    Returns False on any lookup failure — a name is only excluded on a positive
+    identification, never because the fetch broke.
     """
     import yfinance as yf
 
