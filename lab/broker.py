@@ -8,11 +8,10 @@ Allowed order shapes, and nothing else:
 No selling to open, no spreads, no equities — a bug can lose the premium of
 one long option, never more than that.
 """
-from datetime import datetime
 
 import pandas as pd
 
-from . import alpaca, supa
+from . import alpaca, clock, supa
 from .alpaca import NY
 
 ENTRY_WINDOW = ("09:31", "15:30")
@@ -30,7 +29,7 @@ def controls():
 
 
 def today_trades():
-    d = pd.Timestamp.now(tz=NY).normalize()
+    d = clock.now().normalize()
     return supa.select("lab_trades", signal_ts=f"gte.{d.isoformat()}")
 
 
@@ -62,7 +61,7 @@ def open_position(strategy, occ, contracts, limit_price):
     if not c["trading_enabled"]:
         raise Refused("trading disabled (kill switch)")
     check_mode(c, strategy["status"])
-    now = pd.Timestamp.now(tz=NY)
+    now = clock.now()
     if not (ENTRY_WINDOW[0] <= now.strftime("%H:%M") <= ENTRY_WINDOW[1]):
         raise Refused(f"outside entry window {ENTRY_WINDOW}")
     if contracts < 1 or contracts > c["max_contracts"]:

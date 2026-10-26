@@ -17,12 +17,11 @@ Actions jobs cap at 6h and RTH is 6.5h, so the day is two jobs — morning
 lives in lab_trades and at the broker, never in process memory.
 """
 import argparse
-import time
 import traceback
 
 import pandas as pd
 
-from . import alpaca, backtest, broker, data, strategies, supa
+from . import alpaca, backtest, broker, clock, data, strategies, supa
 from .alpaca import NY
 
 ENTRY_TIMEOUT_S = 90       # unfilled entry limit is canceled after this
@@ -38,7 +37,7 @@ class Runner:
     def __init__(self, window, dry_run=False):
         self.window = window
         self.dry_run = dry_run
-        self.today = pd.Timestamp.now(tz=NY).date()
+        self.today = clock.now().date()
         self.events = []
         self.errors = []
         self.run_id = None
@@ -48,17 +47,17 @@ class Runner:
 
     # ------------------------------------------------------------ logging
     def log(self, kind, **kw):
-        e = {"t": pd.Timestamp.now(tz=NY).strftime("%H:%M:%S"), "kind": kind, **kw}
+        e = {"t": clock.now().strftime("%H:%M:%S"), "kind": kind, **kw}
         print(e, flush=True)
         self.events.append(e)
 
     def error(self, where, exc):
         msg = f"{where}: {exc}"
         print("ERROR", msg, traceback.format_exc(), flush=True)
-        self.errors.append({"t": pd.Timestamp.now(tz=NY).strftime("%H:%M:%S"), "where": where, "error": str(exc)[:500]})
+        self.errors.append({"t": clock.now().strftime("%H:%M:%S"), "where": where, "error": str(exc)[:500]})
 
     def heartbeat(self, status="running", end=False):
-        patch = {"heartbeat_at": pd.Timestamp.now(tz="UTC").isoformat(), "status": status,
+        patch = {"heartbeat_at": clock.now().tz_convert("UTC").isoformat(), "status": status,
                  "events": self.events[-400:], "errors": self.errors[-100:],
                  "strategies": [s["name"] for s in self.strats]}
         if end:
@@ -91,7 +90,7 @@ class Runner:
         return c
 
     def load_strategies(self, force=False):
-        if not force and time.time() - self.strats_loaded < 300:
+        if not force and clock.time() - self.strats_loaded < 300:
             return
         rows = supa.select("lab_strategies", status="in.(paper,live)")
         self.strats = []
@@ -102,11 +101,11 @@ class Runner:
                 self.strats.append(r)
             except Exception as e:
                 self.error(f"load {r['name']}", e)
-        self.strats_loaded = time.time()
+        self.strats_loaded = clock.time()
 
     # ------------------------------------------------------------ signals
     def today_bars(self):
-        now = pd.Timestamp.now(tz=NY)
+        now = clock.now()
         df = alpaca.stock_bars("SPY", pd.Timestamp(f"{self.today} 09:30", tz=NY), now, feed="iex")
         df = df.between_time("09:30", "15:59")
         # only completed bars: a bar stamped t covers [t, t+1min)
@@ -163,7 +162,7 @@ class Runner:
     # ------------------------------------------------------------ management
     def manage(self, ctl, day):
         trades = [t for t in broker.today_trades() if t["status"] in ("pending", "open")]
-        now = pd.Timestamp.now(tz=NY)
+        now = clock.now()
         halt = None
         if not ctl["trading_enabled"]:
             halt = "kill_switch"
@@ -251,7 +250,7 @@ class Runner:
                 stop_order = alpaca.get_order(stop_order["id"])
                 if stop_order["status"] in ("canceled", "filled", "expired"):
                     break
-                time.sleep(0.5)
+                clock.sleep(0.5)
             if stop_order["status"] == "filled":
                 self.record_close(t, stop_order, "stop")
                 return
@@ -267,7 +266,7 @@ class Runner:
             if o["status"] == "filled":
                 self.record_close(t, o, reason)
                 return
-            time.sleep(1)
+            clock.sleep(1)
         if limit:   # target limit didn't fill: pull it and let the next pass re-decide
             broker.cancel(o["id"])
             # re-arm the backstop
@@ -280,7 +279,7 @@ class Runner:
         pnl = (px - t["entry_price"]) * 100 * qty
         supa.update("lab_trades", {"id": t["id"]}, {
             "status": "closed", "exit_price": px, "exit_ts": o["filled_at"], "exit_reason": reason,
-            "pnl": round(pnl, 2), "updated_at": pd.Timestamp.now(tz="UTC").isoformat()})
+            "pnl": round(pnl, 2), "updated_at": clock.now().tz_convert("UTC").isoformat()})
         self.log("closed", occ=t["occ"], reason=reason, pnl=round(pnl, 2))
 
     def flatten_orphans(self, why):
@@ -292,20 +291,20 @@ class Runner:
                 for o in alpaca.orders("open"):
                     if o["symbol"] == p["symbol"]:
                         broker.cancel(o["id"])
-                time.sleep(1)
+                clock.sleep(1)
                 broker.close_position(p["symbol"], int(float(p["qty"])))
                 self.log("orphan_closed", occ=p["symbol"], why=why)
 
     # ------------------------------------------------------------ main loop
     def another_runner_alive(self):
-        fresh = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(minutes=3)).isoformat()
+        fresh = (clock.now().tz_convert("UTC") - pd.Timedelta(minutes=3)).isoformat()
         rows = supa.select("lab_runs", as_of=f"eq.{self.today}", status="eq.running",
                            heartbeat_at=f"gte.{fresh}")
         return bool(rows)
 
     def run(self, once=False):
         clk = alpaca.clock()
-        now = pd.Timestamp.now(tz=NY)
+        now = clock.now()
         start, end = WINDOWS[self.window]
         start_ts = pd.Timestamp(f"{self.today} {start}", tz=NY)
         end_ts = pd.Timestamp(f"{self.today} {end}", tz=NY)
@@ -320,7 +319,7 @@ class Runner:
             start_ts = max(start_ts, nxt)
         if not once and now < start_ts:
             print(f"sleeping until {start_ts}", flush=True)
-            time.sleep(max(0, (start_ts - now).total_seconds()))
+            clock.sleep(max(0, (start_ts - now).total_seconds()))
         # the DST-spare cron entry, or a manual dispatch, while a runner is up
         if not once and self.another_runner_alive():
             print("another runner is heartbeating; exiting", flush=True)
@@ -337,32 +336,33 @@ class Runner:
         self.heartbeat()
         self.log("start", window=self.window, end=str(end_ts), strategies=[s["name"] for s in self.strats],
                  paper=alpaca.is_paper(), dry_run=self.dry_run)
-        last_beat = time.time()
+        last_beat = clock.time()
         while True:
             try:
                 self.load_strategies()
                 ctl = broker.controls()
                 day = self.today_bars()
-                halt = self.manage(ctl, day)
+                self.manage(ctl, day)
                 if len(day) and day.index[-1] != self.last_bar:
                     self.last_bar = day.index[-1]
-                    if not halt:
-                        self.evaluate(day)
+                    # evaluated even when halted: broker refuses the entry and
+                    # the signal is kept as `rejected`, the shadow record
+                    self.evaluate(day)
             except Exception as e:
                 self.error("loop", e)
-            if time.time() - last_beat > 60:
+            if clock.time() - last_beat > 60:
                 self.heartbeat()
-                last_beat = time.time()
-            if once or pd.Timestamp.now(tz=NY) >= end_ts:
+                last_beat = clock.time()
+            if once or clock.now() >= end_ts:
                 break
             # wake ~4s after each minute boundary, when the bar has printed,
             # and every 15s between for exit checks
-            time.sleep(15 - (time.time() % 15) + (4 if time.time() % 60 > 55 else 0))
+            clock.sleep(15 - (clock.time() % 15) + (4 if clock.time() % 60 > 55 else 0))
         self.heartbeat("done", end=True)
 
 
 def pick_window():
-    hhmm = pd.Timestamp.now(tz=NY).strftime("%H:%M")
+    hhmm = clock.now().strftime("%H:%M")
     return "morning" if hhmm < "12:45" else "afternoon"
 
 

@@ -31,7 +31,10 @@ from .alpaca import NY, occ_symbol
 
 OPTIONS_START = pd.Timestamp("2024-02-01").date()
 ENTRY_GRACE = 3
-IV_MULT = 1.0
+# implied vol of real ATM 0DTE bars over prior VIX close, from `research
+# calibrate` on 596 samples, Feb 2024-Oct 2026 (median; 0.50 midday, 0.67
+# at 15:30). Under the RTH-minutes time convention in options.py.
+IV_MULT = 0.54
 TICK = 0.01
 
 

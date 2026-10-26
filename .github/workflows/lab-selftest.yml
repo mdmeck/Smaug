@@ -30,6 +30,10 @@ jobs:
           key: lab-cache-${{ github.run_id }}
           restore-keys: lab-cache-
       - run: mkdir -p out
+      - name: Runner replay (simulated sessions, fake broker)
+        run: |
+          python -m lab.replay_test --days 5 | tee out/replay.txt
+          python -m lab.replay_test --days 3 --module _pulse --max-trades 6 --kill-at 11:00 | tee -a out/replay.txt
       - name: Probe
         run: python -m lab.research probe | tee out/probe.json
       - name: Lookahead check
