@@ -5565,6 +5565,7 @@ const FEATURE_LABELS = {
   structure_dir: "Structure direction",
   bos: "Break of structure",
   choch: "Change of character",
+  retest_short: "Short retest (OR15 high / prev-day low)",
   pat_doji: "Doji",
   pat_marubozu_bull: "Marubozu (bull)",
   pat_marubozu_bear: "Marubozu (bear)",

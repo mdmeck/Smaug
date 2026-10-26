@@ -1,0 +1,78 @@
+// Break-and-retest, short side — static fragment, fetched verbatim by the
+// daily routine. Defines rt_retestShort, the Pine side of the `retest_short`
+// feature: price closes below the OR15 high or the prior-day low, pops back up
+// to it, and fails. Retest logic is stateful (a list of open breaks per level),
+// which is easy to get subtly wrong when regenerated, so it lives here.
+//
+// The generated block CONSUMES rt_retestShort — it must not recompute it, and
+// must not wrap it in its own `not [1]` guard (markers.pine edge-triggers).
+//
+// Mirrors _retest_short() and the retest block of compute_features() in
+// smaug_pipeline.py bar for bar; change one, change both. Both levels are
+// built in-script from RTH bars rather than via request.security, so the
+// values match the Python on regular- and extended-hours charts alike.
+rt_margin = input.float(0.10, title="Break margin ($)", group="Retest")
+rt_dist = input.float(0.10, title="Retest distance ($)", group="Retest")
+rt_window = input.int(15, title="Retest window (bars)", group="Retest")
+rt_recent = input.int(3, title="Retest recency (bars)", group="Retest")
+
+rt_mso = hour(time, "America/New_York") * 60 + minute(time, "America/New_York") - 570
+rt_isRth = rt_mso >= 0 and rt_mso < 390
+rt_newSession = ta.change(time("D")) != 0
+
+var float rt_dayLow = na
+var float rt_prevLow = na
+var float rt_orHigh = na
+var int rt_rthCount = 0
+
+if rt_newSession
+    if not na(rt_dayLow)
+        rt_prevLow := rt_dayLow
+    rt_dayLow := na
+    rt_orHigh := na
+    rt_rthCount := 0
+
+// the first RTH bar of a session is never evaluated — its close[1] belongs to
+// the previous session, same as t = 0 being skipped on the Python side
+rt_active = rt_isRth and rt_rthCount >= 1
+if rt_isRth
+    rt_dayLow := na(rt_dayLow) ? low : math.min(rt_dayLow, low)
+    if rt_mso < 15
+        rt_orHigh := na(rt_orHigh) ? high : math.max(rt_orHigh, high)
+    rt_rthCount += 1
+
+// the OR15 high only counts once the range is final
+rt_or15High = rt_isRth and rt_mso >= 15 ? rt_orHigh : na
+rt_prevLowRth = rt_isRth ? rt_prevLow : na
+
+rt_shortRetest(float rt_lv, float rt_lp, bool rt_on, bool rt_reset) =>
+    var rt_breaks = array.new_int()
+    var int rt_lastTouch = -1
+    rt_fire = false
+    if rt_reset
+        array.clear(rt_breaks)
+        rt_lastTouch := -1
+    if rt_on and not na(rt_lv) and not na(rt_lp)
+        // a close back above the level by the margin cancels every open break
+        if close > rt_lv + rt_margin
+            array.clear(rt_breaks)
+        if high >= rt_lv - rt_dist
+            rt_lastTouch := bar_index
+        if close <= rt_lv - rt_margin and close[1] > rt_lp - rt_margin
+            array.push(rt_breaks, bar_index)
+        while array.size(rt_breaks) > 0 and bar_index - array.get(rt_breaks, 0) > rt_window
+            array.shift(rt_breaks)
+        // earliest open break before this bar — the widest retest span
+        rt_first = -1
+        for rt_j in rt_breaks
+            if rt_j < bar_index
+                rt_first := rt_j
+                break
+        rt_fire := rt_first >= 0 and rt_lastTouch > rt_first and bar_index - rt_lastTouch < rt_recent and close <= rt_lv - rt_margin
+    rt_fire
+
+// called unconditionally and assigned separately: each call keeps its own
+// state, and `or` short-circuits, which would skip the second call's update
+rt_or15Retest = rt_shortRetest(rt_or15High, rt_or15High[1], rt_active, rt_newSession)
+rt_prevLowRetest = rt_shortRetest(rt_prevLowRth, rt_prevLowRth[1], rt_active, rt_newSession)
+rt_retestShort = rt_or15Retest or rt_prevLowRetest

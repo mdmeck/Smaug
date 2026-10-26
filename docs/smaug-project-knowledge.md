@@ -110,6 +110,15 @@ So do not fit rules to the exact minute or the exact price. Concretely:
 | `structure_dir` | `+1` uptrend (higher high **and** higher low), `-1` downtrend (lower high **and** lower low), `0` mixed. Null until two of each pivot have confirmed |
 | `bos` | break of structure: `+1` broke the swing high with an up/neutral trend, `-1` broke the swing low with a down/neutral trend, else `0` |
 | `choch` | change of character: `+1` broke the swing high **while** `structure_dir` was negative, `-1` broke the swing low while it was positive, else `0` |
+| `retest_short` | `1` on the bar a **bearish break-and-retest** completes at either the 15-minute opening-range high (once the range is final) or the previous session's RTH low, else `0`. A committed break is a close ≥ $0.10 below the level; the retest is a high back within $0.10 of it, within 15 bars of the break and at most 3 bars ago; this bar closes ≥ $0.10 below it again. A close back above the level by $0.10 cancels the break |
+
+### `retest_short` — the one feature with out-of-sample evidence
+It is the only signal so far that beats random entries on days the tuning never saw. In a walk-forward test on 55 sessions (2026-07-20 → 10-23), it scored ~35% Good at 1:3 against a ~24% random-short base rate, in both 4- and 5-fold splits. Every fold, choosing levels from its own training days, picked the OR15 high and the prior-day low. Retests of VWAP, premarket, swing, shelf and round-number levels did not hold up. Neither did any **long-side** retest, which is why there is no `retest_long`. Adding trend or extension filters on top of the retest also made held-out results *worse*.
+
+How to use it:
+- **`short_entry`:** start from `retest_short >= 1`. It fires ~2.4 times per session (~1.7% of RTH bars). Add a further condition only if the Good/Bad examples clearly support it, and say in `summary` that each extra condition is in-sample only.
+- **`long_entry`:** don't reference `retest_short`, and don't invent a long retest from other features. No long setup has beaten random out of sample yet. Keep `confidence` low on the long side and say so.
+- **~35% is still well under the 70% hit-rate target.** At 1:3 it is positive expectancy (breakeven is 25%), but it is not high confidence. Report it honestly.
 
 ### Candlestick patterns (binary `pat_*` features)
 Each is `1` on a bar where the pattern completed, `0` otherwise, and **null** where the lookback would cross a session boundary (`close[1]` at 9:30 is yesterday's 15:59 — an "engulfing" built across the overnight gap is an artifact, not a pattern). They are independent booleans, not one categorical code: more than one can be `1` on the same bar.
@@ -176,6 +185,7 @@ Every entry-model run also produces a complete TradingView Pine Script v5 indica
     | `pat_bear_engulf` | `c2_isBearEngulf` | | |
 
     A pattern rule takes no `input.float` threshold — there's nothing to tune, the value is always 1. The if/else chain inside those fragments only decides which *label* gets drawn when several patterns match at once; the booleans themselves are independent, so `and`-ing two of them is legal (just usually empty).
+  - `retest_short` — **do not recompute this either.** `pinescript/retest.pine` (fragment #7) defines it as the boolean `rt_retestShort`. Translate `retest_short >= 1` to `rt_retestShort` with no `input.float` threshold.
   - `dist_swing_high_bps`, `dist_swing_low_bps`, `structure_dir`, `bos`, `choch` — **do not recompute these.** `pinescript/structure.pine` (fragment #6) already defines them as `st_distSwingHighBps`, `st_distSwingLowBps`, `st_structureDir`, `st_bos`, `st_choch`. Reference those names directly. Pivot confirmation lag is a silent-lookahead trap and the fragment is the version that has been verified against the Python; re-deriving it in generated code is how that gets quietly broken.
 - Self-contained — no external requests beyond `request.security` for prior-session levels.
 - No `alertcondition()` calls — visual-only indicator, not wired to TradingView alerts.
@@ -188,15 +198,17 @@ Candlestick pattern detection, RSI, and the entry/exit marker convention are det
 3. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/candles_1.pine`
 4. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/candles_2.pine`
 5. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/candles_3.pine`
-6. **The generated block** — the only dynamic part, described below.
-7. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/markers.pine`
+6. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/structure.pine`
+7. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/retest.pine`
+8. **The generated block** — the only dynamic part, described below.
+9. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/markers.pine`
 
-`header.pine` must be first (`//@version=5` can't have anything before it) and `markers.pine` must be last (it references `longEntry`/`shortEntry`/`exitSignal`, which only exist once step 6 defines them). This is fetch-and-paste-verbatim, not a template — nothing in the fetched files should be edited at generation time.
+`header.pine` must be first (`//@version=5` can't have anything before it) and `markers.pine` must be last (it references `longEntry`/`shortEntry`/`exitSignal`, which only exist once step 8 defines them). This is fetch-and-paste-verbatim, not a template — nothing in the fetched files should be edited at generation time.
 
 Before writing `pinescript` to `entry_models`, self-check the assembled text: it must contain exactly one line matching `^//@version=` and exactly one matching `^(indicator|strategy|library)\(`. If either check fails, don't insert a broken script — omit `pinescript` for that row and say so in `summary`.
 
 ### Signal markers — fixed convention, never vary this
-The chart marks must look and mean the same thing every single day, regardless of how the underlying rule thresholds change. This is `pinescript/markers.pine` (fragment #7 above) verbatim:
+The chart marks must look and mean the same thing every single day, regardless of how the underlying rule thresholds change. This is `pinescript/markers.pine` (fragment #9 above) verbatim:
 ```pine
 mk_long = longEntry and not longEntry[1] and barstate.isconfirmed
 mk_short = shortEntry and not shortEntry[1] and barstate.isconfirmed
@@ -205,7 +217,7 @@ plotchar(mk_long, title="Long Entry", char="L", location=location.belowbar, colo
 plotchar(mk_short, title="Short Entry", char="S", location=location.abovebar, color=color.red, size=size.tiny)
 plotchar(mk_exit ? close : na, title="Exit", char="X", location=location.absolute, color=color.orange, size=size.tiny)
 ```
-Where `longEntry`/`shortEntry`/`exitSignal` are the boolean expressions built from that day's `long_entry`/`short_entry`/`exit` rule conditions (`and`-ed together) — defined in the generated block (step 6), consumed here. Never substitute a different shape, color, character, or location — the trader relies on "L below the bar = long, S above the bar = short, X at price = exit" being stable day over day, even as the thresholds behind them evolve.
+Where `longEntry`/`shortEntry`/`exitSignal` are the boolean expressions built from that day's `long_entry`/`short_entry`/`exit` rule conditions (`and`-ed together) — defined in the generated block (step 8), consumed here. Never substitute a different shape, color, character, or location — the trader relies on "L below the bar = long, S above the bar = short, X at price = exit" being stable day over day, even as the thresholds behind them evolve.
 
 **Define those three as plain state, not as events.** `markers.pine` already converts them to edge triggers — do not add `ta.crossover`, `not …[1]`, or any other once-only guard to the generated block, or the signal will require two simultaneous transitions and almost never fire.
 

@@ -79,6 +79,16 @@ AUTO_RETENTION_DAYS = 60        # Auto-graded training examples expire much soon
 # means fewer, cleaner swings confirmed later; lowering them approaches noise.
 SWING_LEFT = 5
 SWING_RIGHT = 5
+# Break-and-retest, short side — see _retest_short(). A committed break is a
+# close RETEST_MARGIN past the level; the retest is a high back within
+# RETEST_DIST of it, inside RETEST_WINDOW bars of the break, at most
+# RETEST_RECENT bars ago, with this bar closing past the level again. Chosen
+# with the trader 2026-10-25; the walk-forward test that justified the feature
+# used exactly these, so retune them only with a fresh out-of-sample check.
+RETEST_MARGIN = 0.10            # SPY dollars
+RETEST_DIST = 0.10              # SPY dollars
+RETEST_WINDOW = 15              # bars
+RETEST_RECENT = 3               # bars, including this one
 # Auto-grading of the indicator's own L/S signals, in SPY dollars from the
 # entry fill. A signal is Bad when price goes AUTO_BAD_STOP against it before
 # AUTO_BAD_TARGET in its favour, and Good when it goes AUTO_GOOD_TARGET in its
@@ -529,6 +539,36 @@ def _first_touch(df, horizon, up_bps, dn_bps, tie):
     return np.where(valid, lab, np.nan)
 
 
+def _retest_short(c, h, level):
+    """One session's RTH bars -> bool array: a bearish break-and-retest of
+    `level` (an array, NaN where unknown) completed on this bar.
+
+    Mirrors pinescript/retest.pine bar for bar, which is why it's a loop with
+    explicit state rather than vectorised. Breaks are kept as a list because
+    the level can be broken, reclaimed by less than the margin, and broken
+    again, and the earliest break still inside the window is the one with the
+    widest retest span. A close back above level + margin cancels them all."""
+    n = len(c)
+    out = np.zeros(n, bool)
+    breaks, last_touch = [], -1
+    for t in range(1, n):
+        lv, lp = level[t], level[t - 1]
+        if not (np.isfinite(lv) and np.isfinite(lp)):
+            continue
+        if c[t] > lv + RETEST_MARGIN:
+            breaks = []
+        if h[t] >= lv - RETEST_DIST:
+            last_touch = t
+        if c[t] <= lv - RETEST_MARGIN and c[t - 1] > lp - RETEST_MARGIN:
+            breaks.append(t)
+        breaks = [j for j in breaks if t - j <= RETEST_WINDOW]
+        first = next((j for j in breaks if j < t), None)
+        out[t] = (first is not None and last_touch > first
+                  and t - last_touch < RETEST_RECENT
+                  and c[t] <= lv - RETEST_MARGIN)
+    return out
+
+
 def compute_features(df):
     """All features are stationary-ish (returns, spreads, ratios) —
     raw price/EMA levels are deliberately excluded as regressors."""
@@ -686,6 +726,27 @@ def compute_features(df):
     or15_l = l.where(rth_mask & or15_forming).groupby(day).transform("min")
     out["or15_width_bps"] = (or15_h - or15_l) / c * 10_000
 
+    # break-and-retest, short side: price closes below the OR15 high or the
+    # prior-day low, pops back up to it, and fails. These two levels are the
+    # only retests that beat random entries on held-out days (2026-10-25: ~35%
+    # Good at 1:3 vs ~24% random, 4- and 5-fold walk-forward, 55 sessions);
+    # VWAP, premarket, swing, shelf and round-number retests didn't, and no
+    # long-side retest did. One OR'd feature because rules can only AND.
+    # The OR15 high only counts once the range is final — a retest of a
+    # still-forming high is just price making the high.
+    or15_final_h = or15_h.where(rth_min_since_open >= 15)
+    prev_low_rth = prev_low.where(rth_mask)
+    retest = np.zeros(len(df), bool)
+    rth_pos = np.flatnonzero(rth_mask)
+    rth_day = day.to_numpy()[rth_pos]
+    cv, hv = c.to_numpy(), h.to_numpy()
+    or15v, prevlv = or15_final_h.to_numpy(), prev_low_rth.to_numpy()
+    for d in np.unique(rth_day):
+        pos = rth_pos[rth_day == d]
+        retest[pos] = (_retest_short(cv[pos], hv[pos], or15v[pos])
+                       | _retest_short(cv[pos], hv[pos], prevlv[pos]))
+    out["retest_short"] = retest.astype(float)
+
     # --- candlestick patterns, as binary 0/1 event features.
     #
     # These are the one place the Python and the Pine have to agree character
@@ -785,7 +846,7 @@ def compute_features(df):
         "dist_or15_high_bps", "dist_or15_low_bps",
         "dist_vwap_bps",
         "dist_swing_high_bps", "dist_swing_low_bps",
-        "structure_dir", "bos", "choch", "or15_width_bps",
+        "structure_dir", "bos", "choch", "or15_width_bps", "retest_short",
     ]] = np.nan
 
     return out

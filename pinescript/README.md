@@ -12,8 +12,9 @@ Concatenate raw fetches of these files, in this exact order, each preceded by a 
 4. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/candles_2.pine`
 5. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/candles_3.pine`
 6. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/structure.pine` — swing pivots, BOS, CHoCH. Must come *before* the generated block, which consumes its `st_*` values.
-7. **Generated block** (not a file here) — `input.float`/`input.int` per rule threshold, feature recomputation, and `longEntry`/`shortEntry`/`exitSignal` boolean definitions. See the "PineScript generation" section of `docs/smaug-project-knowledge.md`.
-8. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/markers.pine` — must be last; it references `longEntry`/`shortEntry`/`exitSignal`, which only exist once step 7 defines them (Pine requires definition-before-use). It also converts those three from state to edge triggers **and gates them on `barstate.isconfirmed`**, so the generated block must define them as plain conditions with no once-only guard and no bar-state gate of its own.
+7. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/retest.pine` — short-side break-and-retest of the OR15 high / prior-day low. Also before the generated block, which consumes `rt_retestShort`.
+8. **Generated block** (not a file here) — `input.float`/`input.int` per rule threshold, feature recomputation, and `longEntry`/`shortEntry`/`exitSignal` boolean definitions. See the "PineScript generation" section of `docs/smaug-project-knowledge.md`.
+9. `https://raw.githubusercontent.com/mdmeck/Smaug/main/pinescript/markers.pine` — must be last; it references `longEntry`/`shortEntry`/`exitSignal`, which only exist once step 8 defines them (Pine requires definition-before-use). It also converts those three from state to edge triggers **and gates them on `barstate.isconfirmed`**, so the generated block must define them as plain conditions with no once-only guard and no bar-state gate of its own.
 
 This is fetch-and-paste-verbatim, not a template to fill in — nothing in these files should be edited or "improved" by the routine at generation time.
 
@@ -32,6 +33,7 @@ Pine has no per-file scoping. Every `var`, function, and local variable defined 
 | `candles_2.pine` | `c2_` |
 | `candles_3.pine` | `c3_` |
 | `structure.pine` | `st_` — and these are the one exception to "the generated block recomputes every feature it references". Pivot confirmation lag is a silent-lookahead trap, so the block **consumes** `st_distSwingHighBps`, `st_distSwingLowBps`, `st_structureDir`, `st_bos`, `st_choch` rather than re-deriving them. |
+| `retest.pine` | `rt_` — consumed the same way as `st_*`: the generated block references `rt_retestShort` and never re-derives it. The retest state (open breaks per level) is stateful and easy to get subtly wrong. |
 | `markers.pine` | `mk_` for its own locals; consumes the unprefixed `longEntry`/`shortEntry`/`exitSignal` names the generated block defines. Don't rename those three identifiers anywhere. |
 
 The `c1_`/`c2_`/`c3_` pattern booleans are the second exception to "the generated block recomputes every feature it references", for the same reason as `st_*`: the Python analysis scores patterns using formulas transcribed from these exact files, so a re-derivation in generated code would measure one thing and fire on another. A `pat_*` feature in the day's rules maps to the fragment identifier — see the mapping table in `docs/smaug-project-knowledge.md`.
