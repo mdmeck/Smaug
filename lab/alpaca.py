@@ -99,10 +99,15 @@ def _to_frame(rows):
 
 # ---------------------------------------------------------------- market data
 
-def stock_bars(symbol, start, end, timeframe="1Min", feed="sip", adjustment="all"):
+def stock_bars(symbol, start, end, timeframe="1Min", feed="sip", adjustment="split"):
     """Bars for one symbol as a NY-indexed DataFrame. Includes extended hours;
-    callers filter to RTH. `adjustment='all'` so a split or dividend doesn't
-    read as a gap in a multi-year backtest."""
+    callers filter to RTH.
+
+    Split-adjusted only, never dividend-adjusted: option strikes are struck
+    against the price that actually traded, and dividend adjustment shifts
+    every historical SPY bar down by the dividends paid since — enough by
+    2024 to pick strikes $5-10 off the money and price trades on contracts
+    that barely traded."""
     rows = _paged_bars("/v2/stocks/bars", {
         "symbols": symbol, "timeframe": timeframe, "start": _iso(start), "end": _iso(end),
         "feed": feed, "adjustment": adjustment,

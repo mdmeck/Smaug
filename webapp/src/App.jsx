@@ -5566,6 +5566,14 @@ const FEATURE_LABELS = {
   bos: "Break of structure",
   choch: "Change of character",
   retest_short: "Short retest (OR15 high / prev-day low)",
+  // volume profile — analysis-only, never used in rules
+  dist_prev_poc_bps: "Dist. from prev-day POC",
+  dist_prev_vah_bps: "Dist. from prev-day VAH",
+  dist_prev_val_bps: "Dist. from prev-day VAL",
+  dist_dev_poc_bps: "Dist. from developing POC",
+  dist_dev_vah_bps: "Dist. from developing VAH",
+  dist_dev_val_bps: "Dist. from developing VAL",
+  dist_hvn5_bps: "Dist. from nearest 5-day HVN",
   pat_doji: "Doji",
   pat_marubozu_bull: "Marubozu (bull)",
   pat_marubozu_bear: "Marubozu (bear)",
@@ -8161,6 +8169,507 @@ function EreborHistoryTab() {
   );
 }
 
+// ---------- Lab ----------
+// Claude's autonomous strategy desk: the Lab routine researches and writes
+// lab_journal / lab_strategies; lab/runner.py (GitHub Actions) paper-trades
+// whatever sits at status `paper` and writes lab_trades / lab_runs. The one
+// thing on this page the trader writes is lab_controls — the kill switch and
+// hard limits the runner re-reads before every order. The routine is
+// forbidden from writing it, so this panel is the only place it changes.
+
+const LAB_STATUS_ORDER = ["live", "paper", "backtest", "idea", "retired"];
+const LAB_STATUS_TONE = {
+  live: T.green,
+  paper: T.amber,
+  backtest: T.blue,
+  idea: T.dim,
+  retired: T.faint,
+};
+const LAB_KINDS = ["all", "plan", "decision", "result", "experiment", "hypothesis", "review", "note"];
+
+const labUsd = (v) =>
+  v === null || v === undefined || !Number.isFinite(Number(v))
+    ? "—"
+    : `${Number(v) < 0 ? "−" : ""}$${Math.abs(Number(v)).toFixed(Math.abs(Number(v)) >= 100 ? 0 : 2)}`;
+const labTone = (v) =>
+  v === null || v === undefined || !Number.isFinite(Number(v)) ? T.faint : Number(v) > 0 ? T.green : Number(v) < 0 ? T.red : T.dim;
+const labAgo = (iso) => {
+  if (!iso) return "never";
+  const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  if (m < 48 * 60) return `${Math.round(m / 60)}h ago`;
+  return `${Math.round(m / 1440)}d ago`;
+};
+const labEt = (iso) =>
+  iso
+    ? new Date(iso).toLocaleString("en-US", {
+        timeZone: "America/New_York",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : "—";
+
+function LabPanel({ title, right, children }) {
+  return (
+    <div
+      style={{
+        background: T.panel,
+        border: `1px solid ${T.panelEdge}`,
+        borderRadius: 8,
+        padding: "14px 16px",
+        marginBottom: 14,
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 10 }}>
+        <span style={{ fontFamily: T.display, fontSize: 20, letterSpacing: "0.05em", color: T.ink }}>
+          {title}
+        </span>
+        <span style={{ flex: 1 }} />
+        {right}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+const LAB_LIMITS = [
+  ["max_contracts", "Max contracts / order", 1, 10],
+  ["max_open_positions", "Max open positions", 1, 5],
+  ["max_trades_per_day", "Max trades / day", 0, 20],
+  ["max_premium_per_trade", "Max premium / trade ($)", 1, 100000],
+  ["max_daily_loss", "Max daily loss ($)", 1, 100000],
+];
+
+function LabControls({ controls, onSaved }) {
+  const [draft, setDraft] = useState(controls);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState(null);
+  useEffect(() => setDraft(controls), [controls]);
+  if (!controls) {
+    return (
+      <LabPanel title="CONTROLS">
+        <div style={{ color: T.dim, fontSize: 13 }}>No lab_controls row — run the Lab section of schema.sql.</div>
+      </LabPanel>
+    );
+  }
+  const dirty = LAB_LIMITS.some(([k]) => Number(draft[k]) !== Number(controls[k])) || draft.mode !== controls.mode;
+
+  const save = async (patch) => {
+    setSaving(true);
+    setErr(null);
+    const { data, error } = await supabase
+      .from("lab_controls")
+      .update({ ...patch, updated_at: new Date().toISOString() })
+      .eq("user_id", controls.user_id)
+      .select()
+      .single();
+    setSaving(false);
+    if (error) setErr(error.message);
+    else onSaved(data);
+  };
+
+  const on = controls.trading_enabled;
+  return (
+    <LabPanel
+      title="CONTROLS"
+      right={
+        <span style={{ fontFamily: T.mono, fontSize: 10.5, color: T.faint }}>
+          updated {labAgo(controls.updated_at)}
+        </span>
+      }
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", marginBottom: 14 }}>
+        <button
+          disabled={saving}
+          onClick={() => save({ trading_enabled: !on })}
+          style={{
+            fontFamily: T.mono,
+            fontSize: 12,
+            fontWeight: 700,
+            letterSpacing: "0.08em",
+            padding: "10px 18px",
+            borderRadius: 6,
+            cursor: "pointer",
+            border: `1px solid ${on ? T.green : T.red}`,
+            background: on ? "rgba(61,214,140,0.12)" : "rgba(240,97,109,0.12)",
+            color: on ? T.green : T.red,
+          }}
+        >
+          {on ? "TRADING ON — CLICK TO STOP" : "TRADING OFF — CLICK TO ENABLE"}
+        </button>
+        <span style={{ fontSize: 12, color: T.dim, lineHeight: 1.5, flex: 1, minWidth: 240 }}>
+          {on
+            ? "The runner may open positions within the limits below. Turning this off cancels open entries and flattens Lab positions within a minute."
+            : "The runner still evaluates strategies and records their signals as rejected (a free shadow record), but sends no orders."}
+        </span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(170px, 1fr))", gap: 10 }}>
+        {LAB_LIMITS.map(([k, label, min, max]) => (
+          <label key={k} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontFamily: T.mono, fontSize: 9.5, letterSpacing: "0.1em", color: T.faint }}>
+              {label.toUpperCase()}
+            </span>
+            <input
+              type="number"
+              min={min}
+              max={max}
+              value={draft[k] ?? ""}
+              onChange={(e) => setDraft({ ...draft, [k]: e.target.value })}
+              style={{
+                background: T.bg,
+                color: T.ink,
+                border: `1px solid ${T.panelEdge}`,
+                borderRadius: 4,
+                padding: "6px 8px",
+                fontFamily: T.mono,
+                fontSize: 13,
+              }}
+            />
+          </label>
+        ))}
+        <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={{ fontFamily: T.mono, fontSize: 9.5, letterSpacing: "0.1em", color: T.faint }}>MODE</span>
+          <select
+            value={draft.mode}
+            onChange={(e) => setDraft({ ...draft, mode: e.target.value })}
+            style={{
+              background: T.bg,
+              color: draft.mode === "live" ? T.red : T.ink,
+              border: `1px solid ${T.panelEdge}`,
+              borderRadius: 4,
+              padding: "6px 8px",
+              fontFamily: T.mono,
+              fontSize: 13,
+            }}
+          >
+            <option value="paper">paper</option>
+            <option value="live">live</option>
+          </select>
+        </label>
+      </div>
+      {draft.mode === "live" && controls.mode !== "live" && (
+        <div style={{ fontSize: 12, color: T.red, marginTop: 10 }}>
+          Live also needs the runner pointed at a live Alpaca endpoint and a strategy you've set to status live.
+          This switch alone sends nothing real.
+        </div>
+      )}
+      {dirty && (
+        <button
+          disabled={saving}
+          onClick={() =>
+            save({
+              mode: draft.mode,
+              ...Object.fromEntries(LAB_LIMITS.map(([k]) => [k, Number(draft[k])])),
+            })
+          }
+          style={{
+            marginTop: 12,
+            fontFamily: T.mono,
+            fontSize: 11,
+            padding: "7px 14px",
+            borderRadius: 4,
+            cursor: "pointer",
+            border: `1px solid ${T.amber}`,
+            background: "transparent",
+            color: T.amber,
+          }}
+        >
+          {saving ? "SAVING…" : "SAVE LIMITS"}
+        </button>
+      )}
+      {err && <div style={{ fontSize: 12, color: T.red, marginTop: 8 }}>Save failed — {err}</div>}
+    </LabPanel>
+  );
+}
+
+function LabRunnerStatus({ runs }) {
+  const latest = runs[0];
+  const alive =
+    latest && latest.status === "running" && Date.now() - new Date(latest.heartbeat_at).getTime() < 3 * 60000;
+  return (
+    <div style={{ fontFamily: T.mono, fontSize: 10.5, color: T.faint, letterSpacing: "0.06em", marginBottom: 14 }}>
+      RUNNER{" "}
+      {latest ? (
+        <>
+          <span style={{ color: alive ? T.green : latest.status === "done" ? T.faint : T.amber }}>
+            {alive ? "LIVE" : latest.status.toUpperCase()}
+          </span>
+          {` · ${latest.as_of} ${latest.session_window} · heartbeat ${labAgo(latest.heartbeat_at)}`}
+          {latest.errors?.length ? (
+            <span style={{ color: T.red }}>{` · ${latest.errors.length} errors`}</span>
+          ) : null}
+        </>
+      ) : (
+        "has not run yet"
+      )}
+    </div>
+  );
+}
+
+function LabStatBlock({ label, s }) {
+  if (!s || !s.n) return null;
+  return (
+    <div style={{ fontFamily: T.mono, fontSize: 11, color: T.dim }}>
+      <span style={{ color: T.faint, letterSpacing: "0.1em", fontSize: 9.5 }}>{label} </span>
+      n {s.n} · avg <span style={{ color: labTone(s.avg_pnl) }}>{labUsd(s.avg_pnl)}</span>
+      {s.win_rate != null ? ` · win ${(s.win_rate * 100).toFixed(0)}%` : ""}
+      {s.profit_factor != null ? ` · PF ${s.profit_factor}` : ""}
+    </div>
+  );
+}
+
+function LabStrategyCard({ s }) {
+  const [open, setOpen] = useState(false);
+  const bt = s.backtest?.stats || s.backtest || {};
+  return (
+    <div
+      style={{
+        border: `1px solid ${T.panelEdge}`,
+        borderLeft: `3px solid ${LAB_STATUS_TONE[s.status] || T.faint}`,
+        borderRadius: 6,
+        padding: "10px 12px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 6,
+        cursor: "pointer",
+      }}
+      onClick={() => setOpen(!open)}
+    >
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontFamily: T.mono, fontSize: 13, fontWeight: 700, color: T.ink }}>{s.name}</span>
+        <span
+          style={{
+            fontFamily: T.mono,
+            fontSize: 9.5,
+            letterSpacing: "0.1em",
+            color: LAB_STATUS_TONE[s.status] || T.faint,
+          }}
+        >
+          {s.status.toUpperCase()}
+        </span>
+        <span style={{ flex: 1 }} />
+        <span style={{ fontFamily: T.mono, fontSize: 10, color: T.faint }}>updated {labAgo(s.updated_at)}</span>
+      </div>
+      {s.hypothesis && <div style={{ fontSize: 12.5, color: T.dim, lineHeight: 1.5 }}>{s.hypothesis}</div>}
+      <LabStatBlock label="BACKTEST HOLDOUT" s={bt.holdout} />
+      <LabStatBlock label="BACKTEST ALL" s={bt.all} />
+      <LabStatBlock label="PAPER" s={s.forward} />
+      {open && (
+        <pre
+          style={{
+            fontFamily: T.mono,
+            fontSize: 10.5,
+            color: T.dim,
+            background: T.bg,
+            padding: 8,
+            borderRadius: 4,
+            margin: 0,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {`module: lab/strategies/${s.module}.py\nparams: ${JSON.stringify(s.params, null, 2)}`}
+          {s.notes ? `\n\n${s.notes}` : ""}
+        </pre>
+      )}
+    </div>
+  );
+}
+
+function LabTradesTable({ trades }) {
+  if (!trades.length) return <div style={{ color: T.dim, fontSize: 13 }}>No trades or signals yet.</div>;
+  const th = { textAlign: "left", fontWeight: 400, color: T.faint, fontSize: 9.5, letterSpacing: "0.1em", padding: "4px 8px" };
+  const td = { padding: "5px 8px", borderTop: `1px solid ${T.panelEdge}`, whiteSpace: "nowrap" };
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: T.mono, fontSize: 11.5, color: T.dim }}>
+        <thead>
+          <tr>
+            {["SIGNAL", "STRATEGY", "CONTRACT", "STATUS", "ENTRY", "EXIT", "WHY", "P/L"].map((h) => (
+              <th key={h} style={th}>
+                {h}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {trades.map((t) => (
+            <tr key={t.id} title={t.notes || ""}>
+              <td style={td}>{labEt(t.signal_ts)}</td>
+              <td style={td}>{t.strategy}</td>
+              <td style={{ ...td, color: t.direction === "long" ? T.green : T.red }}>{t.occ}</td>
+              <td style={{ ...td, color: t.status === "rejected" || t.status === "error" ? T.faint : T.ink }}>
+                {t.status}
+                {t.mode === "live" ? <span style={{ color: T.red }}> live</span> : null}
+              </td>
+              <td style={td}>{t.entry_price != null ? t.entry_price.toFixed(2) : "—"}</td>
+              <td style={td}>{t.exit_price != null ? t.exit_price.toFixed(2) : "—"}</td>
+              <td style={td}>{t.exit_reason || (t.status === "rejected" ? (t.notes || "").slice(0, 40) : "")}</td>
+              <td style={{ ...td, color: labTone(t.pnl) }}>{t.pnl != null ? labUsd(t.pnl) : "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function LabJournal({ entries }) {
+  const [kind, setKind] = useState("all");
+  const shown = entries.filter((e) => kind === "all" || e.kind === kind);
+  return (
+    <>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+        {LAB_KINDS.map((k) => (
+          <button
+            key={k}
+            onClick={() => setKind(k)}
+            style={{
+              fontFamily: T.mono,
+              fontSize: 10,
+              letterSpacing: "0.08em",
+              padding: "4px 9px",
+              borderRadius: 4,
+              cursor: "pointer",
+              border: `1px solid ${kind === k ? T.amber : T.panelEdge}`,
+              background: kind === k ? "rgba(224,123,42,0.1)" : "transparent",
+              color: kind === k ? T.ink : T.faint,
+            }}
+          >
+            {k.toUpperCase()}
+          </button>
+        ))}
+      </div>
+      {!shown.length ? (
+        <div style={{ color: T.dim, fontSize: 13 }}>
+          {entries.length ? "Nothing of this kind yet." : "The Lab routine hasn't written anything yet."}
+        </div>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          {shown.map((e) => (
+            <div key={e.id} style={{ borderTop: `1px solid ${T.panelEdge}`, paddingTop: 10 }}>
+              <div style={{ fontFamily: T.mono, fontSize: 10, color: T.faint, letterSpacing: "0.06em" }}>
+                {labEt(e.created_at)} · {e.kind.toUpperCase()}
+                {e.strategy ? ` · ${e.strategy}` : ""}
+              </div>
+              <div style={{ fontSize: 14, color: T.ink, fontWeight: 700, margin: "4px 0" }}>{e.title}</div>
+              <div style={{ fontSize: 12.5, color: T.dim, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{e.body}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function LabTab() {
+  const [state, setState] = useState({ loading: true });
+
+  useEffect(() => {
+    (async () => {
+      const [controls, strategies, trades, journal, runs] = await Promise.all([
+        supabase.from("lab_controls").select("*").maybeSingle(),
+        supabase.from("lab_strategies").select("*").order("updated_at", { ascending: false }),
+        supabase.from("lab_trades").select("*").order("signal_ts", { ascending: false }).limit(500),
+        supabase.from("lab_journal").select("*").order("created_at", { ascending: false }).limit(100),
+        supabase.from("lab_runs").select("*").order("started_at", { ascending: false }).limit(10),
+      ]);
+      // a failed read and an empty table look identical unless the error is kept
+      const errors = [controls, strategies, trades, journal, runs]
+        .map((r) => r.error?.message)
+        .filter(Boolean);
+      setState({
+        loading: false,
+        errors,
+        controls: controls.data,
+        strategies: strategies.data || [],
+        trades: trades.data || [],
+        journal: journal.data || [],
+        runs: runs.data || [],
+      });
+    })();
+  }, []);
+
+  const closed = useMemo(
+    () => (state.trades || []).filter((t) => t.status === "closed" && t.pnl != null),
+    [state.trades]
+  );
+  const curve = useMemo(() => {
+    const byDay = new Map();
+    for (const t of closed) {
+      const d = new Date(t.signal_ts).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+      byDay.set(d, (byDay.get(d) || 0) + t.pnl);
+    }
+    let run = 0;
+    return [...byDay.entries()]
+      .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+      .map(([time, v]) => ({ time, value: Number((run += v).toFixed(2)) }));
+  }, [closed]);
+
+  if (state.loading) return <div style={{ color: T.faint, fontFamily: T.mono, fontSize: 12 }}>Loading…</div>;
+
+  const total = closed.reduce((a, t) => a + t.pnl, 0);
+  const wins = closed.filter((t) => t.pnl > 0).length;
+  const strategies = [...state.strategies].sort(
+    (a, b) => LAB_STATUS_ORDER.indexOf(a.status) - LAB_STATUS_ORDER.indexOf(b.status)
+  );
+
+  return (
+    <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+      <div style={{ fontSize: 12, color: T.dim, marginBottom: 14, lineHeight: 1.6 }}>
+        Claude's strategy desk. A daily routine researches short-dated options strategies and writes the
+        journal below; strategies it promotes to <span style={{ color: T.amber }}>paper</span> are traded by a
+        deterministic runner in the Alpaca paper account. Live trading needs your promotion and your keys.
+      </div>
+      {state.errors.length > 0 && (
+        <div style={{ fontSize: 12, color: T.red, marginBottom: 12 }}>
+          Some reads failed — {state.errors.join("; ")}. Empty sections below may be failures, not empty tables.
+        </div>
+      )}
+      <LabRunnerStatus runs={state.runs} />
+      <LabControls controls={state.controls} onSaved={(c) => setState((s) => ({ ...s, controls: c }))} />
+
+      <LabPanel
+        title="PAPER P/L"
+        right={
+          <span style={{ fontFamily: T.mono, fontSize: 11, color: T.dim }}>
+            {closed.length} trades · win {closed.length ? ((wins / closed.length) * 100).toFixed(0) : "—"}% · total{" "}
+            <span style={{ color: labTone(total) }}>{labUsd(total)}</span>
+          </span>
+        }
+      >
+        {curve.length ? (
+          <EquityChart points={curve} />
+        ) : (
+          <div style={{ color: T.dim, fontSize: 13 }}>No closed trades yet.</div>
+        )}
+      </LabPanel>
+
+      <LabPanel title="STRATEGIES">
+        {strategies.length ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {strategies.map((s) => (
+              <LabStrategyCard key={s.id} s={s} />
+            ))}
+          </div>
+        ) : (
+          <div style={{ color: T.dim, fontSize: 13 }}>No strategies yet.</div>
+        )}
+      </LabPanel>
+
+      <LabPanel title="TRADES & SIGNALS">
+        <LabTradesTable trades={state.trades.slice(0, 60)} />
+      </LabPanel>
+
+      <LabPanel title="RESEARCH JOURNAL">
+        <LabJournal entries={state.journal} />
+      </LabPanel>
+    </div>
+  );
+}
+
 const NAV = [
   { label: "Reports", children: ["Morning Brief", "Dashboard", "Journal"] },
   // Everything behind the SPY entry model: the synthesized rules + preview, the
@@ -8177,6 +8686,9 @@ const NAV = [
     label: "Scanners",
     children: ["Whale Action", "Roaring Kitty", "Merger Arb", "Scanner History"],
   },
+  // Claude's autonomous strategy research + paper trading. Its own leaf:
+  // nothing in it feeds the SPY indicator or the scanners.
+  { label: "Lab" },
   { label: "Resources" },
 ];
 
@@ -8508,6 +9020,7 @@ export default function Smaug() {
         )}
         {tab === "Merger Arb" && <EreborTab />}
         {tab === "Scanner History" && <EreborHistoryTab />}
+        {tab === "Lab" && <LabTab />}
         {tab === "Resources" && <ResourcesTab />}
           </div>
         </div>

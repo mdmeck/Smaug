@@ -5,7 +5,7 @@ them in Supabase: a decade of SPY alone is ~1M rows, and the free tier's
 500MB would be gone after a handful of tickers. Supabase holds results only.
 
 Cache layout (gitignored, under LAB_CACHE or lab/.cache):
-  stocks/<SYM>/<YYYY-MM>.pkl     one month of 1-min bars, all sessions
+  stocks/<SYM>/split/<YYYY-MM>.pkl  one month of split-adjusted 1-min bars
   options/<YYYY-MM-DD>/<OCC>.pkl one contract's 1-min bars on one day
 Completed months/days never change, so a cached file is reused forever; the
 current month is always refetched.
@@ -35,7 +35,7 @@ def stock_minutes(symbol, start, end, rth=True):
     today = pd.Timestamp.now(tz=NY).to_period("M")
     frames = []
     for m in _month_range(start, end):
-        path = CACHE / "stocks" / symbol / f"{m}.pkl"
+        path = CACHE / "stocks" / symbol / "split" / f"{m}.pkl"
         if path.exists() and m < today:
             df = pd.read_pickle(path)
         else:
