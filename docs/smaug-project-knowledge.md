@@ -112,13 +112,19 @@ So do not fit rules to the exact minute or the exact price. Concretely:
 | `choch` | change of character: `+1` broke the swing high **while** `structure_dir` was negative, `-1` broke the swing low while it was positive, else `0` |
 | `retest_short` | `1` on the bar a **bearish break-and-retest** completes at either the 15-minute opening-range high (once the range is final) or the previous session's RTH low, else `0`. A committed break is a close ≥ $0.10 below the level; the retest is a high back within $0.10 of it, within 15 bars of the break and at most 3 bars ago; this bar closes ≥ $0.10 below it again. A close back above the level by $0.10 cancels the break |
 
-### `retest_short` — the one feature with out-of-sample evidence
-It is the only signal so far that beats random entries on days the tuning never saw. In a walk-forward test on 55 sessions (2026-07-20 → 10-23), it scored ~35% Good at 1:3 against a ~24% random-short base rate, in both 4- and 5-fold splits. Every fold, choosing levels from its own training days, picked the OR15 high and the prior-day low. Retests of VWAP, premarket, swing, shelf and round-number levels did not hold up. Neither did any **long-side** retest, which is why there is no `retest_long`. Adding trend or extension filters on top of the retest also made held-out results *worse*.
+### No rule has a proven edge — including `retest_short`
+`retest_short` was found on 55 sessions (2026-07-20 → 10-23), where it scored ~35% Good at 1:3 on held-out folds against a ~24% random-short base rate. **It did not survive a decade test.** On 2,649 earlier sessions of Alpaca SIP minute bars (2016-01 → 2026-07), with dollar thresholds scaled to price, it scored **26.3% vs a 25.4% random base**. That's indistinguishable from random, and no year from 2016 to 2025 cleared 31%. The 55-day window was a favourable stretch, not an edge.
 
-How to use it:
-- **`short_entry`:** start from `retest_short >= 1`. It fires ~2.4 times per session (~1.7% of RTH bars). Add a further condition only if the Good/Bad examples clearly support it, and say in `summary` that each extra condition is in-sample only.
-- **`long_entry`:** don't reference `retest_short`, and don't invent a long retest from other features. No long setup has beaten random out of sample yet. Keep `confidence` low on the long side and say so.
-- **~35% is still well under the 70% hit-rate target.** At 1:3 it is positive expectancy (breakeven is 25%), but it is not high confidence. Report it honestly.
+The same test (2026-10-29, `scripts/indicator_research.py` on the `indicator-research` branch) found nothing else either:
+- No break-and-retest of any level (OR15 high/low, prior-day high/low, VWAP) on either side beat random over the decade. All sit at 25–27%.
+- No single feature bucket beat its year's base by 3+ points in more than 6 of 11 years.
+- Greedy 3-condition rule searches trained on 2016–2020 or 2016–2023 reached ~32–34% in-sample and scored at or below random on the later years.
+- The routine's long list (`ema_spread_bps > 4.5`, `rsi14 <= 73`, `dist_vwap_bps <= 20`) scored 26.6% vs 25.9% before the discovery window.
+
+A random entry wins ~25% of the time at 1:3, which is the driftless 1/(1+3) value. On SPY 1-minute bars these price-derived features don't move that number reliably. So:
+- **`confidence` stays `low`** for every rule list, and `summary` must not describe any rule as having an out-of-sample edge. A good week of Auto grades is not evidence; over ten years, weeks like that come and go on their own.
+- `retest_short >= 1` may stay as the short trigger, since it's a clean, readable setup that fires ~2.4 times a session. But present it as a chart-reading aid, not a statistical edge.
+- **The 70% hit-rate target is out of reach at 1:3** for anything built from these features. Report the rolling hit rate honestly instead of tightening thresholds to chase it. Tightening only fits noise in the examples.
 
 ### Candlestick patterns (binary `pat_*` features)
 Each is `1` on a bar where the pattern completed, `0` otherwise, and **null** where the lookback would cross a session boundary (`close[1]` at 9:30 is yesterday's 15:59 — an "engulfing" built across the overnight gap is an artifact, not a pattern). They are independent booleans, not one categorical code: more than one can be `1` on the same bar.

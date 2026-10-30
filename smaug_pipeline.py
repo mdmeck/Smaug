@@ -727,11 +727,12 @@ def compute_features(df):
     out["or15_width_bps"] = (or15_h - or15_l) / c * 10_000
 
     # break-and-retest, short side: price closes below the OR15 high or the
-    # prior-day low, pops back up to it, and fails. These two levels are the
-    # only retests that beat random entries on held-out days (2026-10-25: ~35%
-    # Good at 1:3 vs ~24% random, 4- and 5-fold walk-forward, 55 sessions);
-    # VWAP, premarket, swing, shelf and round-number retests didn't, and no
-    # long-side retest did. One OR'd feature because rules can only AND.
+    # prior-day low, pops back up to it, and fails. Picked on 55 sessions
+    # (2026-10-25: ~35% Good at 1:3 vs ~24% random on held-out folds), but a
+    # decade test on 2016-2026 Alpaca bars put it at 26.3% vs 25.4% random —
+    # no edge. Kept as a readable chart setup, not a proven signal; see
+    # "No rule has a proven edge" in the project doc. One OR'd feature
+    # because rules can only AND.
     # The OR15 high only counts once the range is final — a retest of a
     # still-forming high is just price making the high.
     or15_final_h = or15_h.where(rth_min_since_open >= 15)
