@@ -1,0 +1,43 @@
+name: Indicator research
+
+# Decade-scale out-of-sample test of the Smaug indicator's signals on Alpaca
+# SIP minute bars. Runs only from the indicator-research branch. The artifact
+# holds derived features and grades only, never prices (public repo).
+on:
+  push:
+    branches: [indicator-research]
+    paths: ["scripts/indicator_research.py", ".github/workflows/indicator-research.yml"]
+  workflow_dispatch: {}
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
+      ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pandas numpy requests
+      - uses: actions/cache@v4
+        with:
+          path: lab/.cache
+          key: indicator-cache-${{ github.run_id }}
+          restore-keys: |
+            indicator-cache-
+            lab-cache-
+      - run: python scripts/indicator_research.py --start 2016-01-01 --out out | tee out.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: indicator-research
+          path: |
+            out/
+            out.log
+          retention-days: 14
