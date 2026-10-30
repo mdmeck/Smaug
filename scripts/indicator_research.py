@@ -115,7 +115,7 @@ def build(start, end):
 
     o, h, l, c = (bars[x].to_numpy() for x in ("open", "high", "low", "close"))
     cols = {f"g_{s}{suf}": np.full(len(bars), np.nan)
-            for s in ("long", "short") for suf in ("", "_raw")}
+            for s in ("long", "short") for suf in ("", "_raw", "_x3")}
     for lv in LEVELS:
         for s in ("long", "short"):
             cols[f"rt_{s}_{lv}"] = np.zeros(len(bars))
@@ -134,6 +134,8 @@ def build(start, end):
         for s, sign in (("long", 1), ("short", -1)):
             cols[f"g_{s}"][pos] = grade_session(o[pos], h[pos], l[pos], sign, k)
             cols[f"g_{s}_raw"][pos] = grade_session(o[pos], h[pos], l[pos], sign, 1.0)
+            # same 1:3, 3x wider: $1.50 stop / $4.50 target at today's price
+            cols[f"g_{s}_x3"][pos] = grade_session(o[pos], h[pos], l[pos], sign, 3 * k)
             for lv in LEVELS:
                 cols[f"rt_{s}_{lv}"][pos] = retest(c[pos], h[pos], l[pos], L[lv][pos], sign, k)
         if i % 250 == 0:
@@ -188,9 +190,13 @@ def summarize(f, ref):
         sub = f[sel]
         row = {"sessions": int(sub["day"].nunique()),
                "base_long": base(sub, "long"), "base_short": base(sub, "short"),
-               "base_short_raw": base(sub, "short", "g_short_raw")}
+               "base_short_raw": base(sub, "short", "g_short_raw"),
+               "base_long_x3": base(sub, "long", "g_long_x3"),
+               "base_short_x3": base(sub, "short", "g_short_x3")}
         for name, (side, on, gc) in sigs.items():
             row[name] = score(sub, on[sel], side, gc)
+            if gc is None:
+                row[name + "_x3"] = score(sub, on[sel], side, f"g_{side}_x3")
         out["periods"][pname] = row
     return out
 
