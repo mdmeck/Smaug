@@ -88,7 +88,7 @@ The trader pastes broker order history and asks for it to be logged. Conventions
 
 ## Lab (`lab/`)
 
-Claude's autonomous strategy desk: a scheduled routine (`docs/lab-routine-prompt.md`, fetched from `main` each run) researches short-dated options strategies and writes `lab_journal` / `lab_strategies`; `lab/runner.py` in GitHub Actions (`lab-runner.yml`, two jobs per session because Actions caps a job at 6h) paper-trades whatever is at status `paper` through Alpaca. Load-bearing rules:
+Claude's autonomous strategy desk: a scheduled routine (`docs/lab-routine-prompt.md`, fetched from `main` each run) researches short-dated options strategies and writes `lab_journal` / `lab_strategies`; `lab/runner.py` in GitHub Actions (`lab-runner.yml`, two jobs per session because Actions caps a job at 6h; started by the "Smaug Lab trigger" routine pushing to `claude/lab-trigger`, not by Actions `schedule`, whose crons ran hours late) paper-trades whatever is at status `paper` through Alpaca. Load-bearing rules:
 
 - **One implementation per strategy.** A strategy is a module in `lab/strategies/` whose `signals(day, ctx, params)` is called by both `backtest.py` and `runner.py`. Never re-implement a rule in the runner. `python -m lab.research causal <module>` checks for lookahead by replaying every prefix; run it after any change. Underscore modules (`_pulse`) are test fixtures.
 - **`broker.py` is the only code that calls `alpaca.submit_order`.** It re-reads `lab_controls` before every entry and allows only buy-to-open single options and sell-to-close up to the held qty. `lab_controls` is written by the trader from the Lab tab only; the routine's charter forbids writing it.

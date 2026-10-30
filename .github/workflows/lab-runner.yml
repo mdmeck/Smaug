@@ -2,20 +2,21 @@ name: Lab runner
 
 # Intraday executor for Lab strategies at status paper/live. Two jobs a day
 # because Actions caps a job at 6h and RTH is 6.5h: morning (open -> 12:50 ET)
-# and afternoon (12:51 ET -> close). Each window has two cron entries, one per
-# DST offset — cron is UTC-only. The spare lands either before the window
-# (and sleeps) or while the real one runs (queued by the concurrency group,
-# then exits on the runner's own window/heartbeat checks).
+# and afternoon (12:51 ET -> close).
+#
+# Not on Actions' own `schedule`: in Oct 2026 those crons fired 4-5.5h late
+# every day, after the windows had closed. Instead the "Smaug Lab trigger"
+# routine force-pushes an empty commit on top of main to claude/lab-trigger
+# at 13:20 UTC weekdays (09:20 EDT / 08:20 EST — the runner sleeps until the
+# open), which starts the morning job; the morning job dispatches the
+# afternoon one when it ends. A push or dispatch starts within seconds.
 #
 # Does nothing unless lab_controls.trading_enabled is true AND a strategy is
 # at status paper/live: with trading off it still evaluates and records
 # signals as status=rejected, which is a free shadow forward-test.
 on:
-  schedule:
-    - cron: "7 13 * * 1-5"    # 09:07 EDT / 08:07 EST  morning
-    - cron: "7 14 * * 1-5"    # 10:07 EDT / 09:07 EST  morning (DST spare)
-    - cron: "37 16 * * 1-5"   # 12:37 EDT / 11:37 EST  afternoon
-    - cron: "37 17 * * 1-5"   # 13:37 EDT / 12:37 EST  afternoon (DST spare)
+  push:
+    branches: [claude/lab-trigger]
   workflow_dispatch:
     inputs:
       window:
@@ -29,6 +30,10 @@ on:
 concurrency:
   group: lab-runner
   cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write   # to dispatch the afternoon job
 
 jobs:
   run:
@@ -49,14 +54,7 @@ jobs:
           restore-keys: lab-cache-
       - name: Pick window
         id: w
-        run: |
-          if [ -n "${{ inputs.window }}" ]; then
-            echo "window=${{ inputs.window }}" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event.schedule }}" = "37 16 * * 1-5" ] || [ "${{ github.event.schedule }}" = "37 17 * * 1-5" ]; then
-            echo "window=afternoon" >> "$GITHUB_OUTPUT"
-          else
-            echo "window=morning" >> "$GITHUB_OUTPUT"
-          fi
+        run: echo "window=${{ inputs.window || 'morning' }}" >> "$GITHUB_OUTPUT"
       - name: Run
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
@@ -64,3 +62,10 @@ jobs:
           ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
           ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
         run: python -m lab.runner --window ${{ steps.w.outputs.window }} ${{ inputs.dry_run && '--dry-run' || '' }}
+      # even if the morning job failed: the afternoon may still have a
+      # position to manage. The runner exits on its own on a closed day.
+      - name: Start afternoon window
+        if: always() && steps.w.outputs.window == 'morning' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run lab-runner.yml --repo "${{ github.repository }}" --ref main -f window=afternoon
