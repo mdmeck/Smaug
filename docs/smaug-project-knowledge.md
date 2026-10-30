@@ -126,6 +126,9 @@ A random entry wins ~25% of the time at 1:3, which is the driftless 1/(1+3) valu
 - `retest_short >= 1` may stay as the short trigger, since it's a clean, readable setup that fires ~2.4 times a session. But present it as a chart-reading aid, not a statistical edge.
 - **The 70% hit-rate target is out of reach at 1:3** for anything built from these features. Report the rolling hit rate honestly instead of tightening thresholds to chase it. Tightening only fits noise in the examples.
 
+### Volume profile — studied and rejected, not a feature
+POC, VAH/VAL, HVN/LVN, naked POCs and the Market Profile "80% rule" were tested on ~3,000 SPY sessions (2014-04 → 2026-03 plus the stored 2026 bars), graded with the auto-grader's 1:3 rule. None beat placebo levels: not as bounce or break points, not with rejection-candle or break-and-retest entries, and not as filters on the indicator's signals. Any edge bigger than ~3 points of Good rate is ruled out. The one lead, a rejection candle at the prior-day POC, failed two untouched holdouts. There are no volume-profile columns in `compute_features()`, so don't propose them in `rules` or `summary`. The scripts and full results are in `research/volume_profile/`.
+
 ### Candlestick patterns (binary `pat_*` features)
 Each is `1` on a bar where the pattern completed, `0` otherwise, and **null** where the lookback would cross a session boundary (`close[1]` at 9:30 is yesterday's 15:59 — an "engulfing" built across the overnight gap is an artifact, not a pattern). They are independent booleans, not one categorical code: more than one can be `1` on the same bar.
 

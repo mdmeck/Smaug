@@ -1,0 +1,5 @@
+*.pkl
+*.log
+hf_SPY
+hf_SPY_holdout
+hf_SPY_holdout2
