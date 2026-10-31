@@ -30,6 +30,16 @@
 
 Side finding from (C): out of sample, the 2026-10-23 rule set's signals came out Good 21.8 / 24.1 / 26.0% in 2023–26, vs 18.6 / 21.8 / 20.6% for random entries. Their Bad rate was about the same as random.
 
+## Side study: `retest_short` replication
+`retest_short_check.py` re-tests the spec's "no edge over a decade" verdict for `retest_short` on this independent Finnhub data (the original used Alpaca bars with price-scaled thresholds). It uses `compute_features()` unchanged, with the fixed-dollar thresholds as defined. Signals are edge-triggered like `markers.pine`, and the baseline is a random short every 3rd RTH bar, graded the same way.
+
+| Slice | Signals | Good: signal vs random | Diff (95% CI) | Score 3G−B |
+|---|---|---|---|---|
+| 2014–2026, 3,013 sessions | 12,435 (4.1/session) | 14.8% vs 14.4% | +0.4 pts (−0.5..+1.4) | — |
+| 2021–2025 (picked after seeing the yearly table; excludes the 2026 tuning year) | 4,521 | 22.1% vs 20.1% | +2.0 pts (+0.1..+3.9) | +0.04 vs −0.03 |
+
+The signal beat random in 9 of 13 years. This agrees with the spec: no edge worth trading. The 2021–25 slice is post hoc and too small to survive option spreads and fees. Good rates before 2021 are low because $1.50 is a big move when SPY was ~$200.
+
 ## Re-running
 `vp_lib.py` holds the full profile feature set. `compute_all(sp, bars)` returns the pipeline's features plus the profile features.
 ```bash
@@ -43,5 +53,6 @@ $SV/bin/python research/volume_profile/vp_robust.py
 $SV/bin/python research/volume_profile/vp_confirm.py
 $SV/bin/python research/volume_profile/bin_sweep.py hf_SPY
 $SV/bin/python research/volume_profile/vp_confirm2.py
+$SV/bin/python research/volume_profile/retest_short_check.py
 ```
 `vp_test.py` and `vp_context.py` are the first 55-session pass. Downloaded data and result pickles are gitignored.
