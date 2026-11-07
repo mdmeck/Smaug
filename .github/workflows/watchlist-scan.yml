@@ -1,0 +1,45 @@
+name: Watchlist scan
+
+# Separate from smaug-daily.yml and erebor-daily.yml so a yfinance failure here
+# can't touch either of them.
+#
+# Not on Actions' own `schedule`: those crons run hours late (see
+# lab-runner.yml), and this has to finish before the open. The "Smaug
+# Watchlist" routine force-pushes an empty commit on top of main to
+# claude/watchlist-trigger at about 08:30 ET, which starts this within seconds.
+on:
+  push:
+    branches: [claude/watchlist-trigger]
+  workflow_dispatch: {}   # manual "Run workflow" button for testing
+
+concurrency:
+  group: watchlist-scan
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install yfinance pandas requests
+
+      - name: Run scan
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          # Only the routine's push skips holidays. A manual run always scans,
+          # so the workflow can be tested on a day the market is closed.
+          SCAN_ARGS: ${{ github.event_name == 'push' && '--require-premarket' || '' }}
+        run: python watchlist_scan.py $SCAN_ARGS

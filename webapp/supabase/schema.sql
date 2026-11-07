@@ -763,3 +763,57 @@ alter table lab_runs enable row level security;
 create policy "lab_runs_owner_all"
   on lab_runs for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Watchlist: a pre-market planning sheet for a fixed list of tickers, one row
+-- per ticker per day, kept so the levels' history can be read back later.
+-- Upsert on (user_id, run_date, ticker): a re-run corrects that day's reading.
+--
+-- Two writers, split by column. watchlist_scan.py owns everything except
+-- `ai_*`, and the watchlist routine (docs/watchlist-routine-prompt.md) updates
+-- only `ai_*`. The scan leaves those columns out of its payload, and
+-- merge-duplicates only touches columns it was sent, so a re-run keeps them.
+create table if not exists watchlist_snapshots (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  run_date date not null,
+  ticker text not null,
+  grp text not null default '',  -- `group` is reserved
+  sort_order integer not null default 0,
+  price double precision,
+  -- premarket / session / postmarket, or close when nothing has printed today
+  price_source text,
+  price_as_of timestamptz,
+  prev_close double precision,
+  htf_trend text check (htf_trend in ('Up', 'Down', 'Range')),  -- weekly
+  ltf_trend text check (ltf_trend in ('Up', 'Down', 'Range')),  -- daily
+  next_earnings date,
+  -- {expiry, strike, call, call_basis, put, put_basis}. Prior-session quotes
+  -- when written pre-market. Basis is 'mid', or 'last' with no two-sided quote.
+  option jsonb,
+  -- nearest first, up to 3 each: [{price, tags: ['PWH', 'pivot']}]
+  support jsonb not null default '[]',
+  resistance jsonb not null default '[]',
+  -- recent bars for the routine, whose environment blocks market-data sites:
+  -- {atr14, daily: [[date,o,h,l,c,v]...], weekly: [[date,o,h,l,c]...]}
+  context jsonb,
+  -- nearest first, up to 3 each: [{price, reason}]. An opinion, not a formula:
+  -- they can move between runs and aren't reproducible, unlike the columns above.
+  ai_support jsonb,
+  ai_resistance jsonb,
+  ai_summary text,
+  ai_generated_at timestamptz,
+  -- set when this ticker's fetch failed, so a gap reads as a failure
+  error text,
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists watchlist_snapshots_user_day_ticker_key
+  on watchlist_snapshots (user_id, run_date, ticker);
+
+alter table watchlist_snapshots enable row level security;
+
+create policy "watchlist_snapshots_owner_all"
+  on watchlist_snapshots
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);

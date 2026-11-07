@@ -98,11 +98,21 @@ Claude's autonomous strategy desk: a scheduled routine (`docs/lab-routine-prompt
 - The cost model in `lab/options.py` is deliberately pessimistic; `backtest.IV_MULT` (modeled pricing for pre-2024 periods only) comes from `research calibrate`.
 - Verify runner changes with `python -m lab.replay_test` (simulated sessions against a fake broker, no keys needed) — also run by the `lab-selftest.yml` workflow on pushes touching `lab/`, which additionally exercises the real Alpaca account.
 
+## Watchlist
+
+Pre-market sheet for a fixed ticker list (`WATCHLIST` in `watchlist_scan.py`), shown on the Watchlist tab. The "Smaug Watchlist" routine (`docs/watchlist-routine-prompt.md`, fetched from `main` each run) pushes to `claude/watchlist-trigger` at about 08:30 ET, which starts `watchlist-scan.yml`, then waits for the rows and adds its own levels. Load-bearing rules:
+
+- **`watchlist_snapshots` has two writers, split by column.** The scan owns everything except `ai_*`; the routine updates only `ai_*`. The scan must keep leaving `ai_*` out of its payload, because merge-duplicates only touches columns it's sent, and that's what lets a same-day re-run keep the AI levels.
+- **Not on Actions' `schedule`:** those crons run hours late. A push starts within seconds.
+- **The routine can't reach market data** (its environment blocks those sites), so the bars it reads are in the `context` column. Drop that and it has nothing to work from.
+- Option prices written pre-market are the prior session's quotes on a strike chosen from today's price. Yahoo's chains have holes, so `option_quote()` walks out to the first expiry with a strike within `MAX_STRIKE_GAP` of price. The expiry shown may not be the nearest one.
+- Levels use split-adjusted, never dividend-adjusted, prices (`auto_adjust=False`), and only finished sessions, so a partial bar can't become "prior day".
+
 ## Webapp notes
 
 - `webapp/src/App.jsx` is one ~3700-line file holding every component, the theme object `T`, and all Supabase access. Follow the existing inline-style-object convention rather than introducing CSS files.
-- **Two themes coexist on purpose.** `T` ("Apex Forge" — Bebas Neue, Lato, warm neutrals) styles the whole app; `B` styles the Morning Brief and Dashboard tabs and the Whale Action / Roaring Kitty scanner pages, imported from a Claude Design project. `docs/design.md` is the contract for `B` — read it before touching either, and don't blend the two palettes into one tab.
-- Nav is the `NAV` array — a left sidebar where an item with `children` renders as a group: **Reports** (Morning Brief, Dashboard, Journal), **Indicators** (Indicator, Training Data, Feature Analysis), **Scanners** (Whale Action, Roaring Kitty, Merger Arb, Scanner History), Lab, Resources. `tab` state always holds a *leaf* name, never a group name. Component names still use old labels — Feature Analysis renders `TechnicalsTab`, Indicator renders `ModelTab` (backed by the `entry_models` table, so the UI label and schema name diverge by design), Merger Arb renders `EreborTab`, Scanner History renders `EreborHistoryTab`. Whale Action and Roaring Kitty are the Erebor panels (`WhaleActionPanel`/`SqueezePanel`), fed by data loaded once in `Smaug()`.
+- **Two themes coexist on purpose.** `T` ("Apex Forge" — Bebas Neue, Lato, warm neutrals) styles the whole app; `B` styles the Morning Brief, Dashboard and Watchlist tabs and the Whale Action / Roaring Kitty scanner pages, imported from a Claude Design project. `docs/design.md` is the contract for `B` — read it before touching either, and don't blend the two palettes into one tab.
+- Nav is the `NAV` array — a left sidebar where an item with `children` renders as a group: **Reports** (Morning Brief, Dashboard, Watchlist, Journal), **Indicators** (Indicator, Training Data, Feature Analysis), **Scanners** (Whale Action, Roaring Kitty, Merger Arb, Scanner History), Lab, Resources. `tab` state always holds a *leaf* name, never a group name. Component names still use old labels — Feature Analysis renders `TechnicalsTab`, Indicator renders `ModelTab` (backed by the `entry_models` table, so the UI label and schema name diverge by design), Merger Arb renders `EreborTab`, Scanner History renders `EreborHistoryTab`. Whale Action and Roaring Kitty are the Erebor panels (`WhaleActionPanel`/`SqueezePanel`), fed by data loaded once in `Smaug()`.
 - Charts use `lightweight-charts` v5 (`createChart` + `CandlestickSeries`).
 - `vite.config.js` sets `base: "/Smaug/"` for GitHub Pages — don't drop it or asset paths break in production.
 - Deploy is automatic on push to `main` touching `webapp/**`.

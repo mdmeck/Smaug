@@ -8763,8 +8763,281 @@ function LabTab() {
   );
 }
 
+// ---------- Watchlist ----------
+// `watchlist_snapshots`, latest day only. Mechanical columns come from
+// watchlist_scan.py and the `ai_*` ones from the watchlist routine, which can
+// fail independently: a row with no AI levels still shows everything else.
+// `context` is left out of the select because only the routine reads it.
+const WATCHLIST_COLUMNS =
+  "id,run_date,ticker,grp,sort_order,price,price_source,price_as_of,prev_close," +
+  "htf_trend,ltf_trend,next_earnings,option,support,resistance," +
+  "ai_support,ai_resistance,ai_summary,ai_generated_at,error";
+
+const WL_TREND_COLOR = { Up: B.green, Down: B.red, Range: B.dim };
+const WL_TREND_TINT = {
+  Up: "oklch(0.75 0.16 155 / 0.14)",
+  Down: "oklch(0.72 0.18 25 / 0.14)",
+  Range: "oklch(0.6 0.01 260 / 0.14)",
+};
+const WL_TAG_MEANING = "PDH/PDL prior day · PWH/PWL prior week · MH/ML prior month · PMH/PML pre-market";
+const WL_LEVEL_SLOTS = 3;
+const WL_EARNINGS_SOON_DAYS = 7;
+
+const wlMoney = (v) => (v == null ? "—" : Number(v).toFixed(2));
+
+function wlDaysUntil(ymdStr) {
+  const d = new Date(`${ymdStr}T12:00:00`);
+  return Math.round((d.getTime() - Date.now()) / 86400000);
+}
+
+// Ladder order: S3 S2 S1 | R1 R2 R3, so the row reads left to right as a price
+// axis with the nearest levels meeting in the middle. Rows are stored nearest
+// first, and a side can have fewer than three.
+function wlLadder(support, resistance) {
+  const s = Array.from({ length: WL_LEVEL_SLOTS }, (_, i) => (support || [])[i] || null);
+  const r = Array.from({ length: WL_LEVEL_SLOTS }, (_, i) => (resistance || [])[i] || null);
+  return [...s.reverse(), ...r];
+}
+
+const wlCell = {
+  padding: "10px 10px",
+  verticalAlign: "top",
+  whiteSpace: "nowrap",
+  fontFamily: B.mono,
+  fontSize: 12.5,
+  color: B.body,
+};
+
+function WlTrend({ value }) {
+  if (!value) return <span style={{ color: B.ghost }}>{"—"}</span>;
+  return (
+    <span
+      style={{
+        ...eyebrow(WL_TREND_COLOR[value], 10.5),
+        background: WL_TREND_TINT[value],
+        padding: "3px 8px",
+        borderRadius: 20,
+      }}
+    >
+      {value}
+    </span>
+  );
+}
+
+// A level two different sources agree on is the stronger one, so it's the one
+// that gets color. Several pivots alone collapse to one tag and don't count.
+function WlLevel({ level }) {
+  if (!level) return <td style={wlCell} />;
+  const strong = level.tags.length >= 2;
+  return (
+    <td style={wlCell}>
+      <div style={{ color: strong ? B.amberBright : B.body, fontWeight: strong ? 700 : 500 }}>
+        {wlMoney(level.price)}
+      </div>
+      <div style={{ fontSize: 10, color: B.faint, marginTop: 2 }}>{level.tags.join(" + ")}</div>
+    </td>
+  );
+}
+
+function WlEarnings({ date }) {
+  if (!date) return <span style={{ color: B.ghost }}>{"—"}</span>;
+  const days = wlDaysUntil(date);
+  return (
+    <>
+      <div style={{ color: days <= WL_EARNINGS_SOON_DAYS ? B.amberBright : B.purple }}>{dayLabel(date)}</div>
+      <div style={{ fontSize: 10, color: B.faint, marginTop: 2 }}>{days === 0 ? "today" : `in ${days}d`}</div>
+    </>
+  );
+}
+
+function WlOption({ option }) {
+  if (!option) return <span style={{ color: B.ghost }}>{"—"}</span>;
+  const usesLast = option.call_basis === "last" || option.put_basis === "last";
+  return (
+    <>
+      <div title={usesLast ? "No two-sided quote: marked with an asterisk where this is the last trade, not a mid" : undefined}>
+        <span style={{ color: B.green }}>C</span> {wlMoney(option.call)}
+        {option.call_basis === "last" ? "*" : ""} <span style={{ color: B.red }}>P</span> {wlMoney(option.put)}
+        {option.put_basis === "last" ? "*" : ""}
+      </div>
+      <div style={{ fontSize: 10, color: B.faint, marginTop: 2 }}>
+        {dayLabel(option.expiry)} {"·"} {option.strike}
+      </div>
+    </>
+  );
+}
+
+function WlPrice({ row }) {
+  const chg = row.price != null && row.prev_close ? (row.price / row.prev_close - 1) * 100 : null;
+  return (
+    <>
+      <div style={{ color: B.ink, fontWeight: 700 }}>{wlMoney(row.price)}</div>
+      <div style={{ fontSize: 10, color: B.faint, marginTop: 2 }}>
+        {chg != null && (
+          <span style={{ color: chg >= 0 ? B.green : B.red }}>
+            {chg >= 0 ? "+" : ""}
+            {chg.toFixed(1)}%{" "}
+          </span>
+        )}
+        {row.price_source}
+      </div>
+    </>
+  );
+}
+
+function WlRow({ row }) {
+  const ai = wlLadder(row.ai_support, row.ai_resistance);
+  const hasAi = !!row.ai_generated_at;
+  const divider = `1px solid ${B.edgeSoft}`;
+  if (row.error) {
+    return (
+      <tr style={{ borderTop: divider }}>
+        <td style={{ ...wlCell, color: B.blue, fontWeight: 700 }}>{row.ticker}</td>
+        <td colSpan={11} style={{ ...wlCell, color: B.red }}>
+          Scan failed: {row.error}
+        </td>
+      </tr>
+    );
+  }
+  return (
+    <>
+      <tr style={{ borderTop: divider }}>
+        <td style={{ ...wlCell, color: B.blue, fontWeight: 700, fontSize: 13.5 }}>{row.ticker}</td>
+        <td style={wlCell}>
+          <WlTrend value={row.htf_trend} />
+        </td>
+        <td style={wlCell}>
+          <WlTrend value={row.ltf_trend} />
+        </td>
+        <td style={wlCell}>
+          <WlEarnings date={row.next_earnings} />
+        </td>
+        <td style={wlCell}>
+          <WlOption option={row.option} />
+        </td>
+        <td style={{ ...wlCell, borderRight: divider }}>
+          <WlPrice row={row} />
+        </td>
+        {wlLadder(row.support, row.resistance).map((level, i) => (
+          <WlLevel key={i} level={level} />
+        ))}
+      </tr>
+      <tr>
+        <td
+          colSpan={6}
+          style={{
+            ...wlCell,
+            padding: "0 10px 10px",
+            whiteSpace: "normal",
+            fontFamily: B.sans,
+            fontSize: 12,
+            lineHeight: 1.4,
+            color: B.dim,
+            borderRight: divider,
+          }}
+        >
+          <span style={{ ...eyebrow(B.faint, 10), marginRight: 8 }}>AI</span>
+          {hasAi ? row.ai_summary : <span style={{ color: B.ghost }}>No AI levels for this run</span>}
+        </td>
+        {ai.map((level, i) => (
+          <td key={i} title={level?.reason} style={{ ...wlCell, padding: "0 10px 10px", color: B.dim, cursor: level?.reason ? "help" : "default" }}>
+            {level ? wlMoney(level.price) : ""}
+          </td>
+        ))}
+      </tr>
+    </>
+  );
+}
+
+function WatchlistTab() {
+  const [state, setState] = useState({ loading: true, rows: [] });
+
+  useEffect(() => {
+    (async () => {
+      const latest = await supabase
+        .from("watchlist_snapshots")
+        .select("run_date")
+        .order("run_date", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (latest.error) {
+        setState({ loading: false, rows: [], error: latest.error.message });
+        return;
+      }
+      if (!latest.data) {
+        setState({ loading: false, rows: [] });
+        return;
+      }
+      const { data, error } = await supabase
+        .from("watchlist_snapshots")
+        .select(WATCHLIST_COLUMNS)
+        .eq("run_date", latest.data.run_date)
+        .order("sort_order");
+      setState({ loading: false, rows: data || [], error: error?.message });
+    })();
+  }, []);
+
+  const { loading, rows, error } = state;
+  const runDate = rows[0]?.run_date;
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  const groups = [...new Set(rows.map((r) => r.grp))];
+  const headers = ["Ticker", "HTF (W)", "LTF (D)", "Earnings", "Option (prior close)", "Price", "S3", "S2", "S1", "R1", "R2", "R3"];
+
+  return (
+    <div style={{ fontFamily: B.sans, color: B.ink, display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ background: B.surface, border: `1px solid ${B.edge}`, borderRadius: 16, padding: "28px 30px" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 16, marginBottom: 14 }}>
+          <div style={{ fontSize: 17, fontWeight: 700 }}>Watchlist</div>
+          {runDate && (
+            <div style={eyebrow(runDate === today ? B.faint : B.amber, 10.5)}>LAST RUN {dayLabel(runDate)}</div>
+          )}
+        </div>
+
+        {loading && <div style={{ color: B.dim, fontSize: 14.5 }}>Loading...</div>}
+        {error && <div style={{ color: B.red, fontSize: 14.5 }}>Couldn't read the watchlist: {error}</div>}
+        {!loading && !error && !rows.length && (
+          <div style={{ color: B.dim, fontSize: 14.5 }}>No scan has run yet.</div>
+        )}
+
+        {rows.length > 0 && (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  {headers.map((h) => (
+                    <th key={h} style={{ ...eyebrow(B.faint, 10.5), textAlign: "left", padding: "0 10px 10px", whiteSpace: "nowrap" }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              {groups.map((g) => (
+                <tbody key={g}>
+                  <tr>
+                    <td colSpan={12} style={{ ...eyebrow(B.dim, 10.5), padding: "18px 10px 8px" }}>
+                      {g}
+                    </td>
+                  </tr>
+                  {rows.filter((r) => r.grp === g).map((r) => (
+                    <WlRow key={r.id} row={r} />
+                  ))}
+                </tbody>
+              ))}
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div style={{ textAlign: "center", fontSize: 12.5, color: B.ghost, lineHeight: 1.5 }}>
+        {WL_TAG_MEANING}. Amber levels have two or more sources behind them. Hover an AI level for its reason.
+        Verify against your platform before trading.
+      </div>
+    </div>
+  );
+}
+
 const NAV = [
-  { label: "Reports", children: ["Morning Brief", "Dashboard", "Journal"] },
+  { label: "Reports", children: ["Morning Brief", "Dashboard", "Watchlist", "Journal"] },
   // Everything behind the SPY entry model: the synthesized rules + preview, the
   // labeled examples they are fit on, and the pipeline's feature analysis.
   {
@@ -9094,6 +9367,7 @@ export default function Smaug() {
         {tab === "Dashboard" && (
 <DashboardTab />
         )}
+        {tab === "Watchlist" && <WatchlistTab />}
         {tab === "Journal" && <JournalTab />}
         {tab === "Indicator" && <ModelTab />}
         {tab === "Training Data" && <TrainingDataTab />}
