@@ -8767,14 +8767,13 @@ function LabTab() {
 // `watchlist_snapshots`, latest day only. Mechanical columns come from
 // watchlist_scan.py and the `ai_*` ones from the watchlist routine, which can
 // fail independently: a row with no AI levels still shows everything else.
-// `context` is left out of the select because only the routine reads it.
+// `context` (the bars the routine reads) also feeds the trend sparklines.
 const WATCHLIST_COLUMNS =
   "id,run_date,ticker,grp,sort_order,price,price_source,price_as_of,prev_close," +
-  "htf_trend,ltf_trend,next_earnings,option,support,resistance," +
+  "htf_trend,ltf_trend,next_earnings,option,support,resistance,context," +
   "ai_support,ai_resistance,ai_summary,ai_generated_at,error";
 
 const WL_TREND_COLOR = { Up: B.green, Down: B.red, Range: B.dim };
-const WL_TREND_ARROW = { Up: "▲", Down: "▼", Range: "▬" };
 const WL_TAG_MEANING = "PDH/PDL prior day · PWH/PWL prior week · MH/ML prior month · PMH/PML pre-market";
 const WL_LEVEL_SLOTS = 3;
 const WL_EARNINGS_SOON_DAYS = 7;
@@ -8814,29 +8813,72 @@ function wlReadMode() {
 // One line per cell. Everything secondary (tags, expiry and strike, price
 // source, AI reasons) lives in the cell's tooltip: three stacked lines across
 // twelve columns was more than a planning sheet can be scanned at.
+// Inter with tabular figures: digits are fixed width, so decimals line up in a
+// right-aligned column without the typewriter look of a mono face.
 const wlCell = {
   padding: "9px 10px",
   verticalAlign: "middle",
   whiteSpace: "nowrap",
-  fontFamily: B.mono,
-  fontSize: 12.5,
+  fontFamily: B.sans,
+  fontVariantNumeric: "tabular-nums",
+  fontSize: 13,
   color: B.muted,
 };
+const wlNum = { ...wlCell, textAlign: "right" };
 
-function WlTrend({ value }) {
+const WL_SPARK_W = 64;
+const WL_SPARK_H = 20;
+
+// Same EMA as the scan's trend(), but seeded from the first stored close, so
+// over 26 weekly bars it's an approximation. It's only drawn as a guide; the
+// Up/Down/Range color always comes from the scan's full-history verdict.
+function wlEma(closes, len = 20) {
+  const k = 2 / (len + 1);
+  const out = [];
+  closes.forEach((c, i) => out.push(i === 0 ? c : c * k + out[i - 1] * (1 - k)));
+  return out;
+}
+
+// Closes as a line in the trend's color, the 20 EMA faint behind it, and a dot
+// on the last close so it's obvious which side of the average price sits.
+function WlSpark({ bars, value }) {
+  const closes = (bars || []).map((b) => b[4]).filter((c) => c != null);
+  if (closes.length < 2) return null;
+  const ema = wlEma(closes);
+  const lo = Math.min(...closes, ...ema);
+  const hi = Math.max(...closes, ...ema);
+  const x = (i) => 1 + (i / (closes.length - 1)) * (WL_SPARK_W - 4);
+  const y = (v) => 2 + (hi === lo ? 0.5 : 1 - (v - lo) / (hi - lo)) * (WL_SPARK_H - 4);
+  const path = (vals) => vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const color = WL_TREND_COLOR[value] || B.dim;
+  const last = closes.length - 1;
+  return (
+    <svg width={WL_SPARK_W} height={WL_SPARK_H} style={{ display: "block" }} aria-hidden="true">
+      <polyline points={path(ema)} fill="none" stroke={B.ghost} strokeWidth={1} strokeDasharray="2 2" />
+      <polyline points={path(closes)} fill="none" stroke={color} strokeWidth={1.5} strokeLinejoin="round" />
+      <circle cx={x(last)} cy={y(closes[last])} r={2} fill={color} />
+    </svg>
+  );
+}
+
+function WlTrend({ value, bars, span }) {
   if (!value) return wlDash;
   return (
-    <span style={{ color: WL_TREND_COLOR[value], fontSize: 11.5 }}>
-      {WL_TREND_ARROW[value]} {value}
+    <span
+      style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
+      title={`${value}: ${span} closes vs the 20 EMA (dashed)`}
+    >
+      <WlSpark bars={bars} value={value} />
+      <span style={{ color: WL_TREND_COLOR[value], fontSize: 11.5 }}>{value}</span>
     </span>
   );
 }
 
 function WlLevel({ level, mode }) {
-  if (!level) return <td style={wlCell} />;
+  if (!level) return <td style={wlNum} />;
   if (mode === "ai") {
     return (
-      <td style={{ ...wlCell, cursor: level.reason ? "help" : "default" }} title={level.reason}>
+      <td style={{ ...wlNum, cursor: level.reason ? "help" : "default" }} title={level.reason}>
         {wlMoney(level.price)}
       </td>
     );
@@ -8844,7 +8886,7 @@ function WlLevel({ level, mode }) {
   const strong = level.tags.length >= WL_STRONG_TAGS;
   return (
     <td
-      style={{ ...wlCell, color: strong ? B.ink : B.muted, fontWeight: strong ? 700 : 400, cursor: "help" }}
+      style={{ ...wlNum, color: strong ? B.ink : B.muted, fontWeight: strong ? 700 : 400, cursor: "help" }}
       title={level.tags.join(" + ")}
     >
       {wlMoney(level.price)}
@@ -8864,18 +8906,19 @@ function WlEarnings({ date }) {
   );
 }
 
+// A ballpark for sizing, not a quote: the mean of the ATM call and put, with
+// both legs, the strike and the expiry in the tooltip.
 function WlOption({ option }) {
-  if (!option) return wlDash;
+  const legs = option ? [option.call, option.put].filter((v) => v != null) : [];
+  if (!legs.length) return wlDash;
+  const avg = legs.reduce((a, b) => a + b, 0) / legs.length;
+  const leg = (v, basis) => wlMoney(v) + (basis === "last" ? " (last trade)" : "");
   const tip =
-    `${dayLabel(option.expiry)} expiry, ${option.strike} strike, prior-close quotes` +
-    (option.call_basis === "last" || option.put_basis === "last" ? ". * = last trade, no two-sided quote" : "");
+    `Call ${leg(option.call, option.call_basis)} / put ${leg(option.put, option.put_basis)}. ` +
+    `${option.strike} strike, ${dayLabel(option.expiry)} expiry, prior-close quotes`;
   return (
     <span title={tip} style={{ cursor: "help" }}>
-      {wlMoney(option.call)}
-      {option.call_basis === "last" ? "*" : ""}
-      <span style={{ color: B.ghost }}> / </span>
-      {wlMoney(option.put)}
-      {option.put_basis === "last" ? "*" : ""}
+      {wlMoney(avg)}
     </span>
   );
 }
@@ -8886,7 +8929,16 @@ function WlPrice({ row }) {
     <span title={row.price_source || undefined}>
       <span style={{ color: B.ink, fontWeight: 700 }}>{wlMoney(row.price)}</span>
       {chg != null && (
-        <span style={{ color: chg >= 0 ? B.green : B.red, fontSize: 11, marginLeft: 8 }}>
+        // Fixed width so the prices stay right-aligned whatever the change's length.
+        <span
+          style={{
+            display: "inline-block",
+            width: 46,
+            textAlign: "right",
+            color: chg >= 0 ? B.green : B.red,
+            fontSize: 11.5,
+          }}
+        >
           {chg >= 0 ? "+" : ""}
           {chg.toFixed(1)}%
         </span>
@@ -8914,18 +8966,18 @@ function WlRow({ row, mode }) {
       <tr style={{ borderTop: divider }}>
         <td style={{ ...wlCell, color: B.blue, fontWeight: 700 }}>{row.ticker}</td>
         <td style={wlCell}>
-          <WlTrend value={row.htf_trend} />
+          <WlTrend value={row.htf_trend} bars={row.context?.weekly} span="26 weekly" />
         </td>
         <td style={wlCell}>
-          <WlTrend value={row.ltf_trend} />
+          <WlTrend value={row.ltf_trend} bars={row.context?.daily} span="40 daily" />
         </td>
         <td style={wlCell}>
           <WlEarnings date={row.next_earnings} />
         </td>
-        <td style={wlCell}>
+        <td style={wlNum}>
           <WlOption option={row.option} />
         </td>
-        <td style={{ ...wlCell, borderRight: divider }}>
+        <td style={{ ...wlNum, borderRight: divider }}>
           <WlPrice row={row} />
         </td>
         {ai && !row.ai_generated_at ? (
@@ -9019,7 +9071,15 @@ function WatchlistTab() {
   const runDate = rows[0]?.run_date;
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   const groups = [...new Set(rows.map((r) => r.grp))];
-  const headers = ["Ticker", "Weekly", "Daily", "Earnings", "Call / Put", "Price", "S3", "S2", "S1", "R1", "R2", "R3"];
+  const headers = ["Ticker", "Weekly", "Daily", "Earnings", "Option", "Price", "S3", "S2", "S1", "R1", "R2", "R3"];
+  const numericFrom = 4; // Option onward is right-aligned
+  const thStyle = (i) => ({
+    ...eyebrow(B.faint, 10.5),
+    textAlign: i >= numericFrom ? "right" : "left",
+    padding: "0 10px 10px",
+    whiteSpace: "nowrap",
+  });
+  const spanStyle = { ...eyebrow(B.dim, 10.5), padding: "0 10px 4px", textAlign: "center" };
 
   return (
     <div style={{ fontFamily: B.sans, color: B.ink, display: "flex", flexDirection: "column", gap: 20 }}>
@@ -9054,8 +9114,17 @@ function WatchlistTab() {
             <table style={{ width: "100%", borderCollapse: "collapse" }}>
               <thead>
                 <tr>
-                  {headers.map((h) => (
-                    <th key={h} style={{ ...eyebrow(B.faint, 10.5), textAlign: "left", padding: "0 10px 10px", whiteSpace: "nowrap" }}>
+                  <th colSpan={6} />
+                  <th colSpan={3} style={{ ...spanStyle, borderBottom: `1px solid ${B.edgeSoft}` }}>
+                    {"Support ← nearest"}
+                  </th>
+                  <th colSpan={3} style={{ ...spanStyle, borderBottom: `1px solid ${B.edgeSoft}` }}>
+                    {"nearest → Resistance"}
+                  </th>
+                </tr>
+                <tr>
+                  {headers.map((h, i) => (
+                    <th key={h} style={{ ...thStyle(i), paddingTop: 8 }}>
                       {h}
                     </th>
                   ))}
@@ -9080,8 +9149,9 @@ function WatchlistTab() {
 
       <div style={{ textAlign: "center", fontSize: 12.5, color: B.ghost, lineHeight: 1.5 }}>
         Hover a level for its sources ({WL_TAG_MEANING}), or an AI level for its reason. Bold levels have three or
-        more sources. Call / Put are prior-close quotes; hover for expiry and strike. Verify against your platform
-        before trading.
+        more sources. Option is the average of the at-the-money call and put at the prior close; hover for each leg,
+        the strike and the expiry. Charts are weekly and daily closes against the 20 EMA (dashed). Verify against
+        your platform before trading.
       </div>
     </div>
   );
