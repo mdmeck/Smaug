@@ -8839,16 +8839,35 @@ function wlEma(closes, len = 20) {
   return out;
 }
 
+const wlCloses = (bars) => (bars || []).map((b) => b[4]).filter((c) => c != null && c > 0);
+
+// Log height of a chart: closes and EMA together, so neither clips.
+function wlLogRange(bars) {
+  const closes = wlCloses(bars);
+  if (closes.length < 2) return 0;
+  const all = [...closes, ...wlEma(closes)];
+  return Math.log(Math.max(...all)) - Math.log(Math.min(...all));
+}
+
 // Closes as a line in the trend's color, the 20 EMA faint behind it, and a dot
 // on the last close so it's obvious which side of the average price sits.
-function WlSpark({ bars, value }) {
-  const closes = (bars || []).map((b) => b[4]).filter((c) => c != null);
+// Log scale, sized against the column's widest range (`span`) so a 30% run
+// draws taller than a 3% drift. Strictly proportional was unreadable: with
+// INTC up 138% and SPY 7% over the same 26 weeks, SPY was one pixel tall. So
+// height goes with the square root of the ratio, never under WL_SPARK_MIN of
+// the cell. Each chart is centered on its own range.
+const WL_SPARK_MIN = 0.25;
+function WlSpark({ bars, value, span }) {
+  const closes = wlCloses(bars);
   if (closes.length < 2) return null;
   const ema = wlEma(closes);
-  const lo = Math.min(...closes, ...ema);
-  const hi = Math.max(...closes, ...ema);
+  const logs = [...closes, ...ema].map(Math.log);
+  const own = Math.max(...logs) - Math.min(...logs);
+  const mid = (Math.min(...logs) + Math.max(...logs)) / 2;
+  const frac = span > 0 ? Math.max(WL_SPARK_MIN, Math.sqrt(own / span)) : 1;
+  const half = (own || 1) / 2 / frac;
   const x = (i) => 1 + (i / (closes.length - 1)) * (WL_SPARK_W - 4);
-  const y = (v) => 2 + (hi === lo ? 0.5 : 1 - (v - lo) / (hi - lo)) * (WL_SPARK_H - 4);
+  const y = (v) => 2 + (0.5 - (Math.log(v) - mid) / (2 * half)) * (WL_SPARK_H - 4);
   const path = (vals) => vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
   const color = WL_TREND_COLOR[value] || B.dim;
   const last = closes.length - 1;
@@ -8861,15 +8880,17 @@ function WlSpark({ bars, value }) {
   );
 }
 
-function WlTrend({ value, bars, span }) {
+// The chart's color carries the verdict; the word is in the tooltip.
+function WlTrend({ value, bars, span, label }) {
   if (!value) return wlDash;
+  const closes = wlCloses(bars);
+  const move = closes.length > 1 ? (closes[closes.length - 1] / closes[0] - 1) * 100 : null;
+  const tip =
+    `${value}: ${label} closes vs the 20 EMA (dashed)` +
+    (move != null ? `, ${move >= 0 ? "+" : ""}${move.toFixed(1)}% over the period` : "");
   return (
-    <span
-      style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
-      title={`${value}: ${span} closes vs the 20 EMA (dashed)`}
-    >
-      <WlSpark bars={bars} value={value} />
-      <span style={{ color: WL_TREND_COLOR[value], fontSize: 11.5 }}>{value}</span>
+    <span style={{ display: "inline-block", cursor: "help" }} title={tip}>
+      <WlSpark bars={bars} value={value} span={span} />
     </span>
   );
 }
@@ -8947,7 +8968,7 @@ function WlPrice({ row }) {
   );
 }
 
-function WlRow({ row, mode }) {
+function WlRow({ row, mode, spans }) {
   const divider = `1px solid ${B.edgeSoft}`;
   if (row.error) {
     return (
@@ -8966,10 +8987,10 @@ function WlRow({ row, mode }) {
       <tr style={{ borderTop: divider }}>
         <td style={{ ...wlCell, color: B.blue, fontWeight: 700 }}>{row.ticker}</td>
         <td style={wlCell}>
-          <WlTrend value={row.htf_trend} bars={row.context?.weekly} span="26 weekly" />
+          <WlTrend value={row.htf_trend} bars={row.context?.weekly} span={spans.weekly} label="26 weekly" />
         </td>
         <td style={wlCell}>
-          <WlTrend value={row.ltf_trend} bars={row.context?.daily} span="40 daily" />
+          <WlTrend value={row.ltf_trend} bars={row.context?.daily} span={spans.daily} label="40 daily" />
         </td>
         <td style={wlCell}>
           <WlEarnings date={row.next_earnings} />
@@ -9071,6 +9092,11 @@ function WatchlistTab() {
   const runDate = rows[0]?.run_date;
   const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   const groups = [...new Set(rows.map((r) => r.grp))];
+  // One vertical scale per column: the widest ticker's range fills the cell.
+  const spans = {
+    weekly: Math.max(0, ...rows.map((r) => wlLogRange(r.context?.weekly))),
+    daily: Math.max(0, ...rows.map((r) => wlLogRange(r.context?.daily))),
+  };
   const headers = ["Ticker", "Weekly", "Daily", "Earnings", "Option", "Price", "S3", "S2", "S1", "R1", "R2", "R3"];
   const numericFrom = 4; // Option onward is right-aligned
   const thStyle = (i) => ({
@@ -9138,7 +9164,7 @@ function WatchlistTab() {
                     </td>
                   </tr>
                   {rows.filter((r) => r.grp === g).map((r) => (
-                    <WlRow key={r.id} row={r} mode={mode} />
+                    <WlRow key={r.id} row={r} mode={mode} spans={spans} />
                   ))}
                 </tbody>
               ))}
@@ -9150,7 +9176,8 @@ function WatchlistTab() {
       <div style={{ textAlign: "center", fontSize: 12.5, color: B.ghost, lineHeight: 1.5 }}>
         Hover a level for its sources ({WL_TAG_MEANING}), or an AI level for its reason. Bold levels have three or
         more sources. Option is the average of the at-the-money call and put at the prior close; hover for each leg,
-        the strike and the expiry. Charts are weekly and daily closes against the 20 EMA (dashed). Verify against
+        the strike and the expiry. Charts are weekly and daily closes against the 20 EMA (dashed), taller for
+        bigger moves: green up, red down, gray range. Verify against
         your platform before trading.
       </div>
     </div>
