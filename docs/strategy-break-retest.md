@@ -32,7 +32,9 @@ Research behind this: `/mnt/project-files/smaug-audit/youtube-traders-research-2
 ## Definitions
 
 ### Timeframes
-- **HTF (higher time frame):** daily bars (swing trend over the last 10–15 sessions) and 1-hour bars (last 4–10 sessions). [Course uses Daily > 4H > 1H > 1m; dropping 4H is Default]
+- **HTF for levels:** weekly and daily bars. [Mike, decided 2026-11-14]
+- **HTF for trend:** daily bars (swing trend over the last 10–15 sessions) and 1-hour bars (last 4–10 sessions). [Mike, decided 2026-11-14; lookbacks from the Course]
+- 1-hour bars also supply key levels, but only clear ones (see Key levels). [Mike, decided 2026-11-14]
 - **LTF (lower time frame):** 5-minute bars, built from 1-minute bars. [Default; the course goes straight from 1H to 1m]
 - **Execution:** 1-minute bars. [Scarface uses 1-minute]
 
@@ -49,7 +51,9 @@ Trend comes from swing structure, using the same pivot logic as `compute_feature
 
 ### Key levels [Mike 2, 4; named per Scarface]
 A level is a price. The candidates, all knowable before or at the moment they're used:
-- **HTF:** prior-day RTH high and low; daily swing highs and lows from the last 15 sessions; 1-hour swing highs and lows from the last 10 sessions. [Course]
+- **Weekly:** prior-week high and low; weekly swing highs and lows from the last 26 weeks. [Mike, decided 2026-11-14; the 26-week lookback is Default]
+- **Daily:** prior-day RTH high and low; daily swing highs and lows from the last 15 sessions. [Mike, decided 2026-11-14; lookback from the Course]
+- **1-hour, clear ones only:** a 1-hour swing high or low from the last 10 sessions counts only if price turned at it at least twice. [Mike: "key levels if there are ones here"; the two-touch test is Default]
 - **Multi-touch:** a level counts double if price turned at it at least twice. [Course: "key levels with multiple touches"; the scoring is Default]
 - **Session:** premarket high and low (04:00–09:30); first 5-minute candle high and low (09:30–09:35), usable from 09:35.
 - Levels within 0.25 × ATR(14, daily) of each other merge into one zone (their average). [Default]
@@ -98,7 +102,7 @@ Both must hold at entry, measured from the 09:30 open to the confirmation bar's 
 
 Each has a default above so the rule can run. Change any of them before a test is declared.
 
-1. **HTF:** daily and 1-hour (the course without 4H), daily only, or the full Daily > 4H > 1H stack?
+1. ~~**HTF:** daily and 1-hour, daily only, or Daily > 4H > 1H?~~ **Decided 2026-11-14:** weekly and daily for levels; daily and 1H for trend, plus clear 1H levels.
 2. **Trend:** swing structure (HH/HL), the 9/21 EMAs, or both?
 3. **EMA role:** a hard filter, or only a tie-breaker when structure is unclear?
 4. **Which key levels count**, and is a daily swing level as good as prior-day high/low?
