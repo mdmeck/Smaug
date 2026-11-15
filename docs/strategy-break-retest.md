@@ -48,9 +48,11 @@ Research behind this: `/mnt/project-files/smaug-audit/youtube-traders-research-2
 - **LTF trend:** structure on 5-minute bars of the current and prior session, left/right = 3. [Default]
 - **Break of structure (BOS):** a 1-minute close beyond the most recent confirmed LTF swing high (long) or low (short) by the break buffer. A BOS in the trade's direction is required within the last 60 minutes. [Mike 5; window is Default]
 
-### EMA bias [Mike 6]
+### 5-minute EMA bias at entry [Mike 6]
+**Decided 2026-11-15 [Mike]:** ideally the 5-minute 9/21 EMAs agree with the trade at entry; backtest it and track the alternative.
 - **Bullish:** 9 EMA > 21 EMA on 5-minute closes. **Bearish:** the reverse.
-- Used as a **filter** (must agree with the trade) in the base spec. [Default; Mike wrote "can also help", so it may instead be a tie-breaker. See open definitions.]
+- **Default:** must agree with the trade at entry (a long needs bullish, a short bearish).
+- **Variant to test (Lab strategy track):** no 5-minute check, daily and 1H trend only. Counts as a try for the family.
 
 ### Key levels [Mike 2, 4; named per Scarface]
 A level is a price. The candidates, all knowable before or at the moment they're used:
@@ -107,7 +109,7 @@ Each has a default above so the rule can run. Change any of them before a test i
 
 1. ~~**HTF:** daily and 1-hour, daily only, or Daily > 4H > 1H?~~ **Decided 2026-11-14:** weekly and daily for levels; daily and 1H for trend, plus clear 1H levels.
 2. ~~**Trend:** swing structure (HH/HL), the 9/21 EMAs, or both?~~ **Decided 2026-11-15:** both must agree, as the default; structure alone and EMAs alone are tested as variants.
-3. **5-minute EMAs at entry:** with the EMAs now part of the daily and 1H trend, must the 5-minute 9/21 also agree when entering?
+3. ~~**5-minute EMAs at entry:** must the 5-minute 9/21 also agree when entering?~~ **Decided 2026-11-15:** yes, as the default; "daily and 1H only" is tested as a variant.
 4. **Which key levels count**, and is a daily swing level as good as prior-day high/low?
 5. **Break buffer and retest tolerance:** fraction of ATR, a fixed cents value, or a percent of price?
 6. **"Strong" retest candle:** wick and close rules above, or simply a close back beyond the level?
