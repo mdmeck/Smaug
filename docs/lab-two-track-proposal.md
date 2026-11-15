@@ -56,5 +56,6 @@ These come from the 2026-11-11 Lab plan and the 2026-11-13 failed-strategies rev
 ## Open choices
 
 1. Should Track A take every run until its underlying gate is decided (it's cheap), then share?
-2. Shares or options for the forward record of the playbook?
-3. Fixed control universe: which list?
+2. Fixed control universe: which list?
+
+Decided: the playbook trades ATM 0DTE options, with 1–2 DTE as a tracked variant, and its forward record is on options too (trader, 2026-11-15). The underlying gate in step 2 stays as a direction diagnostic only.
