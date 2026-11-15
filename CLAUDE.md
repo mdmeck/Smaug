@@ -108,6 +108,17 @@ Pre-market sheet for a fixed ticker list (`WATCHLIST` in `watchlist_scan.py`), s
 - Option prices written pre-market are the prior session's quotes on a strike chosen from today's price. Yahoo's chains have holes, so `option_quote()` walks out to the first expiry with a strike within `MAX_STRIKE_GAP` of price. The expiry shown may not be the nearest one.
 - Levels use split-adjusted, never dividend-adjusted, prices (`auto_adjust=False`), and only finished sessions, so a partial bar can't become "prior day".
 
+## Midday review
+
+`midday_review.py` finds the morning's break-and-retest setups with the default rules of `docs/strategy-break-retest.md`, for the 2pm weekday review. The "Smaug Afternoon Review" routine (`docs/afternoon-review-prompt.md`, fetched from `main` each run) pushes to `claude/midday-trigger` at about 14:00 ET, which starts `midday-review.yml`, then waits for the `midday_runs` row and summarises. Load-bearing rules:
+
+- **The script decides, the routine only reads.** Setups, outcomes and the journal match are computed in Python; the routine writes nothing. Keep it that way so the review costs a few rows of tokens and is reproducible.
+- **Its own tables, never `bars`.** `bars` is keyed on `ts` alone and the pipeline reads every row as SPY, so QQQ or a watchlist name there would corrupt its features. `intraday_bars` is keyed `(ticker, ts)` and kept 10 days.
+- **`midday_runs` is written last** and is what the routine waits for. It holds the day's journal P/L, so it has RLS on with no policy (not public), unlike the other two.
+- Alpaca SIP, split-adjusted only. The free plan withholds the latest 15 minutes, so a 14:00 run sees bars through ~13:44: every entry (09:35–11:30) is covered, later outcomes show as `open`.
+- Shorts run through the long code on mirrored prices (`flip()`), so a rule is written once. `--selftest` checks that a day and its mirror give the same setup; run it after any change.
+- It is a second implementation of the spec's defaults, outside `lab/strategies/`, because the Lab build is on hold. When the Lab build starts, move the detector there and have this script call it.
+
 ## Webapp notes
 
 - `webapp/src/App.jsx` is one ~3700-line file holding every component, the theme object `T`, and all Supabase access. Follow the existing inline-style-object convention rather than introducing CSS files.

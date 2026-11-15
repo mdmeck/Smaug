@@ -1,6 +1,6 @@
 # Strategy spec: trend-aligned break and retest with QQQ confirmation
 
-**Status: the Lab's starting point, not a rulebook.** Nothing in the pipeline, the Lab or the routines reads this file yet (the Lab build is on hold until the trader says go).
+**Status: the Lab's starting point, not a rulebook.** The Lab doesn't use it yet (the Lab build is on hold until the trader says go). `midday_review.py` applies the defaults below to each morning for the 2pm review, so a change to a default here should be mirrored there.
 
 The trader, 2026-11-15: "My strategy isn't fully dialed in, so we don't need to translate it 1:1. The lab should study and refine to maximize profits, not be limited to anything we discuss today."
 
