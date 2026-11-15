@@ -30,7 +30,8 @@ Research behind this: `/mnt/project-files/smaug-audit/youtube-traders-research-2
 ## Universe and instrument
 
 - **Symbols:** the watchlist single names in `watchlist_scan.py` (TSLA, AAPL, NFLX, INTC, MSFT, AMZN, GOOG, NVDA, AMD, MU, PLTR), plus SMH. [Mike, his watchlist] QQQ is the market reference, not a traded symbol. [Mike]
-- **Instrument for testing:** the underlying stock first (direction only), then short-dated options on it priced on real option bars. [Default]
+- **Instrument:** ATM 0DTE options, the cheapest per trade for his budget. On days a symbol lists no same-day expiry, the nearest expiry. [Mike, decided 2026-11-15] Shares are a diagnostic only, for the direction test on years before option bars exist.
+- **Costs:** P/L always uses real option bars with the backtester's spread crossing, stop slippage and fees (`lab/options.py`), never modeled prices, because spread and theta are a much bigger share of a 0DTE premium.
 - **Bars:** 1-minute RTH and premarket, split-adjusted, never dividend-adjusted (the repo's existing rule).
 
 ## Definitions
@@ -111,7 +112,7 @@ Both must hold at entry, measured from the 09:30 open to the confirmation bar's 
 
 ## Decisions and tunable defaults
 
-Questions 1–4 were the trader's calls. For 5–13 he asked the Lab to find out from data, so the starting values below are chosen from his rules and his course notes, and each comes with the variants the Lab tries first. Nothing here is fixed.
+Questions 1–4 and 13 were the trader's calls. For 5–13 he asked the Lab to find out from data, so the starting values below are chosen from his rules and his course notes, and each comes with the variants the Lab tries first. Nothing here is fixed.
 
 | # | Question | Starting value | First variants to test | Source |
 |---|---|---|---|---|
@@ -127,7 +128,7 @@ Questions 1–4 were the trader's calls. For 5–13 he asked the Lab to find out
 | 10 | Partial and break-even | Half off at 2.5R, then stop to entry | One third off; no partial; no break-even move | Mike (2.5:1), Course ("move stop loss as you scale") |
 | 11 | Trailer | Exit the rest on a 5-minute 9/21 cross against the trade | Exit on a close beyond the last 5-minute swing; target the next key level or HOD | Mike (5-minute EMA cross) |
 | 12 | Time window | Entries 09:35–11:30 ET, flat by 15:45 | 09:35–11:00; 09:35–15:00 | Course (Tony, 9:30–11:30) |
-| 13 | Instrument | Shares first, for the direction test. Then ATM options on the nearest expiry at least 2 sessions out | 0DTE where listed; 1 strike OTM | Course (no 0DTE for new traders) |
+| 13 | Instrument | ATM 0DTE options (nearest expiry when none is listed that day); shares only as a direction diagnostic | 1–2 DTE; 1 strike OTM | Mike, 2026-11-15 ("cheapest given our budget") |
 
 The rule that matters most to test is #7 and #8 together, the QQQ filter the trader calls "the edge". The first comparison is the full default against the **same signals with each filter switched off**, one at a time, so each filter's contribution is measured on its own.
 
