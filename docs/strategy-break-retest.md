@@ -38,10 +38,13 @@ Research behind this: `/mnt/project-files/smaug-audit/youtube-traders-research-2
 - **LTF (lower time frame):** 5-minute bars, built from 1-minute bars. [Default; the course goes straight from 1H to 1m]
 - **Execution:** 1-minute bars. [Scarface uses 1-minute]
 
-### Trend [Mike 1, 3, 5]
-Trend comes from swing structure, using the same pivot logic as `compute_features()` (a pivot is confirmed only `SWING_RIGHT` bars later, so nothing sees the future).
-- **Up:** the last two confirmed swing highs and the last two swing lows are each higher. **Down:** both lower. Otherwise **range**.
-- **HTF trend:** structure on daily bars (last 15 sessions) and 1-hour bars (last 10 sessions), pivots with left/right = 3. [Course windows; pivot size is Default]
+### Trend [Mike 1, 3, 5, 6]
+**Decided 2026-11-14/15 [Mike]:** on each trend timeframe, swing structure and the 9/21 EMAs must both agree. He hasn't checked this against data, so the Lab compares it with the two simpler versions (below).
+- **Structure:** up when the last two confirmed swing highs and the last two swing lows are each higher; down when both are lower; otherwise range. Same pivot logic as `compute_features()` (a pivot is confirmed only `SWING_RIGHT` bars later, so nothing sees the future).
+- **EMAs:** up when the 9 EMA is above the 21 EMA on that timeframe's closes; down when below.
+- **Trend:** up only when structure is up and the EMAs are up; down only when both are down; anything else is range.
+- **Variants to test (Lab strategy track):** structure alone; 9/21 EMAs alone; both agree (the default). Each counts as a try for the family.
+- **HTF trend:** structure and 9/21 EMAs on daily bars (last 15 sessions) and on 1-hour bars (last 10 sessions), pivots with left/right = 3. [Course windows; pivot size is Default]
 - **LTF trend:** structure on 5-minute bars of the current and prior session, left/right = 3. [Default]
 - **Break of structure (BOS):** a 1-minute close beyond the most recent confirmed LTF swing high (long) or low (short) by the break buffer. A BOS in the trade's direction is required within the last 60 minutes. [Mike 5; window is Default]
 
@@ -103,8 +106,8 @@ Both must hold at entry, measured from the 09:30 open to the confirmation bar's 
 Each has a default above so the rule can run. Change any of them before a test is declared.
 
 1. ~~**HTF:** daily and 1-hour, daily only, or Daily > 4H > 1H?~~ **Decided 2026-11-14:** weekly and daily for levels; daily and 1H for trend, plus clear 1H levels.
-2. **Trend:** swing structure (HH/HL), the 9/21 EMAs, or both?
-3. **EMA role:** a hard filter, or only a tie-breaker when structure is unclear?
+2. ~~**Trend:** swing structure (HH/HL), the 9/21 EMAs, or both?~~ **Decided 2026-11-15:** both must agree, as the default; structure alone and EMAs alone are tested as variants.
+3. **5-minute EMAs at entry:** with the EMAs now part of the daily and 1H trend, must the 5-minute 9/21 also agree when entering?
 4. **Which key levels count**, and is a daily swing level as good as prior-day high/low?
 5. **Break buffer and retest tolerance:** fraction of ATR, a fixed cents value, or a percent of price?
 6. **"Strong" retest candle:** wick and close rules above, or simply a close back beyond the level?
