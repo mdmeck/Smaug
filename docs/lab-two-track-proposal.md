@@ -25,7 +25,7 @@ Both tracks share one scoreboard, one set of locked periods and one way of count
    - a matched random control (same symbols, days and entry times, random side, same exits).
    Pass bar declared in advance: the full spec beats both the filters-off version and random at z ≥ 2.
 3. **Filter vacuity check.** Report how often each filter actually changes the signal. pdhl_break's VWAP filter changed 4 of 255 trades; a filter that rarely bites can't be the edge.
-4. **Tune on develop only.** Real option bars, 2024-02-15 → 2026-02-24. A small grid declared before running (at most ~24 cells): break buffer, retest tolerance, target R, time window end. Every cell is counted as a try for the family.
+4. **Refine, in stages.** The trader wants the Lab to refine the strategy freely, not copy it 1:1 (2026-11-15). The spec's defaults table lists what to vary first. Change one row at a time on the discovery period, keep what beats the default there, then tune the survivors on develop (real option bars, 2024-02-15 → 2026-02-24). Every variant and value is counted as a try for the family.
 5. **One holdout look.** 2026-02-25 → 2026-11-10, once, for the chosen cell. If it fails, the family's holdout is spent and further variants go to forward shadowing only.
 6. **Forward shadow.** Every night, run the module on the latest session with no orders, alongside its random control, so a forward record grows whether or not anything passes.
 
