@@ -1,12 +1,16 @@
 # Strategy spec: trend-aligned break and retest with QQQ confirmation
 
-**Status: draft for the trader's review.** Nothing in the pipeline, the Lab or the routines reads this file yet. It turns the trader's manual watchlist strategy into rules a program can follow, so it can be tested and, if it earns it, tuned.
+**Status: the Lab's starting point, not a rulebook.** Nothing in the pipeline, the Lab or the routines reads this file yet (the Lab build is on hold until the trader says go).
+
+The trader, 2026-11-15: "My strategy isn't fully dialed in, so we don't need to translate it 1:1. The lab should study and refine to maximize profits, not be limited to anything we discuss today."
+
+So this file is the **baseline configuration** of one Lab strategy family. Every rule below is something the Lab may test, retune, replace or drop, and it may add rules that aren't here. The trader's own choices are the defaults the Lab starts from and compares against, nothing more. What the Lab may not loosen is how it judges results: see "Guardrails" at the end.
 
 Every rule is tagged by where it came from:
 - **[Mike]** — the trader's own rule, as he wrote it on 2026-11-14.
 - **[Course]** — from the trader's own notes on Scarface Trades' paid "Mastermind" course (mentor "Tony"): multi-timeframe levels, relative strength against QQQ, 9:30–11:30, stop at the last break of structure.
 - **[Scarface]** — from Scarface Trades' public YouTube videos (break and retest, named session levels, candle-close stop, at least 2R). Jdub Trades' own rules weren't readable; his material points to the same community.
-- **[Default]** — a placeholder chosen here so the rule is computable. Each one is listed under "Open definitions" for the trader to confirm or change.
+- **[Default]** — a starting value chosen here so the rule is computable. The Lab may tune it.
 
 Research behind this: `/mnt/project-files/smaug-audit/youtube-traders-research-2026-11-14.md` (project files, not in the repo). The course notes themselves stay in the trader's Google Doc and aren't copied here.
 
@@ -55,6 +59,8 @@ Research behind this: `/mnt/project-files/smaug-audit/youtube-traders-research-2
 - **Variant to test (Lab strategy track):** no 5-minute check, daily and 1H trend only. Counts as a try for the family.
 
 ### Key levels [Mike 2, 4; named per Scarface]
+**Decided 2026-11-15 [Mike]:** track them all and let the data decide. The default set is the named levels (prior-week, prior-day, premarket and first 5-minute candle highs and lows, and high/low of day). Swing levels (weekly, daily, clear 1H) are a variant the Lab adds and tracks.
+
 A level is a price. The candidates, all knowable before or at the moment they're used:
 - **Weekly:** prior-week high and low; weekly swing highs and lows from the last 26 weeks. [Mike, decided 2026-11-14; the 26-week lookback is Default]
 - **Daily:** prior-day RTH high and low; daily swing highs and lows from the last 15 sessions. [Mike, decided 2026-11-14; lookback from the Course]
@@ -103,23 +109,40 @@ Both must hold at entry, measured from the 09:30 open to the confirmation bar's 
 - No trade on FOMC days, the symbol's earnings day, or quad-witching days. [Course: avoid "JPOW Days", earnings, quad witching]
 - Skip a symbol when its options' implied volatility is over 60. [Course: "If IV is over 60, maybe stay out"]
 
-## Open definitions (the trader's call)
+## Decisions and tunable defaults
 
-Each has a default above so the rule can run. Change any of them before a test is declared.
+Questions 1–4 were the trader's calls. For 5–13 he asked the Lab to find out from data, so the starting values below are chosen from his rules and his course notes, and each comes with the variants the Lab tries first. Nothing here is fixed.
 
-1. ~~**HTF:** daily and 1-hour, daily only, or Daily > 4H > 1H?~~ **Decided 2026-11-14:** weekly and daily for levels; daily and 1H for trend, plus clear 1H levels.
-2. ~~**Trend:** swing structure (HH/HL), the 9/21 EMAs, or both?~~ **Decided 2026-11-15:** both must agree, as the default; structure alone and EMAs alone are tested as variants.
-3. ~~**5-minute EMAs at entry:** must the 5-minute 9/21 also agree when entering?~~ **Decided 2026-11-15:** yes, as the default; "daily and 1H only" is tested as a variant.
-4. **Which key levels count**, and is a daily swing level as good as prior-day high/low?
-5. **Break buffer and retest tolerance:** fraction of ATR, a fixed cents value, or a percent of price?
-6. **"Strong" retest candle:** wick and close rules above, or simply a close back beyond the level?
-7. **QQQ "confirms":** above/below VWAP, EMA bias, QQQ's own trend, or QQQ breaking its own level at the same time?
-8. **Relative strength:** raw return vs QQQ since the open, beta-adjusted, or over the last 30 minutes?
-9. **"Ideally":** are the trend and RS rules hard filters, or does a setup score points (a confluence score) and need a minimum?
-10. **Partial size at 2.5R**, and does the trailer's stop move to break-even?
-11. **5-minute EMAs for the trailer:** 9/21, or another pair?
-12. **Time window:** 9:30–11:30 like the course, 9:30–11:00 like the videos, or all day?
-13. **Instrument:** shares, or options (which DTE and strike)?
+| # | Question | Starting value | First variants to test | Source |
+|---|---|---|---|---|
+| 1 | Higher timeframes | Levels: weekly + daily. Trend: daily + 1H, plus clear 1H levels | — | Mike, 2026-11-14 |
+| 2 | Trend definition | Structure and 9/21 EMAs both agree | Structure only; EMAs only | Mike, 2026-11-15 |
+| 3 | 5-minute EMAs at entry | Must agree | No 5-minute check | Mike, 2026-11-15 |
+| 4 | Key levels | Named levels | + swing levels (weekly, daily, clear 1H) | Mike, 2026-11-15 |
+| 5 | Break buffer, retest tolerance | 0.1 × ATR(14, 1-minute) each | 0.05 and 0.2 × ATR; 5 bp of price | Default; ATR scales across names |
+| 6 | Strong retest candle | Hammer: close in top third, lower wick ≥ body | Plain close back beyond the level | Course ("hammer candle") |
+| 7 | QQQ confirms | QQQ on the trade's side of its session VWAP | + QQQ 5-minute 9/21 agrees; QQQ's own daily/1H trend agrees | Course (retest "as QQQ also broke VWAP") |
+| 8 | Relative strength | Stock return since 09:30 minus QQQ's, > 0 for longs (< 0 for shorts) | Beta-adjusted (60-day beta); last 30 minutes only | Course ("going down slower than indexes") |
+| 9 | "Ideally" (filters) | Every filter is a hard rule | Confluence score: pass at least k of the filters | Default; hard rules make each filter's value measurable |
+| 10 | Partial and break-even | Half off at 2.5R, then stop to entry | One third off; no partial; no break-even move | Mike (2.5:1), Course ("move stop loss as you scale") |
+| 11 | Trailer | Exit the rest on a 5-minute 9/21 cross against the trade | Exit on a close beyond the last 5-minute swing; target the next key level or HOD | Mike (5-minute EMA cross) |
+| 12 | Time window | Entries 09:35–11:30 ET, flat by 15:45 | 09:35–11:00; 09:35–15:00 | Course (Tony, 9:30–11:30) |
+| 13 | Instrument | Shares first, for the direction test. Then ATM options on the nearest expiry at least 2 sessions out | 0DTE where listed; 1 strike OTM | Course (no 0DTE for new traders) |
+
+The rule that matters most to test is #7 and #8 together, the QQQ filter the trader calls "the edge". The first comparison is the full default against the **same signals with each filter switched off**, one at a time, so each filter's contribution is measured on its own.
+
+## Guardrails (what the Lab may not loosen)
+
+The Lab can change any rule above. It can't change how a result is judged. These come from `/mnt/project-files/smaug-audit/lab-plan-2026-11-11.md` and the failed-strategies review of 2026-11-13.
+
+- **Locked periods.** Discovery 2016-01-01 → 2023-12-31 (stock bars only; unlimited looks). Develop 2024-02-15 → 2026-02-24 (real option bars; every run counted). **Holdout 2026-02-25 → 2026-11-10, sealed:** one look for the whole family, logged. Forward 2026-11-11 onward, shadowed nightly.
+- **Every try counts.** Each variant or parameter value tried is counted by code for this family, across all sessions of the Lab. The pass bar rises with the count k: the edge's confidence-interval lower bound must clear zero at one-sided 1 − 0.10/k.
+- **Edge against random, not against zero.** Edge = average P/L per trade minus a matched random control (same symbols, days and entry times, random direction, same exits and costs). Only edge decides.
+- **Search in stages, not all at once.** The table above has thousands of combinations. Change one row at a time from the defaults on the discovery period (free, underlying only), keep only rows that beat the default there, then tune the survivors on develop. A full grid would push k so high that nothing could pass.
+- **Plateaus, not peaks.** A tuned value only counts if its neighbours also beat random.
+- **Post-hoc findings are recorded, never built on.** A good year, a good VIX bucket or a good symbol found by looking becomes a new hypothesis, judged on data it wasn't found in.
+- **Both gates.** A pass needs the direction test on stock bars and positive edge on real option prices.
+- **Symbol-list bias.** The watchlist was picked recently, partly because those names moved. Run the same configuration on a fixed older list as a control universe.
 
 ## How this would be tested (proposal only)
 
