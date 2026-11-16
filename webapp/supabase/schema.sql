@@ -817,3 +817,94 @@ create policy "watchlist_snapshots_owner_all"
   for all
   using (auth.uid() = user_id)
   with check (auth.uid() = user_id);
+
+
+-- =====================================================================
+-- Midday review (midday_review.py, docs/afternoon-review-prompt.md)
+-- =====================================================================
+-- A plain script, run at about 14:00 ET on weekdays, that applies the default
+-- rules of docs/strategy-break-retest.md to the morning's bars. The afternoon
+-- routine only reads these tables. Writes only via the service-role key from
+-- GitHub Actions.
+
+-- Today's 1-minute bars for SPY, QQQ and the spec's watchlist names. Its own
+-- table, not `bars`: `bars` is keyed on ts alone and the daily pipeline reads
+-- every row in it as SPY. Kept for INTRADAY_RETENTION_DAYS (10) only; `bars`
+-- still carries SPY's long history.
+create table if not exists intraday_bars (
+  ticker text not null,
+  ts timestamptz not null,
+  open double precision not null,
+  high double precision not null,
+  low double precision not null,
+  close double precision not null,
+  volume bigint not null,
+  primary key (ticker, ts)
+);
+
+alter table intraday_bars enable row level security;
+
+create policy "intraday_bars_public_read"
+  on intraday_bars
+  for select
+  using (true);
+
+-- One row per confirmed break and retest, whether or not it passed every
+-- filter: `failed` names the filters it missed, so a near miss reads as one.
+-- Replaced for the day on each run. Outcomes are R on the underlying.
+create table if not exists midday_setups (
+  id uuid primary key default gen_random_uuid(),
+  run_date date not null,
+  generated_at timestamptz not null,
+  ticker text not null,
+  side text not null check (side in ('Long', 'Short')),
+  level double precision not null,
+  level_key text not null,            -- level rounded to cents, for the unique key
+  level_tags jsonb not null default '[]',  -- e.g. ["PDH", "PMH"]
+  break_at timestamptz not null,      -- bar start times, ET-aware
+  retest_at timestamptz not null,
+  entry_at timestamptz not null,      -- close of the confirmation bar
+  entry double precision not null,
+  stop double precision not null,
+  risk double precision not null,     -- R, in dollars of the underlying
+  target double precision not null,   -- entry + 2.5R
+  passed boolean not null,
+  failed jsonb not null default '[]',
+  checks jsonb not null default '{}', -- each filter's value
+  -- stopped | target, then trailer | flat | open (still running at data end)
+  outcome text,
+  exit_at timestamptz,
+  exit_price double precision,
+  r_multiple double precision,
+  created_at timestamptz not null default now()
+);
+
+create unique index if not exists midday_setups_day_key
+  on midday_setups (run_date, ticker, side, level_key);
+
+alter table midday_setups enable row level security;
+
+create policy "midday_setups_public_read"
+  on midday_setups
+  for select
+  using (true);
+
+-- One row per day, written last, so its presence means the run finished.
+-- `journal` holds the day's journal trades (with their P/L) matched against the
+-- setups, so unlike the two tables above this one is NOT public: RLS is on with
+-- no policy, which leaves it to the service-role key (the script) and the
+-- routine's `postgres` connector. The webapp doesn't read it.
+create table if not exists midday_runs (
+  run_date date primary key,
+  generated_at timestamptz not null,
+  market_open boolean not null default true,
+  data_through timestamptz,           -- bars end here (SIP is 15 minutes behind)
+  symbols jsonb not null default '[]',
+  setups integer not null default 0,
+  passed integer not null default 0,
+  journal jsonb not null default '[]',
+  errors jsonb not null default '{}',
+  notes jsonb not null default '[]'
+);
+
+alter table midday_runs enable row level security;
