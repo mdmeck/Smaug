@@ -1,0 +1,43 @@
+name: Midday review
+
+# Pulls the morning's 1-minute bars (SPY, QQQ, the strategy spec's watchlist
+# names) from Alpaca and runs midday_review.py, which finds the break-and-
+# retest setups the spec's default rules would have taken. No AI here.
+#
+# Not on Actions' own `schedule`: those crons run hours late (see
+# lab-runner.yml), and this has to finish while the trader's charts are still
+# up. The "Smaug Afternoon Review" routine force-pushes an empty commit on top
+# of main to claude/midday-trigger at about 14:00 ET, which starts this within
+# seconds, then waits for the midday_runs row (docs/afternoon-review-prompt.md).
+on:
+  push:
+    branches: [claude/midday-trigger]
+  workflow_dispatch: {}   # manual "Run workflow" button for testing
+
+concurrency:
+  group: midday-review
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install pandas numpy requests
+      - name: Self-test
+        run: python midday_review.py --selftest
+      - name: Run
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
+          ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
+        run: python midday_review.py
