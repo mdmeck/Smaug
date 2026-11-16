@@ -110,7 +110,9 @@ Pre-market sheet for a fixed ticker list (`WATCHLIST` in `watchlist_scan.py`), s
 
 ## Midday review
 
-`midday_review.py` finds the morning's break-and-retest setups with the default rules of `docs/strategy-break-retest.md`, for the 2pm weekday review. The "Smaug Afternoon Review" routine (`docs/afternoon-review-prompt.md`, fetched from `main` each run) pushes to `claude/midday-trigger` at about 14:00 ET, which starts `midday-review.yml`, then waits for the `midday_runs` row and summarises. Load-bearing rules:
+`midday_review.py` finds the morning's break-and-retest setups with the default rules of `docs/strategy-break-retest.md`, for the 2pm weekday review. The "Smaug Afternoon Review" routine pushes to `claude/midday-trigger` at about 14:00 ET, which starts `midday-review.yml`, then fetches `docs/afternoon-review-prompt.md` from `main`, waits for the `midday_runs` row and summarises. Load-bearing rules:
+
+- **The push step lives in the routine's own prompt, never in the fetched doc.** A scheduled run won't take a write because a fetched file says to; that's why the 2026-11-16 run did nothing. The doc's task list is read-only. Not on Actions' `schedule` either: in Nov 2026 those crons ran 3.5 to 6 hours late.
 
 - **The script decides, the routine only reads.** Setups, outcomes and the journal match are computed in Python; the routine writes nothing. Keep it that way so the review costs a few rows of tokens and is reproducible.
 - **Its own tables, never `bars`.** `bars` is keyed on `ts` alone and the pipeline reads every row as SPY, so QQQ or a watchlist name there would corrupt its features. `intraday_bars` is keyed `(ticker, ts)` and kept 10 days.

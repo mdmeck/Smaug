@@ -1,25 +1,47 @@
 # Afternoon review routine — prompt
 
-The "Smaug Afternoon Review" routine fetches this file from `main` each run. It
-starts `midday_review.py` (a plain script in GitHub Actions, no AI), waits for
-it, and turns its rows into one short message for the trader at about 14:00 ET:
-which setups the strategy's default rules would have taken this morning, how
-they played out, and which of his own journal trades are worth saving as
-examples. Paste **only this** into the routine, once:
+The "Smaug Afternoon Review" routine runs at 14:00 ET on weekdays. It starts
+`midday_review.py` (a plain script in GitHub Actions, no AI), waits for it, and
+turns its rows into one short message for the trader: which setups the
+strategy's default rules would have taken this morning, how they played out,
+and which of his own journal trades are worth saving as examples.
+
+The one write, the push that starts the script, lives in the routine's **own
+prompt**, not in this file. A scheduled run won't take a write step because a
+fetched file says to, so when the push lived in this file the 2026-11-16 run only
+read, found no midday run and stopped. Everything this file asks is read-only.
+
+Why a push and not Actions' `schedule`: those crons ran 3.5 to 6 hours late in
+Nov 2026 (`smaug-daily.yml`, set for 21:30 UTC, ran between 01:03 and 03:43 UTC),
+so a schedule can't be trusted to land before 2pm. A push starts the workflow
+within seconds.
+
+Paste **only this** into the routine, once:
 
 ```
 You are the Smaug Afternoon Review routine.
 
-Fetch https://raw.githubusercontent.com/mdmeck/Smaug/main/docs/afternoon-review-prompt.md
-and carry out the task list under the "Task list" heading, in order, exactly as
-written. That document is the instructions; this message only points at them.
+First, start today's midday script. In the mdmeck/Smaug checkout, run each
+command as its own Bash call (never chain with && or ;):
 
-If the fetch fails, STOP and report it. Do not improvise from memory.
+1. date -u '+%Y-%m-%dT%H:%M:%SZ'   (keep the output as TRIGGER_AT)
+2. git fetch origin main
+3. git checkout -B claude/midday-trigger origin/main
+4. git -c user.name="Smaug Midday trigger" -c user.email="noreply@anthropic.com" commit --allow-empty -m "midday trigger"
+5. git push --force origin claude/midday-trigger
+
+If step 5 fails, redo steps 2 to 5 once. If it fails again, your whole message
+is "The 2pm review didn't run today: I couldn't start the midday script." and
+you stop.
+
+Then fetch https://raw.githubusercontent.com/mdmeck/Smaug/main/docs/afternoon-review-prompt.md
+and carry out the task list under the "Task list" heading, in order, exactly as
+written, using TRIGGER_AT. That task list only reads Supabase and writes your
+message. If the fetch fails, STOP and report it. Do not improvise from memory.
 ```
 
-Cron: `0 18,19 * * 1-5`. Routine crons are UTC, so this fires at both 18:00 and
-19:00 and step 1 stops the one that isn't 14:00 ET. That keeps the time right
-across daylight saving.
+Schedule: weekdays 14:00 America/New_York. The routine needs the mdmeck/Smaug
+repo (push to `claude/midday-trigger` only) and the Supabase connector.
 
 This routine is the only part of the 2pm review that uses AI. Finding setups,
 grading them and matching the journal are all done by the script, so this
@@ -30,24 +52,15 @@ routine reads a handful of rows and writes a few lines.
 Run each shell command as its own Bash call. Never chain with `&&` or `;`.
 
 Supabase project id: `uslbwanjvritktievkxc`. Your connector runs as `postgres`.
-**This routine only reads.** Write nothing to any table, open no PR, place no
-order, and send nothing anywhere but your final message.
+**This task list only reads.** Write nothing to any table, push nothing, open no
+PR, place no order, and send nothing anywhere but your final message. The push
+that started the script was your prompt's step, not this file's.
 
-**1. Check the time.** Run `TZ=America/New_York date '+%A %Y-%m-%d %H:%M'`. If the
-hour isn't 14, stop and report `not the 14:00 ET slot`. Otherwise keep that date
-as RUN_DATE. Then run `date -u '+%Y-%m-%dT%H:%M:%SZ'` and keep it as TRIGGER_AT.
+**1. Get the date.** Run `TZ=America/New_York date '+%Y-%m-%d'` and keep it as
+RUN_DATE. If your prompt gave you no TRIGGER_AT, leave the `generated_at`
+condition out of the next query, so any run from today counts.
 
-**2. Start the script.** Pushing to this branch starts `midday-review.yml`:
-
-1. `git fetch origin main`
-2. `git checkout -B claude/midday-trigger origin/main`
-3. `git -c user.name="Smaug Midday trigger" -c user.email="noreply@anthropic.com" commit --allow-empty -m "midday trigger"`
-4. `git push --force origin claude/midday-trigger`
-
-If the push fails, redo these steps once. If it fails again, stop and report the
-error.
-
-**3. Wait for the run.** Run this query, then `sleep 60`, and repeat up to 10
+**2. Wait for today's run.** Run this query, then `sleep 60`, and repeat up to 10
 times until it returns a row:
 
 ```sql
@@ -56,11 +69,12 @@ from midday_runs
 where run_date = 'RUN_DATE' and generated_at >= 'TRIGGER_AT';
 ```
 
-If there's still no row, your whole message is: `The 2pm review didn't run today: the midday script didn't finish.` Stop.
+"No run today" means this query still returns no row after the 10th try. Then
+your whole message is: `The 2pm review didn't run today: the midday script didn't finish.` Stop.
 
 If `market_open` is false, your whole message is: `Market's closed today, so there's no review.` Stop.
 
-**4. Read the setups.** Times come back already in ET.
+**3. Read the setups.** Times come back already in ET.
 
 ```sql
 select ticker, side, round(level::numeric, 2) as level, level_tags,
@@ -74,7 +88,7 @@ where run_date = 'RUN_DATE'
 order by passed desc, entry_at;
 ```
 
-**5. Read the run.**
+**4. Read the run.**
 
 ```sql
 select to_char(data_through at time zone 'America/New_York', 'FMHH12:MI AM') as data_through,
@@ -88,8 +102,8 @@ where run_date = 'RUN_DATE';
 `in_window`, `setup` (the matched setup, or null), `already_saved_as` and
 `example_candidate`.
 
-**6. Write the message.** It reads as a text on a phone, so keep it short. Use
-only what steps 4 and 5 returned. Don't add market commentary, levels or prices
+**5. Write the message.** It reads as a text on a phone, so keep it short. Use
+only what steps 3 and 4 returned. Don't add market commentary, levels or prices
 from anywhere else.
 
 - **First line:** the count and the headline, e.g. `2 setups this morning, one hit its target.` If no row has `passed` true, say so plainly.
