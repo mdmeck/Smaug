@@ -651,10 +651,14 @@ def fetch(symbols, sessions, now):
         "symbols": ",".join(symbols), "timeframe": "1Min", "start": alpaca._iso(start),
         "end": alpaca._iso(end), "feed": "sip", "adjustment": "split"})
     m1 = {s: alpaca._to_frame(rows.get(s, [])) for s in symbols}
+    # Daily bars stop just before today's midnight ET. Only prior sessions are
+    # used (build() drops today), and asking for today's still-forming daily bar
+    # is "recent SIP data", which the free plan refuses with a 403.
+    daily_end = sessions[-1]["open"].normalize() - pd.Timedelta(seconds=1)
     drows = alpaca._paged_bars("/v2/stocks/bars", {
         "symbols": ",".join(symbols), "timeframe": "1Day",
         "start": alpaca._iso((now - pd.Timedelta(days=DAILY_LOOKBACK_DAYS)).date()),
-        "end": alpaca._iso(sessions[-1]["date"]), "feed": "sip", "adjustment": "split"})
+        "end": alpaca._iso(daily_end), "feed": "sip", "adjustment": "split"})
     daily = {}
     for s in symbols:
         d = alpaca._to_frame(drows.get(s, []))

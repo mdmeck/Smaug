@@ -4,11 +4,12 @@ name: Midday review
 # names) from Alpaca and runs midday_review.py, which finds the break-and-
 # retest setups the spec's default rules would have taken. No AI here.
 #
-# Not on Actions' own `schedule`: those crons run hours late (see
-# lab-runner.yml), and this has to finish while the trader's charts are still
-# up. The "Smaug Afternoon Review" routine force-pushes an empty commit on top
-# of main to claude/midday-trigger at about 14:00 ET, which starts this within
-# seconds, then waits for the midday_runs row (docs/afternoon-review-prompt.md).
+# Not on Actions' own `schedule`: those crons run hours late (3.5 to 6h in
+# Nov 2026, see smaug-daily.yml's runs), and this has to finish while the
+# trader's charts are still up. The "Smaug Afternoon Review" routine's own
+# prompt force-pushes an empty commit on top of main to claude/midday-trigger
+# at about 14:00 ET, which starts this within seconds; the routine then waits
+# for the midday_runs row (docs/afternoon-review-prompt.md, read-only).
 on:
   push:
     branches: [claude/midday-trigger]
