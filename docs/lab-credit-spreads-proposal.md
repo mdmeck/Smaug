@@ -265,3 +265,48 @@ at least 2 of 3 years, an edge lower bound above zero at 12 tries, and avg
 P/L above zero under the cost stress, or a written case for why the stress
 is too harsh. Anything short of that is logged and stops. Nothing goes to
 the holdout, paper or live without the trader's go.
+
+### Grid 2 results, 2026-11-17
+
+Run `Lab condor grid` #1 (all 12 lookahead checks ok). Avg P/L per condor
+after modeled costs, best first:
+
+| Variant | Trades | Avg | 90% CI | PF | Edge vs random minute | At 2× spread + $0.65 | Years up | Skipped |
+|---|---|---|---|---|---|---|---|---|
+| $5, range day, held | 74 | +$5.00 | −8.82 to +15.66 | 1.36 | −$18.22 | −$6.30 | 3 of 3 | 46 |
+| $5, no filter, held | 351 | +$1.90 | −4.25 to +7.53 | 1.11 | +$2.09 (lb −5.19) | −$9.72 | 2 of 3 | 156 |
+| $2, no filter, held | 487 | −$0.79 | −3.28 to +1.77 | 0.93 | +$0.57 | −$12.17 | 1 of 3 | 20 |
+| $2, range day, held | 117 | −$1.15 | −6.81 to +3.49 | 0.89 | −$7.04 | −$11.06 | 1 of 3 | 3 |
+| $2, rich IV, held | 287 | −$2.90 | −6.66 to +0.73 | 0.76 | +$1.54 | −$14.41 | 0 of 3 | 13 |
+| $5, rich IV, held | 209 | −$3.10 | −11.80 to +5.35 | 0.85 | +$4.58 | −$14.97 | 0 of 3 | 91 |
+| $5, no filter, managed | 351 | −$3.86 | −7.83 to +0.11 | 0.76 | +$0.94 | −$15.03 | 1 of 3 | 156 |
+| $5, range day, managed | 74 | −$3.94 | −11.86 to +3.25 | 0.74 | −$15.04 | −$13.56 | 1 of 3 | 46 |
+| $2, no filter, managed (cheap gate) | 487 | −$6.08 | −8.27 to −4.09 | 0.48 | +$0.15 | −$18.51 | 0 of 3 | 20 |
+| $2, range day, managed | 117 | −$6.39 | −10.35 to −2.84 | 0.42 | −$7.76 | −$17.61 | 0 of 3 | 3 |
+| $2, rich IV, managed | 287 | −$6.55 | −9.44 to −3.85 | 0.44 | +$1.11 | −$19.07 | 0 of 3 | 13 |
+| $5, rich IV, managed | 209 | −$6.76 | −12.34 to −1.38 | 0.62 | +$3.78 | −$17.25 | 1 of 3 | 91 |
+
+**Nothing clears the bar.** No variant has an edge lower bound above zero
+at 12 tries, and none stays positive under the cost stress. Nothing goes to
+the holdout.
+
+**What it says.**
+- Holding to 15:45 beat the 50% target with a 2× stop in all 6 pairs, by
+  $3 to $7 a condor. The stop closes four legs at the worst moment and
+  rarely saves the trade.
+- $5 wings beat $2 in every held pair but one. More premium per leg crossed.
+- The rich-IV filter hurt. The range-day filter helped the $5 held condor
+  by about $3 over no filter, on 74 trades, well inside the noise.
+- Range-day variants look terrible against the random-minute control, but
+  that comparison is unfair to them: the control enters earlier on days the
+  filter already knew stayed quiet until 13:45, which is hindsight the
+  control gets for free. Judge filters against the unfiltered row instead.
+- **The $5 rows skip 31% of days** (156 of 507), because a far wing had no
+  trade within 3 minutes of entry. Results on the days that filled may not
+  stand for the days that didn't. A real order would rest at a limit, so
+  this is a gap in the backtest, not a reason to trust the $5 numbers more.
+
+**Best candidate:** $5 wings, held to 15:45, no filter: +$1.90 a condor,
+90% CI −$4.25 to +$7.53, +$2.09 over random entry, −$9.72 under the cost
+stress. Costs still decide it. The next useful test is the cost model
+against real quotes for these legs, not more variants.
