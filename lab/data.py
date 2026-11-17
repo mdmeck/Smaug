@@ -70,6 +70,24 @@ def option_day(occ, day):
     return df
 
 
+def option_chain_day(day, occs):
+    """Fill the option_day cache for many contracts on one session with one
+    bulk request (100 symbols per call) instead of one call each. Contracts
+    that didn't trade are cached as empty frames, as option_day does."""
+    day = pd.Timestamp(day).date()
+    if day >= pd.Timestamp.now(tz=NY).date():
+        return
+    missing = [o for o in dict.fromkeys(occs) if not (CACHE / "options" / str(day) / f"{o}.pkl").exists()]
+    if not missing:
+        return
+    s = pd.Timestamp(f"{day} 09:30", tz=NY)
+    e = pd.Timestamp(f"{day} 16:00", tz=NY)
+    got = alpaca.option_bars(missing, s, e)
+    (CACHE / "options" / str(day)).mkdir(parents=True, exist_ok=True)
+    for o in missing:
+        got[o].to_pickle(CACHE / "options" / str(day) / f"{o}.pkl")
+
+
 def vix_daily(start, end):
     """Daily VIX closes (yfinance — Alpaca has no index data). Used only to
     seed modeled option prices for pre-2024 periods; see options.py."""

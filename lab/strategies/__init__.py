@@ -23,7 +23,9 @@ from typing import Optional
 @dataclass
 class Signal:
     ts: object                      # bar whose close triggers the entry
-    direction: str                  # "long" (buy call) | "short" (buy put)
+    direction: str                  # "long" (buy call) | "short" (buy put);
+                                    # for spreads, the bias: long = put credit,
+                                    # short = call credit, neutral = condor
     dte: int = 0                    # sessions to expiry; 0 = same-day
     otm: int = 0                    # strikes out of the money at entry
     stop_pct: Optional[float] = None    # premium stop, fraction of fill
@@ -34,6 +36,14 @@ class Signal:
     max_hold_min: Optional[int] = None
     tag: str = ""
     meta: dict = field(default_factory=dict)
+    # Defined-risk credit spreads (lab/spreads.py). "single" is the long
+    # option above; anything else is simulated and traded as one combo.
+    structure: str = "single"           # single | put_credit | call_credit | iron_condor
+    width: Optional[float] = None       # $ between short and long strike, per side
+    em_mult: Optional[float] = None     # short strike = spot -/+ em_mult x ATM straddle
+    credit_target: Optional[float] = None  # take profit when this fraction of credit is kept
+    credit_stop: Optional[float] = None    # stop when the loss reaches this multiple of credit
+    min_credit: float = 0.05            # skip the trade below this net credit (per share)
 
     def to_json(self):
         d = asdict(self)

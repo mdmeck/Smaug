@@ -1,4 +1,5 @@
 """Event backtester for single-leg long option trades on minute bars.
+Credit spreads (Signal.structure != "single") go to lab/spreads.py.
 
 For each session it asks the strategy for signals, then walks each trade
 minute by minute on the option's own price:
@@ -93,6 +94,10 @@ def _expiry(ctx, dte):
 
 
 def simulate(sig, day, ctx, pricing="auto", contracts=1):
+    if getattr(sig, "structure", "single") != "single":
+        # credit spreads: real option bars only, whatever `pricing` says
+        from . import spreads
+        return spreads.simulate_spread(sig, day, ctx, contracts=contracts)
     right = "C" if sig.direction == "long" else "P"
     spot = float(day.loc[sig.ts, "close"])
     strike = options.strike_for(spot, right, sig.otm)
