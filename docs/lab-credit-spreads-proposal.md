@@ -1,9 +1,10 @@
 # Lab: defined-risk 0DTE credit spreads on paper — proposal
 
-Status: **the trader said go on 2026-11-17; the build is on this branch.**
-Done so far: the simulator, the random control and edge, the research
-commands, the paper probe and the gate workflow (build order steps 1–3). The
-broker and runner path, schema, Lab tab and charter edit wait on the gate.
+Status: **the trader said go on 2026-11-17. The cheap gate failed, so the
+build stopped at step 3, as planned.** What's on this branch: the
+simulator, the random control and edge, the research commands, the paper
+probe and the gate workflow. The broker and runner trading path, schema, Lab
+tab and charter edit were not built. Results are below.
 
 ## Why
 
@@ -190,3 +191,45 @@ Promotion past paper isn't possible under this change.
 - Are the defaults right: $2 max width, $200 max loss per trade, off until
   you switch it on?
 - Iron condors in the first family, or verticals only to start?
+
+## Results, 2026-11-17
+
+**Paper probe (step 1): passed.** The paper account is at options level 3
+(approved 3). One put credit spread far out of the money, priced at a $4.50
+credit on a $5 width so it couldn't fill, was accepted as an `mleg` order,
+canceled, filled 0, and nothing was held afterward.
+
+**Cheap gate (step 3): failed.** Iron condor at 13:45, short strikes 1.0×
+the straddle, $2 wings, 50% target, 2× stop, flat by 15:45. In-sample
+2024-02-15 → 2026-02-24, real option bars, locked holdout (from 2026-02-25)
+not touched. Run `Lab spreads` #2, `research evaluate`.
+
+| | Value |
+|---|---|
+| Filled trades | 487 (20 skipped: 7 thin credit, 7 no leg trade, 6 no straddle) |
+| Win rate | 70.6% |
+| Avg P/L per condor | **−$6.08**, 90% CI [−8.27, −4.09] |
+| Profit factor | 0.48 |
+| By year | 2024 −$2.97 · 2025 −$8.55 · 2026 −$7.99 |
+| Edge over random entry time (20 draws) | +$0.15, 90% CI [−1.86, +2.09] |
+| At 2× spread + $0.65 commission | −$18.51 |
+| Worst day | 2025-04-08, −$153 (avg max loss $177) |
+
+The falsifier (avg ≤ 0) is met, so the family stops here and nothing goes
+further without the trader.
+
+**Reading.** The condor wins 7 times in 10 and still loses, because the
+losers are about 3× the winners. Costs decide it. Eight leg crossings at the
+model's 1¢ minimum plus fees come to about $8.40 a condor, so before costs it
+makes roughly +$2. Even if real fills were twice as good as the model, it
+would still be about −$2. The entry time adds nothing over random: edge
+≈ 0. The afternoon seller's premium the straddle study pointed at is there,
+but it's about $2 on a condor, which isn't enough to pay for four legs.
+
+**What could change the verdict, and what can't.** The model's half-spread
+floor (1¢ a leg) was set for single options. If real 0DTE SPY legs this far
+out trade a penny wide and `mleg` orders fill near mid, the true cost could
+be well under $8. That's a question about the cost model, which the charter
+says to settle against real fills or quotes, never by loosening it to
+rescue a result. Widening the grid (other structures, strikes, times) would
+spend tries and raise the bar without touching the cost problem.
