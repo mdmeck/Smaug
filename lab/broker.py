@@ -5,13 +5,18 @@ the routine says about itself.
 Allowed order shapes, and nothing else:
   * buy-to-open a single call or put, limit price, TIF day
   * sell-to-close up to the quantity actually held (stop, limit or market)
-No selling to open, no spreads, no equities — a bug can lose the premium of
-one long option, never more than that.
+No selling to open outside a covered combo, no equities — a bug can lose
+the premium of one long option, never more than that.
+
+Defined-risk credit spreads (docs/lab-credit-spreads-proposal.md) are being
+added paper-only. So far the only spread code here is probe_spread_order(),
+which checks the paper account accepts a combo: one order priced where it
+can't fill, canceled at once.
 """
 
 import pandas as pd
 
-from . import alpaca, clock, supa
+from . import alpaca, clock, spreads, supa
 from .alpaca import NY
 
 ENTRY_WINDOW = ("09:31", "15:30")
@@ -121,3 +126,71 @@ def cancel(order_id):
             # 422 = already filled/canceled; that's the answer we wanted
             if "422" not in str(e) and "404" not in str(e):
                 raise
+
+
+def probe_spread_order():
+    """Paper only. Reads the account's options level, then submits one put
+    credit spread far out of the money asking a credit of 90% of its width
+    (it can't fill), cancels it, and confirms nothing is held. Answers
+    whether Alpaca accepts the combo shape the spread path will use."""
+    if not alpaca.is_paper():
+        raise Refused("spread probe runs on the paper endpoint only")
+    res = {"paper": True}
+    acct = alpaca.account()
+    res["account"] = {k: acct.get(k) for k in ("status", "options_trading_level", "options_approved_level",
+                                                "options_buying_power", "buying_power")}
+    clk = alpaca.clock()
+    res["market_open"] = clk.get("is_open")
+    now = clock.now()
+    cal = alpaca.calendar(now.date(), (now + pd.Timedelta(days=7)).date())
+    expiry = None
+    for c in cal:
+        close = pd.Timestamp(f"{c['date']} {c['close']}", tz=NY)
+        if close > now:
+            expiry = pd.Timestamp(c["date"]).date()
+            break
+    bar = alpaca.latest_stock_bar("SPY")
+    spot = float(bar["close"])
+    snaps = alpaca.option_snapshots("SPY", expiry)
+    puts = sorted({int(o[-8:]) / 1000 for o in snaps if o[-9] == "P" and int(o[-8:]) / 1000 <= 0.92 * spot})
+    if len(puts) < 2:
+        res["error"] = f"no listed puts below {0.92 * spot:.0f} for {expiry}"
+        return res
+    short, long_ = puts[-1], puts[-2]
+    width = short - long_
+    legs = [spreads.Leg("P", short, "sell", alpaca.occ_symbol("SPY", expiry, "P", short)),
+            spreads.Leg("P", long_, "buy", alpaca.occ_symbol("SPY", expiry, "P", long_))]
+    body = spreads.mleg_order(legs, 1, -0.9 * width, "open")
+    body["client_order_id"] = f"lab-spread-probe-{now:%Y%m%d%H%M%S}"
+    res.update(spot=spot, expiry=str(expiry), legs=[lg.occ for lg in legs], width=width,
+               limit_price=body["limit_price"])
+    try:
+        o = alpaca.submit_order(**body)
+    except alpaca.AlpacaError as e:
+        res["accepted"] = False
+        res["reject"] = str(e)[:500]
+        return res
+    res["accepted"] = True
+    res["order_status"] = o.get("status")
+    res["order_class"] = o.get("order_class")
+    try:
+        alpaca.cancel_order(o["id"])
+    except alpaca.AlpacaError as e:
+        res["cancel_error"] = str(e)[:300]
+    for _ in range(10):
+        clock.sleep(1)
+        st = alpaca.get_order(o["id"])
+        if st.get("status") in ("canceled", "filled", "rejected", "expired"):
+            break
+    res["final_status"] = st.get("status")
+    res["filled_qty"] = st.get("filled_qty")
+    held = [p for p in alpaca.positions() if p["symbol"] in {lg.occ for lg in legs}]
+    res["held_after"] = [(p["symbol"], p["qty"]) for p in held]
+    if held:
+        # can't happen at that price; if it did, close the whole combo at once
+        close = spreads.mleg_order(legs, 1, 0, "close")
+        close["type"] = "market"
+        close.pop("limit_price")
+        alpaca.submit_order(**close)
+        res["flattened"] = True
+    return res

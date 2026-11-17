@@ -1,8 +1,9 @@
 # Lab: defined-risk 0DTE credit spreads on paper — proposal
 
-Status: **proposal for the trader's review. Nothing here is built.** Merging
-this file changes no code, no routine behavior and no setting. The charter
-edit and the code below land together in a later PR, after the trader says go.
+Status: **the trader said go on 2026-11-17; the build is on this branch.**
+Done so far: the simulator, the random control and edge, the research
+commands, the paper probe and the gate workflow (build order steps 1–3). The
+broker and runner path, schema, Lab tab and charter edit wait on the gate.
 
 ## Why
 
@@ -86,7 +87,7 @@ the worst case is width − credit, and that is what `max_spread_risk` limits.
 | File | Change |
 |---|---|
 | `lab/strategies/__init__.py` | `Signal` gains `structure` (`single` default, `put_credit`, `call_credit`, `iron_condor`), `short_otm` (strikes, or a distance rule in `meta`) and `width`. Single-leg strategies are untouched. |
-| `lab/backtest.py` | `simulate_spread()`: each leg priced on its own real option bars. Entry needs a bar on **every** leg within `ENTRY_GRACE`, or the trade is unfilled. Credit = Σ `sell_fill(short)` − Σ `buy_fill(long)`. Exits (profit target as a fraction of credit, stop as a multiple of credit, underlying touching the short strike, time) are decided on a bar's close and filled at the next bar's open, crossing the spread on every leg, with `STOP_SLIP_FRAC` on stop exits. Fees = `FEE_PER_CONTRACT` × legs × 2 sides. A leg with no trade for over 3 minutes doesn't trigger an exit on a stale price. A trade whose loss exceeds width − credit + costs raises, since that would be a bug. |
+| `lab/backtest.py` | `simulate_spread()`: each leg priced on its own real option bars. Entry needs a bar on **every** leg within `ENTRY_GRACE`, or the trade is unfilled. Credit = Σ `sell_fill(short)` − Σ `buy_fill(long)`. Exits (profit target as a fraction of credit, stop as a multiple of credit, underlying touching the short strike, time) are decided on a bar's close and filled at the next bar's open, crossing the spread on every leg, with `STOP_SLIP_FRAC` on stop exits. Fees = `FEE_PER_CONTRACT` × legs × 2 sides. A short leg with no trade for over 3 minutes doesn't trigger an exit on a stale price. A close that would cost more than the width plus crossing it is a stale print on one leg, so it's capped there and flagged (`capped`), and the evaluate report counts those. |
 | `lab/broker.py` | `open_spread()` and `close_spread()`, the only new calls to `alpaca.submit_order`. Both re-read `lab_controls`. A `no_naked_shorts(positions)` invariant runs before every order and after every fill. If it ever fails, the runner buys the uncovered short to close, sets nothing in `lab_controls` (that's the trader's), stops entering for the day and logs an error. |
 | `lab/runner.py` | Routes `structure != single` signals to the spread path. Quote check on every leg, with the existing `MAX_ENTRY_SPREAD` applied to the combo's net bid/ask. |
 | `lab/replay_test.py` | Fake-broker sessions for spreads: a fill, a stop, a time exit, a partial fill (must be impossible with `mleg`), and an injected naked-short state, which must be flattened. |

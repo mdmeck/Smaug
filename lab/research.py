@@ -5,6 +5,8 @@
   python -m lab.research sweep orb --grid '{"or_minutes": [5, 15, 30]}'
   python -m lab.research causal orb
   python -m lab.research calibrate --days 40
+  python -m lab.research evaluate credit_spread --start 2024-02-15 --end 2026-02-24 --tries 1 --stress
+  python -m lab.research spread-probe    # paper only: one far-off combo order, then cancel
 
 Every command prints one JSON document to stdout so the routine can paste it
 into lab_journal verbatim.
@@ -18,7 +20,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from . import alpaca, backtest, data, options, strategies
+from . import alpaca, backtest, controls, data, options, spreads, strategies
 from .alpaca import NY
 
 
@@ -169,6 +171,49 @@ def cmd_calibrate(a):
           "by_right": df.groupby("right").ratio.median().round(3).to_dict()})
 
 
+def cmd_evaluate(a):
+    """Strategy stats, the matched random control, edge against the rising
+    bar, and (with --stress) the same at 2x spread plus a $0.65 commission.
+    --end bounds the run, so in-sample work never sees the holdout."""
+    strat = strategies.load(a.strategy)
+    params = {**strat.DEFAULTS, **json.loads(a.params or "{}")}
+    end = a.end or (pd.Timestamp.now(tz=NY) - pd.Timedelta(days=1)).date()
+    minutes = data.stock_minutes("SPY", pd.Timestamp(a.start) - pd.Timedelta(days=400), end)
+    vix = data.vix_daily(pd.Timestamp(a.start) - pd.Timedelta(days=10), end)
+    tr = backtest.run(strat, params, start=a.start, end=end, pricing=a.pricing, minutes=minutes)
+    if a.save:
+        tr.to_csv(a.save, index=False)
+    out = {"strategy": a.strategy, "params": params, "start": a.start, "end": str(end),
+           "stats": backtest.stats(tr), "not_filled": tr[~tr["filled"]].exit_reason.value_counts().to_dict() if len(tr) else {}}
+    f = tr[tr["filled"]] if len(tr) else tr
+    if len(f):
+        daily_pnl = f.groupby("date").pnl.sum().sort_values()
+        out["worst_days"] = {str(d): round(float(v), 2) for d, v in daily_pnl.head(5).items()}
+        watch = ["2024-08-05", "2025-04-03", "2025-04-04", "2025-04-07", "2025-04-08", "2025-04-09"]
+        out["stress_days"] = {d: round(float(daily_pnl.get(pd.Timestamp(d).date(), np.nan)), 2) for d in watch}
+        if "max_loss" in f:
+            out["max_loss_avg"] = round(float(f.max_loss.mean()), 2)
+            out["worst_vs_max_loss"] = round(float((-f.pnl / f.max_loss).max()), 3)
+            out["capped_exits"] = int(f.get("capped", pd.Series(dtype=bool)).sum())
+    if a.draws:
+        ctl = controls.random_control(strat, params, tr, minutes, draws=a.draws, vix=vix, pricing=a.pricing)
+        out["control"] = {"draws": a.draws, "window": ["09:45", "14:30"]}
+        out["edge"] = controls.edge(tr, ctl, tries=a.tries)
+    if a.stress:
+        with spreads.cost_scenario(2.0, 0.65):
+            st = backtest.run(strat, params, start=a.start, end=end, pricing=a.pricing, minutes=minutes)
+        sf = st[st["filled"]] if len(st) else st
+        out["cost_stress"] = {"spread_mult": 2.0, "commission": 0.65, "n": int(len(sf)),
+                              "avg_pnl": round(float(sf.pnl.mean()), 2) if len(sf) else None,
+                              "ci90": backtest._boot_ci(sf) if len(sf) else None}
+    _out(out)
+
+
+def cmd_spread_probe(a):
+    from . import broker
+    _out(broker.probe_spread_order())
+
+
 def _minutes(a):
     if getattr(a, "source", "alpaca") == "supabase":
         return supabase_bars()
@@ -218,13 +263,25 @@ def main(argv=None):
             s.add_argument("--days", type=int, default=15)
             s.add_argument("--step", type=int, default=1)
             s.add_argument("--source", default="alpaca", choices=["alpaca", "supabase"])
+    e = sub.add_parser("evaluate")
+    e.add_argument("strategy", choices=strategies.available())
+    e.add_argument("--params")
+    e.add_argument("--start", default="2024-02-15")
+    e.add_argument("--end")
+    e.add_argument("--pricing", default="real", choices=["auto", "real", "model"])
+    e.add_argument("--draws", type=int, default=20)
+    e.add_argument("--tries", type=int, default=1)
+    e.add_argument("--stress", action="store_true")
+    e.add_argument("--save")
+    sub.add_parser("spread-probe")
     c = sub.add_parser("calibrate")
     c.add_argument("--start", default="2024-03-01")
     c.add_argument("--end")
     c.add_argument("--days", type=int, default=40)
     a = p.parse_args(argv)
     {"probe": cmd_probe, "backtest": cmd_backtest, "sweep": cmd_sweep,
-     "causal": cmd_causal, "calibrate": cmd_calibrate}[a.cmd](a)
+     "causal": cmd_causal, "calibrate": cmd_calibrate, "evaluate": cmd_evaluate,
+     "spread-probe": cmd_spread_probe}[a.cmd](a)
 
 
 if __name__ == "__main__":
