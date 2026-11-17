@@ -219,7 +219,8 @@ The falsifier (avg ≤ 0) is met, so the family stops here and nothing goes
 further without the trader.
 
 **Reading.** The condor wins 7 times in 10 and still loses, because the
-losers are about 3× the winners. Costs decide it. Eight leg crossings at the
+average loser is about 5× the average winner (from the 70.6% win rate and
+0.48 profit factor). Costs decide it. Eight leg crossings at the
 model's 1¢ minimum plus fees come to about $8.40 a condor, so before costs it
 makes roughly +$2. Even if real fills were twice as good as the model, it
 would still be about −$2. The entry time adds nothing over random: edge
