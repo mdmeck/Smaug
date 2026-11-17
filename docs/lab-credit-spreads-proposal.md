@@ -292,7 +292,7 @@ the holdout.
 
 **What it says.**
 - Holding to 15:45 beat the 50% target with a 2× stop in all 6 pairs, by
-  $3 to $7 a condor. The stop closes four legs at the worst moment and
+  about $4 to $9 a condor. The stop closes four legs at the worst moment and
   rarely saves the trade.
 - $5 wings beat $2 in every held pair but one. More premium per leg crossed.
 - The rich-IV filter hurt. The range-day filter helped the $5 held condor
