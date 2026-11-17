@@ -1,0 +1,92 @@
+name: Lab condor grid
+
+# Frozen in-sample grid for the 0DTE SPY iron condor, fixed 2026-11-17
+# before any of it was run (docs/lab-credit-spreads-proposal.md, "Grid 2").
+# 2 wing widths x 3 day filters x 2 management rules = 12 variants, each
+# with the matched random control (same days, random entry minute) and the
+# cost stress. In-sample 2024-02-15..2026-02-24 only; the locked holdout is
+# never loaded. Backtest only: no keys beyond market data, no orders.
+on:
+  push:
+    paths: [".github/workflows/lab-condor-grid.yml"]
+  workflow_dispatch:
+
+jobs:
+  variant:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy:
+      fail-fast: false
+      matrix:
+        width: [2, 5]
+        filter: [none, range, iv_rich]
+        manage: [managed, hold]
+    env:
+      ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
+      ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pandas numpy requests yfinance
+      - uses: actions/cache@v4
+        with:
+          path: lab/.cache
+          key: lab-cache-grid-${{ github.run_id }}-${{ matrix.width }}-${{ matrix.filter }}-${{ matrix.manage }}
+          restore-keys: lab-cache-
+      - name: Params
+        id: p
+        run: |
+          if [ "${{ matrix.manage }}" = managed ]; then M='"credit_target": 0.5, "credit_stop": 2.0'; else M='"credit_target": null, "credit_stop": null'; fi
+          P="{\"width\": ${{ matrix.width }}, \"filter\": \"${{ matrix.filter }}\", $M}"
+          echo "params=$P" >> "$GITHUB_OUTPUT"
+          echo "name=w${{ matrix.width }}_${{ matrix.filter }}_${{ matrix.manage }}" >> "$GITHUB_OUTPUT"
+      - run: mkdir -p out
+      - name: Lookahead check
+        run: python -m lab.research causal credit_spread --params '${{ steps.p.outputs.params }}' --start 2025-06-01 --days 10 | tee out/causal_${{ steps.p.outputs.name }}.json
+      - name: Evaluate (in-sample only)
+        run: |
+          python -m lab.research evaluate credit_spread --params '${{ steps.p.outputs.params }}' \
+            --start 2024-02-15 --end 2026-02-24 --tries 12 --draws 20 --stress \
+            --save out/trades_${{ steps.p.outputs.name }}.csv | tee out/eval_${{ steps.p.outputs.name }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: grid-${{ steps.p.outputs.name }}
+          path: out/
+
+  summary:
+    needs: variant
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all
+          merge-multiple: true
+      - name: Scoreboard
+        run: |
+          python - <<'PY' | tee scoreboard.txt
+          import glob, json, os
+          rows = []
+          for f in sorted(glob.glob("all/eval_*.json")):
+              e = json.load(open(f))
+              st = e.get("stats", {})
+              s, ed, cs = st.get("all", {}), e.get("edge", {}) or {}, e.get("cost_stress", {}) or {}
+              s["years_up"] = sum(1 for b in st.get("by_year", {}).values() if (b.get("avg_pnl") or 0) > 0)
+              s["unfilled"] = st.get("unfilled")
+              rows.append((os.path.basename(f)[5:-5], s, ed, cs))
+          rows.sort(key=lambda r: -(r[1].get("avg_pnl") or -1e9))
+          print(f"{'variant':22} {'n':>4} {'win':>5} {'avg':>7} {'ci90':>16} {'pf':>5} {'ctrl':>7} {'edge':>6} {'edge_lb':>7} {'stress':>7} {'yrs+':>4} {'skip':>4}")
+          for name, s, ed, cs in rows:
+              print(f"{name:22} {s.get('n', 0):>4} {s.get('win_rate', 0):>5} {s.get('avg_pnl', 0):>7} {str(s.get('avg_pnl_ci90')):>16} "
+                    f"{s.get('profit_factor', 0):>5} {ed.get('control_avg')!s:>7} {ed.get('edge')!s:>6} {ed.get('edge_lower_bound')!s:>7} {cs.get('avg_pnl')!s:>7} {s.get('years_up')!s:>4} {s.get('unfilled')!s:>4}")
+          for f in sorted(glob.glob("all/causal_*.json")):
+              c = json.load(open(f))
+              print(os.path.basename(f), "ok" if c.get("ok") else "LOOKAHEAD", c.get("days_checked"))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grid-scoreboard
+          path: scoreboard.txt

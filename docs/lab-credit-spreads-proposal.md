@@ -234,3 +234,34 @@ be well under $8. That's a question about the cost model, which the charter
 says to settle against real fills or quotes, never by loosening it to
 rescue a result. Widening the grid (other structures, strikes, times) would
 spend tries and raise the bar without touching the cost problem.
+
+## Grid 2, frozen 2026-11-17 before it was run
+
+The trader's point: a profitable setup combines a position type with entry
+signals, confirmation, stops, profit taking and exits. The cheap gate tested
+the condor bare. Grid 2 adds a day filter and compares management, still on
+the in-sample years only (2024-02-15 → 2026-02-24). The locked holdout stays
+untouched. Backtest only: no orders, no settings.
+
+12 variants, all iron condors at 13:45 with short strikes 1.0× the straddle,
+flat by 15:45 at the latest (workflow `Lab condor grid`):
+
+| Knob | Values |
+|---|---|
+| Wing width | $2 (the cheap gate's), $5 |
+| Day filter | none · `range` (spot inside the first-hour range and the day's range so far ≤ 0.75× the prior 20-session mean range) · `iv_rich` (prior VIX close ≥ 1.25× SPY's 20-session realized vol) |
+| Management | managed (take profit at 50% of credit, stop at a 2× credit loss) · held to 15:45 |
+
+Every closing leg pays the model's crossing and fee, whichever exit fires.
+Each variant gets the matched random control (same days, random entry
+minute 09:45–14:30, 20 draws) and the 2× spread + $0.65 cost stress. The
+family now counts 12 tries, so the edge must clear zero at 1 − 0.10/12
+≈ 99.2% one-sided. A filter is judged two ways: against the random-minute
+control and against the same width and management with no filter.
+
+**What would count as worth a holdout look**, all on in-sample data:
+avg P/L > 0 with its 90% CI lower bound above −$5, PF ≥ 1.20, positive in
+at least 2 of 3 years, an edge lower bound above zero at 12 tries, and avg
+P/L above zero under the cost stress, or a written case for why the stress
+is too harsh. Anything short of that is logged and stops. Nothing goes to
+the holdout, paper or live without the trader's go.
