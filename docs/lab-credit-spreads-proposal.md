@@ -6,6 +6,9 @@ simulator, the random control and edge, the research commands, the paper
 probe and the gate workflow. The broker and runner trading path, schema, Lab
 tab and charter edit were not built. Results are below.
 
+**Parked by the trader on 2026-11-17, after Grid 2.** Not retired. When it
+comes back, check the cost per leg against real quotes first.
+
 ## Why
 
 The Lab's 2026-11-16 `event_straddle` study (journal, scratch script, real
