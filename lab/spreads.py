@@ -167,6 +167,17 @@ def mleg_order(legs, contracts, net, intent):
 # ------------------------------------------------------------- backtest
 
 
+def _bars(occ, day_date):
+    """option_day, with an empty result always carrying a time index (the
+    Alpaca client returns a plain empty frame for a contract that didn't
+    trade, which can't be compared with timestamps)."""
+    df = data.option_day(occ, day_date)
+    if df is None or df.empty or not isinstance(df.index, pd.DatetimeIndex):
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"],
+                            index=pd.DatetimeIndex([], tz=NY))
+    return df
+
+
 def _last_at_or_before(df, ts, max_age_min=None):
     x = df.loc[df.index <= ts]
     if x.empty:
@@ -184,7 +195,7 @@ def expected_move(day_date, spot, ts, expiry):
     px = 0.0
     for right in ("C", "P"):
         occ = occ_symbol("SPY", expiry, right, k)
-        p, _ = _last_at_or_before(data.option_day(occ, day_date), ts, max_age_min=3)
+        p, _ = _last_at_or_before(_bars(occ, day_date), ts, max_age_min=3)
         if p is None:
             return None
         px += p
@@ -211,7 +222,7 @@ def simulate_spread(sig, day, ctx, contracts=1, expiry=None):
     legs = build_legs(sig.structure, spot, em, sig.em_mult or 1.0, sig.width, expiry)
     t.legs = [f"{lg.side} {lg.right}{lg.strike:g}" for lg in legs]
     t.occ = "|".join(lg.occ for lg in legs)
-    bars = {lg.occ: data.option_day(lg.occ, d) for lg in legs}
+    bars = {lg.occ: _bars(lg.occ, d) for lg in legs}
 
     # entry: each leg's first trade after the signal bar, within the grace
     first = {}
@@ -364,7 +375,7 @@ def selftest():
             v = np.asarray(series, dtype=float)
             frames[occ] = pd.DataFrame({"open": v, "high": v, "low": v, "close": v, "volume": 10}, index=idx)
         orig = (data.option_day, data.option_chain_day)
-        data.option_day = lambda o, dd: frames.get(o, pd.DataFrame(columns=["open", "high", "low", "close"]))
+        data.option_day = lambda o, dd: frames.get(o, pd.DataFrame(columns=["open", "high", "low", "close"]))  # RangeIndex, like Alpaca
         data.option_chain_day = lambda dd, occs: None
         try:
             sig = Signal(ts=pd.Timestamp(f"{d} 13:44", tz=NY), direction="long", structure="put_credit",
@@ -388,6 +399,8 @@ def selftest():
     check("stale long leg can't cost more than the width", stale.exit <= 2 + 0.2 and stale.capped)
     t3 = run_case({**base, P(556): flat(0.60), P(554): flat(0.20)})
     check("flat by 15:45", t3.exit_reason == "time" and t3.exit_ts <= pd.Timestamp(f"{d} 15:47", tz=NY))
+    missing = run_case({**base, P(556): flat(0.60)})
+    check("a leg that never traded is unfilled", not missing.filled and missing.exit_reason == "unfilled")
     thin = run_case({**base, P(556): flat(0.06), P(554): flat(0.05)})
     check("thin credit skipped", not thin.filled and thin.exit_reason == "thin_credit")
     with cost_scenario(2.0, 0.65):
