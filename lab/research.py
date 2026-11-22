@@ -67,10 +67,11 @@ def cmd_probe(a):
 def cmd_backtest(a):
     strat = strategies.load(a.strategy)
     params = {**strat.DEFAULTS, **json.loads(a.params or "{}")}
-    tr = backtest.run(strat, params, start=a.start, end=a.end, pricing=a.pricing, progress=a.verbose)
+    tr = backtest.run(strat, params, start=a.start, end=a.end, pricing=a.pricing, progress=a.verbose,
+                      symbol=a.symbol)
     if a.save:
         tr.to_csv(a.save, index=False)
-    _out({"strategy": a.strategy, "params": params, "start": a.start, "end": a.end,
+    _out({"strategy": a.strategy, "symbol": a.symbol, "params": params, "start": a.start, "end": a.end,
           "pricing": a.pricing, "stats": backtest.stats(tr)})
 
 
@@ -81,11 +82,13 @@ def cmd_sweep(a):
     strat = strategies.load(a.strategy)
     grid = json.loads(a.grid)
     keys = list(grid)
-    minutes = data.stock_minutes("SPY", pd.Timestamp(a.start) - pd.Timedelta(days=400), a.end or pd.Timestamp.now().date())
+    end = a.end or pd.Timestamp.now().date()
+    market = backtest.load_market(a.symbol, a.start, end, getattr(strat, "NEEDS", None))
     rows = []
     for combo in itertools.product(*(grid[k] for k in keys)):
         params = {**strat.DEFAULTS, **json.loads(a.params or "{}"), **dict(zip(keys, combo))}
-        tr = backtest.run(strat, params, start=a.start, end=a.end, pricing=a.pricing, minutes=minutes)
+        tr = backtest.run(strat, params, start=a.start, end=a.end, pricing=a.pricing, market=market,
+                          symbol=a.symbol)
         s = backtest.stats(tr)
         rows.append({"params": dict(zip(keys, combo)),
                      "n": s["all"].get("n"),
@@ -106,16 +109,32 @@ def cmd_causal(a):
     prefix may emit a signal the full day doesn't."""
     strat = strategies.load(a.strategy)
     params = {**strat.DEFAULTS, **json.loads(a.params or "{}")}
-    minutes = _minutes(a)
+    needs = getattr(strat, "NEEDS", None)
+    market = None
+    if needs or a.symbol != "SPY":
+        end = a.end or (pd.Timestamp.now(tz=NY) - pd.Timedelta(days=1)).date()
+        if getattr(a, "source", "alpaca") == "supabase":
+            # SPY only: offline smoke test, with SPY standing in as its own reference
+            full = supabase_bars(rth=False)
+            market = backtest.load_market("SPY", a.start, end, needs, minutes=full,
+                                          ref_minutes=full if needs.get("ref") else None)
+        else:
+            market = backtest.load_market(a.symbol, a.start, end, needs)
+        minutes = market["rth"]
+    else:
+        minutes = _minutes(a)
     daily = backtest.daily_bars(minutes)
     days = data.sessions(minutes)
-    idx = [i for i in range(20, len(daily)) if len(days[daily.index[i].date()]) >= 300]
+    lo = 20 if market is None else max(20, int(np.searchsorted(daily.index, pd.Timestamp(a.start))))
+    idx = [i for i in range(lo, len(daily)) if len(days[daily.index[i].date()]) >= 300]
     random.Random(1).shuffle(idx)
     problems = []
+    n_signals = 0
     for i in idx[:a.days]:
         day = days[daily.index[i].date()]
-        ctx = backtest.session_context(daily, i)
+        ctx = backtest.session_context(daily, i, market=market)
         full = {(str(s.ts), s.direction) for s in strat.signals(day, ctx, params)}
+        n_signals += len(full)
         seen = set()
         for k in range(1, len(day) + 1, a.step):
             pre = day.iloc[:k]
@@ -127,7 +146,8 @@ def cmd_causal(a):
         missed = {x for x in full if x not in seen}
         if a.step == 1 and (live_only or missed):
             problems.append({"date": str(daily.index[i].date()), "live_only": sorted(live_only), "missed": sorted(missed)})
-    _out({"strategy": a.strategy, "days_checked": min(a.days, len(idx)), "ok": not problems, "problems": problems[:10]})
+    _out({"strategy": a.strategy, "symbol": a.symbol, "days_checked": min(a.days, len(idx)),
+          "signals_on_full_days": n_signals, "ok": not problems, "problems": problems[:10]})
 
 
 def cmd_calibrate(a):
@@ -176,9 +196,9 @@ def _minutes(a):
     return data.stock_minutes("SPY", a.start, end)
 
 
-def supabase_bars():
+def supabase_bars(rth=True):
     """The pipeline's public `bars` table — offline fallback when no Alpaca
-    keys are present (the last year of SPY only)."""
+    keys are present (the last year of SPY only, premarket included)."""
     import requests
     url = "https://uslbwanjvritktievkxc.supabase.co/rest/v1/bars"
     key = "sb_publishable_e3RuFiItE8K2lwt5IXkhIw_vowfx3AS"
@@ -195,7 +215,8 @@ def supabase_bars():
         off += 1000
     df = pd.DataFrame(rows)
     df["ts"] = pd.to_datetime(df["ts"], utc=True).dt.tz_convert(NY)
-    return df.set_index("ts").sort_index().between_time("09:30", "15:59")
+    df = df.set_index("ts").sort_index()
+    return df.between_time("09:30", "15:59") if rth else df
 
 
 def main(argv=None):
@@ -209,6 +230,7 @@ def main(argv=None):
         s.add_argument("--start", default="2024-02-01")
         s.add_argument("--end")
         s.add_argument("--pricing", default="auto", choices=["auto", "real", "model"])
+        s.add_argument("--symbol", default="SPY")
         if name == "backtest":
             s.add_argument("--save")
             s.add_argument("-v", "--verbose", action="store_true")
