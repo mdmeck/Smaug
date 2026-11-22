@@ -8,7 +8,8 @@ name: Lab strategy track
 # log and as artifacts.
 #
 # Manual only on main (Run workflow); on the strategy-track branch it also
-# runs on pushes that touch the Lab, so a change is checked before review.
+# runs the checks on pushes that touch the Lab, and the decade scan when the
+# commit message says [gate].
 on:
   push:
     branches: [claude/project-thread-0wqdhp]
@@ -48,7 +49,7 @@ jobs:
       - name: Midday review selftest (same detector)
         run: python midday_review.py --selftest | tee out/midday-selftest.txt
       - name: Lookahead check, trigger alone
-        run: python -m lab.research causal break_retest --params '{"preset":"trigger"}' --start 2025-06-01 --end 2025-12-31 --days 6 | tee out/causal-trigger.json
+        run: python -m lab.research causal break_retest --params '{"preset":"trigger"}' --start 2025-06-01 --end 2025-12-31 --days 12 | tee out/causal-trigger.json
       - name: Lookahead check, full spec
         run: python -m lab.research causal break_retest --start 2025-06-01 --end 2025-12-31 --days 6 | tee out/causal-full.json
       - name: Setups for the fidelity check (no outcomes)
@@ -60,6 +61,8 @@ jobs:
           path: out/
 
   scan:
+    # the decade scan only on a manual run or a commit that asks for it with [gate]
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[gate]')
     runs-on: ubuntu-latest
     timeout-minutes: 330
     strategy:
@@ -90,7 +93,7 @@ jobs:
 
   gate:
     needs: scan
-    if: always()
+    if: always() && needs.scan.result != 'skipped'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:

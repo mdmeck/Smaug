@@ -98,7 +98,11 @@ def params(p=None):
     """DEFAULTS, then the named preset if p has one, then p's own values."""
     p = dict(p or {})
     preset = p.pop("preset", None)
-    return {**DEFAULTS, **(PRESETS[preset] if preset else {}), **p}
+    out = {**DEFAULTS, **p}
+    if preset:
+        # union, so a caller that merged DEFAULTS in (filters_off: []) still gets the preset
+        out["filters_off"] = sorted(set(PRESETS[preset]["filters_off"]) | set(out.get("filters_off") or []))
+    return out
 
 
 def _hm(s):
