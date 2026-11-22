@@ -65,17 +65,59 @@ def daily_bars(minutes):
     return d
 
 
-def session_context(daily, i, vix=None):
-    """Everything a strategy may know at the start of session i."""
+def session_context(daily, i, vix=None, market=None):
+    """Everything a strategy may know at the start of session i. With a
+    `market` (from load_market) it also carries what the strategy's NEEDS
+    asked for: prior sessions' 1-min bars, today's premarket, and the
+    reference symbol's bars for today (the strategy must slice those to its
+    own `day`; `research causal` checks it does)."""
     prior = daily.iloc[:i]
-    return {
+    ctx = {
         "date": daily.index[i].date(),
         "daily": prior,                              # prior sessions only
         "prev": prior.iloc[-1] if len(prior) else None,
         "vix_prev": None if vix is None else _asof(vix, daily.index[i] - pd.Timedelta(days=1)),
         "sessions": list(daily.index.date),          # calendar only, for expiry lookup
         "session_idx": i,
+        "symbol": "SPY",
     }
+    if market is not None:
+        d = ctx["date"]
+        ctx["symbol"] = market["symbol"]
+        n = market["needs"].get("prior_rth", 0)
+        if n:
+            ctx["prior_rth"] = [market["days"][x.date()] for x in daily.index[max(0, i - n):i]
+                                if x.date() in market["days"]]
+        if market["needs"].get("premarket"):
+            ctx["premarket"] = market["pre"].get(d)
+        if market.get("ref"):
+            ctx["ref"] = market["ref"]
+            ctx["ref_day"] = market["ref_days"].get(d)
+    return ctx
+
+
+def load_market(symbol, start, end, needs=None, minutes=None, ref=None, ref_minutes=None):
+    """The traded symbol's bars plus whatever a strategy's NEEDS lists:
+    {"prior_rth": n sessions, "premarket": bool, "ref": "QQQ"}. `minutes`
+    (and `ref_minutes`) may be passed in to skip the fetch; they may include
+    extended hours."""
+    needs = dict(needs or {})
+    ref = ref if ref is not None else needs.get("ref")
+    lookback = pd.Timestamp(start) - pd.Timedelta(days=400)
+    if minutes is None:
+        minutes = data.stock_minutes(symbol, lookback, end, rth=not needs.get("premarket"))
+    rth = minutes.between_time("09:30", "15:59")
+    pre = {}
+    if needs.get("premarket"):
+        ext = minutes.between_time("04:00", "09:29")
+        pre = {d: g for d, g in ext.groupby(ext.index.date)}
+    ref_days = {}
+    if ref:
+        if ref_minutes is None:
+            ref_minutes = data.stock_minutes(ref, pd.Timestamp(start) - pd.Timedelta(days=10), end)
+        ref_days = data.sessions(ref_minutes.between_time("09:30", "15:59"))
+    return {"symbol": symbol, "needs": needs, "rth": rth, "days": data.sessions(rth), "pre": pre,
+            "ref": ref, "ref_days": ref_days}
 
 
 def _asof(series, ts):
@@ -97,7 +139,7 @@ def simulate(sig, day, ctx, pricing="auto", contracts=1):
     spot = float(day.loc[sig.ts, "close"])
     strike = options.strike_for(spot, right, sig.otm)
     expiry = _expiry(ctx, sig.dte)
-    occ = occ_symbol("SPY", expiry, right, strike)
+    occ = occ_symbol(ctx.get("symbol", "SPY"), expiry, right, strike)
     d = ctx["date"]
 
     opt, priced = None, "model"
@@ -162,9 +204,17 @@ def simulate(sig, day, ctx, pricing="auto", contracts=1):
 
 
 def run(strategy, params=None, start="2024-02-01", end=None, pricing="auto", symbol="SPY",
-        max_trades_per_day=None, minutes=None, progress=False):
+        max_trades_per_day=None, minutes=None, progress=False, market=None, ref=None):
+    """`symbol` is the traded underlying (option contracts are struck on it).
+    A strategy with NEEDS (see load_market) gets them in ctx; `market` may be
+    passed in from load_market to reuse one fetch across runs."""
     end = end or (pd.Timestamp.now(tz=NY) - pd.Timedelta(days=1)).date()
-    if minutes is None:
+    needs = getattr(strategy, "NEEDS", None)
+    if market is None and (needs or ref or symbol != "SPY"):
+        market = load_market(symbol, start, end, needs, minutes=minutes, ref=ref)
+    if market is not None:
+        minutes = market["rth"]
+    elif minutes is None:
         # one extra year of daily context for strategies that look back
         minutes = data.stock_minutes(symbol, pd.Timestamp(start) - pd.Timedelta(days=400), end)
     daily = daily_bars(minutes)
@@ -177,7 +227,7 @@ def run(strategy, params=None, start="2024-02-01", end=None, pricing="auto", sym
         day = days[d]
         if len(day) < 300:   # half sessions / bad data: skip rather than distort
             continue
-        ctx = session_context(daily, i, vix)
+        ctx = session_context(daily, i, vix, market)
         sigs = sorted(strategy.signals(day, ctx, params), key=lambda s: s.ts)
         busy_until = None
         n = 0

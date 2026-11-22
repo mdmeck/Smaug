@@ -764,6 +764,54 @@ create policy "lab_runs_owner_all"
   on lab_runs for all
   using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
+-- The Lab scoreboard (lab/evaluation.py): one row per evaluated
+-- configuration, append-only like analysis_runs, so the count of tries per
+-- family is read from here rather than typed into the journal, and the one
+-- holdout look per family is enforced from it. Edge = strategy avg P/L minus
+-- the matched random control's. Units are dollars per trade for option-priced
+-- rows and R for pricing = 'underlying_r' screens. Kept generic (experiment)
+-- so the indicator and Erebor can write here later. Not yet applied: run by
+-- hand in the SQL Editor when the strategy track's code is merged.
+create table if not exists evals (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now(),
+  experiment text not null default 'lab',
+  family text not null,
+  strategy text not null,
+  module text,
+  symbol text,
+  git_sha text,
+  params jsonb not null default '{}'::jsonb,
+  params_hash text,
+  period text not null,             -- discovery | develop | holdout | forward
+  pricing text,                     -- real | model | underlying_r
+  start date,
+  "end" date,
+  n integer,
+  avg_pnl numeric,
+  ci90_lo numeric,
+  ci90_hi numeric,
+  pf numeric,
+  win_rate numeric,
+  baseline_avg_pnl numeric,
+  edge numeric,
+  edge_ci90_lo numeric,
+  edge_ci90_hi numeric,
+  variants_in_family integer,
+  required_confidence numeric,
+  verdict text,
+  detail jsonb not null default '{}'::jsonb
+);
+
+create index if not exists evals_user_family_idx on evals (user_id, family, created_at desc);
+
+alter table evals enable row level security;
+
+create policy "evals_owner_all"
+  on evals for all
+  using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
 -- Watchlist: a pre-market planning sheet for a fixed list of tickers, one row
 -- per ticker per day, kept so the levels' history can be read back later.
 -- Upsert on (user_id, run_date, ticker): a re-run corrects that day's reading.

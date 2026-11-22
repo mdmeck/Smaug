@@ -96,6 +96,8 @@ Claude's autonomous strategy desk: a scheduled routine (`docs/lab-routine-prompt
 - **Stock bars are split-adjusted only, never dividend-adjusted** — strikes are chosen from historical prices, and dividend adjustment shifts old SPY bars enough to pick contracts that barely traded. The cache path includes the adjustment for that reason.
 - Alpaca free plan: SIP history back to 2016 except the latest 15 minutes (the runner uses the real-time IEX feed); option bars from 2024-02-15; options accept no bracket/OCO orders, so exits are managed by the runner with a resting stop as the backstop.
 - The cost model in `lab/options.py` is deliberately pessimistic; `backtest.IV_MULT` (modeled pricing for pre-2024 periods only) comes from `research calibrate`.
+- **Two tracks.** Track B is the nightly routine's own discovery (its prompt is unchanged). Track A, the trader's playbook, is `lab/strategies/break_retest.py`: every spec default is a param, every filter can be switched off by name (`filters_off`), and `PRESETS` names trigger / trend / full. It declares `NEEDS` (prior sessions' 1-min bars, premarket, QQQ as `ref`), which `backtest.load_market()` puts in ctx; `backtest.run(..., symbol=...)` strikes contracts on any underlying. Strategies without `NEEDS` see exactly the old ctx.
+- **`lab/evaluation.py` is how Track A is judged:** the four locked periods (`PERIODS`, the only place they live), the matched random control (opposite side at the same minute, exact; plus a timing control), try counting from the `evals` scoreboard (schema in `schema.sql`, not yet applied; falls back to `lab/.cache/evals.jsonl`), and the rising bar `1 - 0.10/k`. It's opt-in: `backtest.run` doesn't guard the holdout, because the routine's prompt still uses its own rules. `lab/playbook.py` runs the underlying gate and the setups list; `lab-strategy-track.yml` runs them in Actions (market data only, public logs, so never journal data there).
 - Verify runner changes with `python -m lab.replay_test` (simulated sessions against a fake broker, no keys needed) — also run by the `lab-selftest.yml` workflow on pushes touching `lab/`, which additionally exercises the real Alpaca account.
 
 ## Watchlist
@@ -119,7 +121,7 @@ Pre-market sheet for a fixed ticker list (`WATCHLIST` in `watchlist_scan.py`), s
 - **`midday_runs` is written last** and is what the routine waits for. It holds the day's journal P/L, so it has RLS on with no policy (not public), unlike the other two.
 - Alpaca SIP, split-adjusted only. The free plan withholds the latest 15 minutes, so a 14:00 run sees bars through ~13:44: every entry (09:35–11:30) is covered, later outcomes show as `open`.
 - Shorts run through the long code on mirrored prices (`flip()`), so a rule is written once. `--selftest` checks that a day and its mirror give the same setup; run it after any change.
-- It is a second implementation of the spec's defaults, outside `lab/strategies/`, because the Lab build is on hold. When the Lab build starts, move the detector there and have this script call it.
+- **The detector is the Lab's `lab/strategies/break_retest.py`**, one implementation for both: this script only fetches, calls `break_retest.build()`/`scan_symbol()` with its `DEFAULTS`, matches the journal and writes. A rule change goes there, and changes both the 2pm review and the Lab. `scan_symbol()` rows carry a private `_ci` index that `scan()` strips before the insert.
 
 ## Webapp notes
 

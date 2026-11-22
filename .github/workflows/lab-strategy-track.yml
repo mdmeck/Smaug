@@ -1,0 +1,115 @@
+name: Lab strategy track
+
+# The trader's playbook (lab/strategies/break_retest.py) against real Alpaca
+# bars: the lookahead check, the setups list for the fidelity check, and the
+# underlying gate on 2016-2023 (step 5 of the strategy-track build plan).
+# Market data only: nothing here reads the journal or writes anywhere, and
+# setups inside the sealed holdout print no outcomes. Results land in the job
+# log and as artifacts.
+#
+# Manual only on main (Run workflow); on the strategy-track branch it also
+# runs the checks on pushes that touch the Lab, and the decade scan when the
+# commit message says [gate].
+on:
+  push:
+    branches: [claude/project-thread-0wqdhp]
+    paths: ["lab/**", "midday_review.py", ".github/workflows/lab-strategy-track.yml"]
+  workflow_dispatch: {}
+
+concurrency:
+  group: lab-strategy-track-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
+  ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pandas numpy requests yfinance
+      - uses: actions/cache@v4
+        with:
+          path: lab/.cache
+          key: lab-track-checks-${{ github.run_id }}
+          restore-keys: lab-track-checks-
+      - run: mkdir -p out
+      - name: Midday review selftest (same detector)
+        run: python midday_review.py --selftest | tee out/midday-selftest.txt
+      - name: Lookahead check, trigger alone
+        run: python -m lab.research causal break_retest --params '{"preset":"trigger"}' --start 2025-06-01 --end 2025-12-31 --days 12 | tee out/causal-trigger.json
+      - name: Lookahead check, full spec
+        run: python -m lab.research causal break_retest --start 2025-06-01 --end 2025-12-31 --days 6 | tee out/causal-full.json
+      - name: Setups for the fidelity check (no outcomes)
+        run: python -m lab.playbook setups --symbols SPY,NVDA --start 2026-07-01 --end 2026-11-20 | tee out/setups.csv
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: strategy-track-checks
+          path: out/
+
+  scan:
+    # the decade scan only on a manual run or a commit that asks for it with [gate]
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[gate]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        group: ["SPY,SMH,AAPL", "TSLA,NFLX,INTC", "MSFT,AMZN,GOOG", "NVDA,AMD,MU,PLTR"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pandas numpy requests yfinance
+      - uses: actions/cache@v4
+        with:
+          path: lab/.cache
+          key: lab-track-scan-${{ strategy.job-index }}-${{ github.run_id }}
+          restore-keys: lab-track-scan-${{ strategy.job-index }}-
+      - run: mkdir -p out
+      - name: Scan 2016-2023 (discovery period)
+        run: python -m lab.playbook scan --symbols "${{ matrix.group }}" --out "out/rows-${{ strategy.job-index }}.pkl"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rows-${{ strategy.job-index }}
+          path: out/
+
+  gate:
+    needs: scan
+    if: always() && needs.scan.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install pandas numpy requests
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: rows-*
+          path: rows
+          merge-multiple: true
+      - name: Underlying gate
+        run: python -m lab.playbook gate rows/*.pkl | tee gate.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: strategy-track-gate
+          path: gate.json

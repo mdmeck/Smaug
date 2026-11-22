@@ -1,6 +1,6 @@
 # Strategy spec: trend-aligned break and retest with QQQ confirmation
 
-**Status: the Lab's starting point, not a rulebook.** The Lab doesn't use it yet (the Lab build is on hold until the trader says go). `midday_review.py` applies the defaults below to each morning for the 2pm review, so a change to a default here should be mirrored there.
+**Status: the Lab's starting point, not a rulebook.** Implemented as `lab/strategies/break_retest.py` (strategy track started 2026-11-22, on the trader's go). Every default below is a key of its `DEFAULTS`, and `midday_review.py` calls the same code for the 2pm review, so the two can't drift. A change to a default here should be made there.
 
 The trader, 2026-11-15: "My strategy isn't fully dialed in, so we don't need to translate it 1:1. The lab should study and refine to maximize profits, not be limited to anything we discuss today."
 

@@ -1,6 +1,6 @@
 # Proposal: a two-track Lab
 
-**Status: proposal for the trader's review. Nothing is built.** The Lab build has been on hold since 2026-11-12; this only describes the idea so it can be judged before any code changes.
+**Status: Track A is being built (trader, 2026-11-22: "Start my track").** Steps 1-3 of the build plan are `lab/strategies/break_retest.py`, the `NEEDS`/`load_market` context in `lab/backtest.py`, and `lab/evaluation.py`; step 5 is `lab/playbook.py gate`. Track B, the nightly routine, is unchanged.
 
 ## The idea
 
