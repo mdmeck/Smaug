@@ -24,10 +24,9 @@ The free plan withholds the latest 15 minutes of SIP history, so a 14:00 run
 sees bars through about 13:44. That covers every entry (09:35-11:30); outcomes
 of trades still open by then are marked to the last bar and labelled "open".
 
-Not the Lab. The Lab's rule is one implementation per strategy in
-`lab/strategies/`, and the Lab build is on hold. When it starts, this detector
-should move there and this script should call it, so the 2pm check and the Lab
-can never disagree about what a setup is.
+The detector itself is the Lab's `lab/strategies/break_retest.py` (the
+one-implementation rule); this script only fetches, calls it, matches the
+journal and writes.
 
 Known gaps against the spec, all reported in `midday_runs.notes`:
   * FOMC days and the IV-over-60 skip aren't checked (no data source here).
@@ -72,24 +71,17 @@ INTRADAY_RETENTION_DAYS = 10
 BATCH = 500
 TIMEOUT = 30
 
-# ---- spec defaults (docs/strategy-break-retest.md). Names follow the spec.
-BUFFER_ATR = 0.1              # break buffer, x ATR(14, 1m)
-RETEST_ATR = 0.1              # retest tolerance, x ATR(14, 1m)
-RETEST_BARS = 20              # retest must come within this many bars of the break
-MERGE_DAILY_ATR = 0.25        # levels this close (x daily ATR) are one zone
-PIVOT = 3                     # swing pivots, left = right = 3
-EMA_FAST, EMA_SLOW = 9, 21
-DAILY_TREND_SESSIONS = 15
-BOS_WINDOW = pd.Timedelta(minutes=60)
-ENTRY_START, ENTRY_END = time(9, 35), time(11, 30)
-FLAT_BY = time(15, 45)
-MIN_R_ATR1, MAX_R_ATR5 = 0.5, 2.0
-TARGET_R, PARTIAL = 2.5, 0.5
-# Not in the spec, needed to make "high/low of day" computable: the old high
-# must have stood this many minutes, or every new high would be a "break".
-HOD_MIN_AGE = 15
-QQQ_EXTREME_BARS = 5          # "QQQ making new lows" = a new LOD in the last 5 minutes
+# ---- the detector. One implementation, shared with the Lab: every rule and
+# spec default lives in lab/strategies/break_retest.py (DEFAULTS there), so the
+# 2pm review and the Lab can't disagree about what a setup is.
+from lab.strategies import break_retest as br  # noqa: E402
+
+P = br.DEFAULTS
+PRIOR_SESSIONS = br.PRIOR_SESSIONS
+FLAT_BY = br._hm(P["flat_by"])
 JOURNAL_MATCH = pd.Timedelta(minutes=5)
+flip = br.flip
+is_quad_witching = br.is_quad_witching
 
 NOTES = [
     "FOMC days and the IV-over-60 skip aren't checked.",
@@ -98,430 +90,8 @@ NOTES = [
 ]
 
 
-# ---------------------------------------------------------------- helpers
-
-def _num(v, places=4):
-    if v is None:
-        return None
-    v = float(v)
-    return round(v, places) if math.isfinite(v) else None
-
-
-def ema(x, n):
-    return pd.Series(x, dtype=float).ewm(span=n, adjust=False).mean().to_numpy()
-
-
-def atr_series(h, l, c, n=14):
-    pc = np.concatenate([[c[0]], c[:-1]])
-    tr = np.maximum(h - l, np.maximum(np.abs(h - pc), np.abs(l - pc)))
-    return pd.Series(tr).ewm(alpha=1 / n, adjust=False).mean().to_numpy()
-
-
-def flip(df):
-    """Mirror a bar frame so a short can run through the long logic: highs
-    become lows, a hammer becomes a shooting star, higher highs become lower
-    lows. Every price the long code returns is negated back on the way out."""
-    out = df.copy()
-    out["open"], out["close"] = -df["open"], -df["close"]
-    out["high"], out["low"] = -df["low"], -df["high"]
-    return out
-
-
-def pivots(h, l, p=PIVOT):
-    """[(i, 'H'|'L', price)] for confirmed swings. Bar i is a pivot only once
-    bar i+p has closed, which callers enforce by index."""
-    out = []
-    for i in range(p, len(h) - p):
-        if h[i] == h[i - p:i + p + 1].max():
-            out.append((i, "H", h[i]))
-        if l[i] == l[i - p:i + p + 1].min():
-            out.append((i, "L", l[i]))
-    return out
-
-
-def structure(h, l):
-    """Up when the last two confirmed swing highs and lows both rose, Down when
-    both fell, else Range. Pivots are confirmed inside the window given."""
-    piv = pivots(h, l)
-    hs = [x for i, k, x in piv if k == "H"]
-    ls = [x for i, k, x in piv if k == "L"]
-    if len(hs) < 2 or len(ls) < 2:
-        return "Range"
-    if hs[-1] > hs[-2] and ls[-1] > ls[-2]:
-        return "Up"
-    if hs[-1] < hs[-2] and ls[-1] < ls[-2]:
-        return "Down"
-    return "Range"
-
-
-def trend(f, k, window=None):
-    """Spec default: structure and the 9/21 EMAs must both agree, using bars
-    [0..k] (structure over the last `window` of them)."""
-    if k < 0:
-        return "Range"
-    lo = 0 if window is None else max(0, k + 1 - window)
-    st = structure(f["h"][lo:k + 1], f["l"][lo:k + 1])
-    e = "Up" if f["e9"][k] > f["e21"][k] else "Down"
-    return st if st == e else "Range"
-
-
-def arrays(df):
-    f = {"h": df["high"].to_numpy(float), "l": df["low"].to_numpy(float),
-         "c": df["close"].to_numpy(float), "o": df["open"].to_numpy(float)}
-    f["e9"], f["e21"] = ema(f["c"], EMA_FAST), ema(f["c"], EMA_SLOW)
-    if "end" in df:
-        f["end"] = df["end"].to_numpy()
-    return f
-
-
-def resample(df, minutes, s):
-    if df.empty:
-        return df.assign(end=pd.Series(index=df.index, dtype=object))
-    g = (df.resample(f"{minutes}min", origin=s["open"], label="left", closed="left")
-         .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
-         .dropna(subset=["close"]))
-    g["end"] = [min(t + pd.Timedelta(minutes=minutes), s["close"]) for t in g.index]
-    return g
-
-
-def is_quad_witching(d):
-    if d.month not in (3, 6, 9, 12) or d.weekday() != 4:
-        return False
-    return 15 <= d.day <= 21
-
-
-# ---------------------------------------------------------------- per-symbol view
-
-EMPTY = pd.DataFrame(columns=["open", "high", "low", "close", "volume"],
-                     index=pd.DatetimeIndex([], tz=NY), dtype=float)
-
-
-def build(sym_m1, daily, sessions, data_end):
-    """Everything one symbol needs, unflipped. `sessions` ends with today."""
-    sym_m1 = EMPTY if sym_m1 is None or sym_m1.empty else sym_m1
-    daily = EMPTY if daily is None or daily.empty else daily
-    today = sessions[-1]
-    prior = sessions[:-1][-PRIOR_SESSIONS:]
-
-    def rth(s, end=None):
-        x = sym_m1[(sym_m1.index >= s["open"]) & (sym_m1.index < s["close"])]
-        return x if end is None else x[x.index < end]
-
-    prev_rth = [rth(s) for s in prior]
-    today_rth = rth(today, data_end)
-    pre = sym_m1[(sym_m1.index >= today["open"].normalize() + pd.Timedelta(hours=4))
-                 & (sym_m1.index < today["open"])]
-    m5 = pd.concat([resample(prev_rth[-1], 5, prior[-1]) if prior else None,
-                    resample(today_rth, 5, today)])
-    h1 = pd.concat([resample(x, 60, s) for x, s in zip(prev_rth, prior)]
-                   + [resample(today_rth, 60, today)])
-    d1 = daily[daily.index.date < today["date"]]
-    ltf1 = pd.concat([prev_rth[-1] if prior else today_rth.iloc[:0], today_rth])
-    return {"today": today, "prior": prior, "prev_rth": prev_rth, "rth": today_rth,
-            "pre": pre, "m5": m5, "h1": h1, "d1": d1, "ltf1": ltf1}
-
-
-def named_levels(v):
-    """Spec default level set: prior week, prior day, premarket, first 5-minute
-    candle. [(price, tag, usable_from)]. High/low of day is handled separately
-    because it moves."""
-    today = v["today"]
-    out = []
-    if v["prior"]:
-        pd_ = v["prev_rth"][-1]
-        if len(pd_):
-            out += [(pd_["high"].max(), "PDH", today["open"]), (pd_["low"].min(), "PDL", today["open"])]
-        week = today["date"].isocalendar()[:2]
-        prev_weeks = [(s["date"].isocalendar()[:2], x) for s, x in zip(v["prior"], v["prev_rth"])
-                      if s["date"].isocalendar()[:2] < week]
-        if prev_weeks:
-            last = max(w for w, _ in prev_weeks)
-            wk = pd.concat([x for w, x in prev_weeks if w == last])
-            if len(wk):
-                out += [(wk["high"].max(), "PWH", today["open"]), (wk["low"].min(), "PWL", today["open"])]
-    if len(v["pre"]):
-        out += [(v["pre"]["high"].max(), "PMH", today["open"]), (v["pre"]["low"].min(), "PML", today["open"])]
-    first5 = v["rth"][v["rth"].index < today["open"] + pd.Timedelta(minutes=5)]
-    if len(first5) == 5:
-        t = today["open"] + pd.Timedelta(minutes=5)
-        out += [(first5["high"].max(), "OR5H", t), (first5["low"].min(), "OR5L", t)]
-    return out
-
-
-def merge(levels, tol):
-    groups = []
-    for lv in sorted(levels):
-        if groups and lv[0] - groups[-1][0][0] <= tol:
-            groups[-1].append(lv)
-        else:
-            groups.append([lv])
-    out = []
-    for g in groups:
-        tags = list(dict.fromkeys(t for _, t, _ in g))
-        out.append({"price": sum(p for p, _, _ in g) / len(g), "tags": tags,
-                    "from": max(u for _, _, u in g)})
-    return out
-
-
-def side_view(v, sgn):
-    """Arrays for one side. sgn=+1 long, -1 short (prices mirrored)."""
-    tf = (lambda df: df) if sgn > 0 else flip
-    rth, ltf1, m5, h1, d1 = (tf(v[k]) for k in ("rth", "ltf1", "m5", "h1", "d1"))
-    m1 = arrays(rth)
-    m1["t"] = rth.index
-    a1 = atr_series(*(arrays(ltf1)[k] for k in ("h", "l", "c"))) if len(ltf1) else np.array([])
-    m1["atr"] = a1[-len(rth):] if len(rth) else a1[:0]
-    if len(v["pre"]):
-        first_prev = sgn * v["pre"]["close"].iloc[-1]
-    elif v["prior"] and len(v["prev_rth"][-1]):
-        first_prev = sgn * v["prev_rth"][-1]["close"].iloc[-1]
-    else:
-        first_prev = np.nan
-    m1["pc"] = np.concatenate([[first_prev], m1["c"][:-1]]) if len(rth) else m1["c"]
-    f5, fh, fd = arrays(m5), arrays(h1), arrays(d1)
-    f5["atr"] = atr_series(f5["h"], f5["l"], f5["c"]) if len(m5) else np.array([])
-    # last confirmed 5-min swing high known once bar k has closed (for BOS)
-    last_sh = np.full(len(m5), np.nan)
-    piv = [(i, x) for i, k, x in pivots(f5["h"], f5["l"]) if k == "H"]
-    j = 0
-    cur = np.nan
-    for k in range(len(m5)):
-        while j < len(piv) and piv[j][0] + PIVOT <= k:
-            cur = piv[j][1]
-            j += 1
-        last_sh[k] = cur
-    f5["last_sh"] = last_sh
-    return {"m1": m1, "m5": f5, "h1": fh, "d1": fd}
-
-
-def last_complete(f, t):
-    """Index of the last bar of `f` that had closed by time t, or -1."""
-    if not len(f["c"]):
-        return -1
-    return int(np.searchsorted(f["end"], t, side="right")) - 1
-
-
-# ---------------------------------------------------------------- the setup machine
-
-def track(m1, b, L):
-    """After a break at bar b (long space). ('entry', retest, confirm) or
-    ('cancel'|'expire', next index to resume the break search from)."""
-    n = len(m1["c"])
-    c, h, l, o = m1["c"], m1["h"], m1["l"], m1["o"]
-    buf = BUFFER_ATR * m1["atr"]
-    tol = RETEST_ATR * m1["atr"]
-
-    def strong(k):
-        rng = h[k] - l[k]
-        if rng <= 0:
-            return False
-        lower_wick = min(o[k], c[k]) - l[k]
-        return (c[k] - l[k]) / rng >= 2 / 3 and lower_wick >= abs(c[k] - o[k])
-
-    i = b + 1
-    while i < n and i <= b + RETEST_BARS + 1:
-        if c[i] < L - buf[i]:
-            return ("cancel", i)
-        if i <= b + RETEST_BARS and abs(l[i] - L) <= tol[i]:
-            if c[i] > L and strong(i):
-                return ("entry", i, i)
-            if i + 1 < n and c[i + 1] > L and strong(i + 1) and abs(l[i + 1] - L) > tol[i + 1]:
-                return ("entry", i, i + 1)
-        i += 1
-    return ("expire", i)
-
-
 def in_window(t):
-    return ENTRY_START <= t.time() <= ENTRY_END
-
-
-def find_setups(sv, levels, day_open):
-    """[(level_price, tags, break_idx, retest_idx, confirm_idx)] in long space.
-    One setup per level per side per day: the first retest that confirms."""
-    m1 = sv["m1"]
-    n = len(m1["c"])
-    if n < 6:
-        return []
-    c, h = m1["c"], m1["h"]
-    buf = BUFFER_ATR * m1["atr"]
-    out = []
-    for lv in levels:
-        L = lv["price"]
-        i = 0
-        while i < n and m1["t"][i].time() <= ENTRY_END:
-            if m1["t"][i] >= lv["from"] and c[i] > L + buf[i] and m1["pc"][i] <= L + buf[i]:
-                res = track(m1, i, L)
-                if res[0] == "entry":
-                    entry_t = m1["t"][res[2]] + pd.Timedelta(minutes=1)
-                    if in_window(entry_t):
-                        out.append((L, lv["tags"], i, res[1], res[2]))
-                        break
-                    i = res[2] + 1
-                    continue
-                i = max(res[1], i + 1)
-                continue
-            i += 1
-
-    # High of day (in long space; low of day for the short side). The old
-    # high must have stood HOD_MIN_AGE minutes and mustn't sit on a named level.
-    tol = [x["price"] for x in levels]
-    i, hod, hod_at = 1, h[0], 0
-    while i < n and m1["t"][i].time() <= ENTRY_END:
-        if (i - hod_at >= HOD_MIN_AGE and c[i] > hod + buf[i] and m1["pc"][i] <= hod + buf[i]
-                and all(abs(hod - p) > 2 * buf[i] for p in tol)):
-            res = track(m1, i, hod)
-            if res[0] == "entry" and in_window(m1["t"][res[2]] + pd.Timedelta(minutes=1)):
-                out.append((hod, ["HOD"], i, res[1], res[2]))
-                break
-            nxt = res[2] + 1 if res[0] == "entry" else max(res[1], i + 1)
-            for k in range(i, min(nxt, n)):
-                if h[k] > hod:
-                    hod, hod_at = h[k], k
-            i = nxt
-            continue
-        if h[i] > hod:
-            hod, hod_at = h[i], i
-        i += 1
-    return out
-
-
-def simulate(sv, ci, entry, stop, data_end, flat_by):
-    """Spec exits in long space: -1R on a 1-min close below the stop; half off
-    at 2.5R, then the rest runs to a 5-min 9/21 cross against it (stop moved to
-    entry) or the flat-by time."""
-    m1, m5 = sv["m1"], sv["m5"]
-    R = entry - stop
-    target = entry + TARGET_R * R
-    half, stop_lv = False, stop
-    n = len(m1["c"])
-    for j in range(ci + 1, n):
-        t_close = m1["t"][j] + pd.Timedelta(minutes=1)
-        if t_close > flat_by:
-            return _result("flat", half, m1["t"][j - 1] + pd.Timedelta(minutes=1), m1["c"][j - 1], entry, R)
-        if not half and m1["h"][j] >= target:
-            half, stop_lv = True, entry
-        if m1["c"][j] < stop_lv:
-            return _result("target, then trailer" if half else "stopped", half, t_close, m1["c"][j], entry, R)
-        if half:
-            k = last_complete(m5, t_close)
-            if k >= 0 and m5["end"][k] == t_close and m5["e9"][k] < m5["e21"][k]:
-                return _result("target, then trailer", half, t_close, m1["c"][j], entry, R)
-    if n:
-        return _result("open", half, m1["t"][-1] + pd.Timedelta(minutes=1), m1["c"][-1], entry, R)
-    return _result("open", half, None, entry, entry, R)
-
-
-def _result(label, half, t, px, entry, R):
-    rest = (px - entry) / R
-    r = PARTIAL * TARGET_R + (1 - PARTIAL) * rest if half else rest
-    return {"outcome": label, "exit_at": t, "exit_px": px, "r": r}
-
-
-def qqq_at(q, t):
-    """Index of the QQQ bar that started at or before t."""
-    return int(q.index.searchsorted(t, side="right")) - 1
-
-
-def evaluate(sym, v, sgn, setup, q, day_flags, data_end, flat_by):
-    sv = v["sides"][sgn]
-    m1, m5, h1, d1 = sv["m1"], sv["m5"], sv["h1"], sv["d1"]
-    L, tags, b, r, ci = setup
-    entry = m1["c"][ci]
-    t_entry = m1["t"][ci] + pd.Timedelta(minutes=1)
-    buf_b = BUFFER_ATR * m1["atr"][b]
-    stop = min(m1["l"][r], L - buf_b)
-    R = entry - stop
-
-    k5 = last_complete(m5, t_entry)
-    kh = last_complete(h1, t_entry)
-    kd = len(d1["c"]) - 1
-    ltf = trend(m5, k5)
-    htf_d = trend(d1, kd, DAILY_TREND_SESSIONS)
-    htf_h = trend(h1, kh)
-    ema5 = k5 >= 0 and m5["e9"][k5] > m5["e21"][k5]
-
-    # break of structure in the trade's direction within the last 60 minutes
-    bos = False
-    for j in range(ci, -1, -1):
-        tc = m1["t"][j] + pd.Timedelta(minutes=1)
-        if t_entry - tc > BOS_WINDOW:
-            break
-        kj = last_complete(m5, tc)
-        if kj >= 0 and np.isfinite(m5["last_sh"][kj]) and m1["c"][j] > m5["last_sh"][kj] + BUFFER_ATR * m1["atr"][j]:
-            bos = True
-            break
-
-    # QQQ and relative strength, on real (unflipped) prices
-    raw = v["rth"]
-    qi = qqq_at(q, m1["t"][ci])
-    checks = {"ltf_trend": ltf, "htf_daily": htf_d, "htf_1h": htf_h, "ema5": bool(ema5), "bos": bos}
-    failed = []
-    up, down = ("Up", "Down")
-    if ltf != up:
-        failed.append("ltf_trend")
-    if htf_d == down or htf_h == down:
-        failed.append("htf_trend")
-    if not ema5:
-        failed.append("ema5")
-    if not bos:
-        failed.append("bos")
-    if qi >= 0 and len(raw):
-        qc = q["close"].to_numpy(float)
-        tp = (q["high"] + q["low"] + q["close"]).to_numpy(float) / 3
-        vol = q["volume"].to_numpy(float)
-        vwap = np.cumsum(tp * vol)[qi] / max(np.cumsum(vol)[qi], 1)
-        q_side = sgn * (qc[qi] - vwap) > 0
-        stock_ret = raw["close"].iloc[ci] / raw["open"].iloc[0] - 1
-        q_ret = qc[qi] / q["open"].iloc[0] - 1
-        rs = sgn * (stock_ret - q_ret)
-        ql = (q["low"] if sgn > 0 else -q["high"]).to_numpy(float)
-        lo = max(0, qi - QQQ_EXTREME_BARS + 1)
-        fighting = lo > 0 and ql[lo:qi + 1].min() < ql[:lo].min()
-        qf = arrays(resample(q, 5, v["today"]) if sgn > 0 else flip(resample(q, 5, v["today"])))
-        kq = last_complete(qf, t_entry)
-        checks.update({"qqq_vwap": bool(q_side), "qqq_ema5": bool(kq >= 0 and qf["e9"][kq] > qf["e21"][kq]),
-                       "relative_strength": _num(rs, 5), "fighting_market": bool(fighting)})
-        if not q_side:
-            failed.append("qqq_vwap")
-        if rs <= 0:
-            failed.append("relative_strength")
-        if fighting:
-            failed.append("fighting_market")
-    else:
-        failed.append("qqq_missing")
-    r_atr1 = R / m1["atr"][ci] if m1["atr"][ci] > 0 else np.inf
-    r_atr5 = R / m5["atr"][k5] if k5 >= 0 and m5["atr"][k5] > 0 else 0
-    checks.update({"r_atr1m": _num(r_atr1, 2), "r_atr5m": _num(r_atr5, 2)})
-    if r_atr1 < MIN_R_ATR1:
-        failed.append("stop_too_tight")
-    if r_atr5 > MAX_R_ATR5:
-        failed.append("stop_too_wide")
-    for flag in day_flags.get(sym, []) + day_flags.get("*", []):
-        failed.append(flag)
-
-    res = simulate(sv, ci, entry, stop, data_end, flat_by)
-    t = lambda i: (m1["t"][i]).isoformat()
-    return {
-        "ticker": sym,
-        "side": "Long" if sgn > 0 else "Short",
-        "level": _num(sgn * L),
-        "level_key": f"{sgn * L:.2f}",
-        "level_tags": tags,
-        "break_at": t(b),
-        "retest_at": t(r),
-        "entry_at": t_entry.isoformat(),
-        "entry": _num(sgn * entry),
-        "stop": _num(sgn * stop),
-        "risk": _num(R),
-        "target": _num(sgn * (entry + TARGET_R * R)),
-        "passed": not failed,
-        "failed": failed,
-        "checks": checks,
-        "outcome": res["outcome"],
-        "exit_at": res["exit_at"].isoformat() if res["exit_at"] is not None else None,
-        "exit_price": _num(sgn * res["exit_px"]),
-        "r_multiple": _num(res["r"], 2),
-    }
+    return br.in_window(t, P)
 
 
 def scan(m1_by_sym, daily_by_sym, sessions, data_end, day_flags):
@@ -529,8 +99,7 @@ def scan(m1_by_sym, daily_by_sym, sessions, data_end, day_flags):
     today = sessions[-1]
     flat_by = min(pd.Timestamp.combine(today["date"], FLAT_BY).tz_localize(NY),
                   today["close"] - pd.Timedelta(minutes=15))
-    qv = build(m1_by_sym.get(REFERENCE), daily_by_sym.get(REFERENCE),
-               sessions, data_end)
+    qv = br.build(m1_by_sym.get(REFERENCE), daily_by_sym.get(REFERENCE), sessions, data_end)
     q = qv["rth"]
     rows, errors = [], {}
     if q.empty:
@@ -541,23 +110,15 @@ def scan(m1_by_sym, daily_by_sym, sessions, data_end, day_flags):
             if m1 is None or m1.empty:
                 errors[sym] = "no 1-minute bars"
                 continue
-            v = build(m1, daily_by_sym.get(sym), sessions, data_end)
+            v = br.build(m1, daily_by_sym.get(sym), sessions, data_end)
             if len(v["rth"]) < 6:
                 errors[sym] = "too few bars today"
                 continue
-            d = v["d1"]
-            if len(d) >= 15:
-                da = atr_series(d["high"].to_numpy(float), d["low"].to_numpy(float), d["close"].to_numpy(float))[-1]
-            else:
-                da = 0.0
-            levels = merge(named_levels(v), MERGE_DAILY_ATR * da)
-            v["sides"] = {1: side_view(v, 1), -1: side_view(v, -1)}
-            for sgn in (1, -1):
-                lv = [{**x, "price": sgn * x["price"]} for x in levels]
-                for setup in find_setups(v["sides"][sgn], lv, today["open"]):
-                    rows.append(evaluate(sym, v, sgn, setup, q, day_flags, data_end, flat_by))
+            rows += br.scan_symbol(sym, v, q, day_flags, data_end, flat_by, P)
         except Exception as e:  # noqa: BLE001 - one symbol never sinks the run
             errors[sym] = f"{type(e).__name__}: {e}"
+    for r in rows:
+        r.pop("_ci", None)
     rows.sort(key=lambda x: x["entry_at"])
     return rows, errors
 
