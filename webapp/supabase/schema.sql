@@ -908,3 +908,68 @@ create table if not exists midday_runs (
 );
 
 alter table midday_runs enable row level security;
+
+
+-- =====================================================================
+-- Review marks (the Review tab)
+-- =====================================================================
+-- The trader's own answer key: candles he marks on a chart as a good entry,
+-- a good exit, or a trade to skip, on any watchlist ticker and timeframe.
+-- The Lab reads these as labeled ground truth (`python -m lab.marks score`)
+-- to measure how close a detector fires to where he would have traded.
+--
+-- Deliberately not `training_examples`: that table is the SPY entry model's,
+-- its rows pin SPY sessions in `bars`, and the indicator routine reads every
+-- row of it as SPY. Marks here are multi-ticker and say nothing about the
+-- indicator until something chooses to read them.
+--
+-- Written only by the trader from the webapp; the Lab and routines only read.
+-- The `postgres` connector would still have to pass user_id explicitly.
+create table if not exists review_marks (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null default auth.uid() references auth.users(id) on delete cascade,
+  ticker text not null,
+  -- start of the marked candle, and that candle's timeframe: a 5m mark covers
+  -- [ts, ts + 5 min). Daily marks carry the session's 09:30 ET.
+  ts timestamptz not null,
+  timeframe text not null check (timeframe in ('1m', '5m', '15m', '1h', '1D')),
+  -- where on the candle he clicked, clamped to its high/low, so a retest can be
+  -- marked at the level rather than at the close
+  price double precision not null,
+  kind text not null check (kind in ('entry', 'exit', 'skip')),
+  -- Long/Short for entry and skip; an exit takes its entry's side
+  side text check (side in ('Long', 'Short')),
+  -- an exit's entry, so a mark pair reads as one trade. Nullable: an exit can
+  -- be marked on its own, and deleting the entry keeps the exit.
+  entry_id uuid references review_marks(id) on delete set null,
+  setup text not null default '',
+  level double precision,             -- the key level the trade was about
+  reason text not null default '',
+  -- where the mark started: a click on the chart, one of his journal fills
+  -- accepted as-is, or a detector setup he agreed (entry) or disagreed (skip) with
+  source text not null default 'chart' check (source in ('chart', 'fill', 'detector')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  check (kind = 'exit' or side is not null)
+);
+
+-- One mark of each kind per candle start: marking the same candle again edits it.
+create unique index if not exists review_marks_user_bar_key
+  on review_marks (user_id, ticker, ts, kind);
+
+alter table review_marks enable row level security;
+
+create policy "review_marks_owner_all"
+  on review_marks
+  for all
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+-- Sessions per ticker in intraday_bars, for the Review tab's day picker, so it
+-- costs one request instead of paging every bar (like bar_days for `bars`).
+create or replace view intraday_bar_days with (security_invoker = true) as
+  select ticker, (ts at time zone 'America/New_York')::date as day
+  from intraday_bars
+  group by 1, 2;
+
+grant select on intraday_bar_days to anon, authenticated;
