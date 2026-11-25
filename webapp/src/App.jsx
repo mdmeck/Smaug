@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, Component, Fragment } from "react";
-import { createChart, CandlestickSeries, BaselineSeries, createSeriesMarkers } from "lightweight-charts";
+import { createChart, CandlestickSeries, BaselineSeries, LineSeries, createSeriesMarkers } from "lightweight-charts";
 import { supabase } from "./supabaseClient.js";
 
 // ---------- supabase helpers ----------
@@ -9184,8 +9184,1237 @@ function WatchlistTab() {
   );
 }
 
+// ---------- Review tab ----------
+// One watchlist ticker on one chart, with that morning's key levels, 9/21 EMAs,
+// the trader's real fills and the midday detector's setups drawn in. Clicking a
+// candle marks it as a good entry, a good exit or a trade to skip; the marks go
+// to `review_marks`, which the Lab scores detectors against
+// (`python -m lab.marks score`). B theme, like the Watchlist tab beside it.
+//
+// Bars: SPY from `bars` (1-min since July, full session), everything else from
+// `intraday_bars` (the midday job's 1-min pull: about 10 sessions, through
+// ~13:45 ET, so afternoons are missing). Higher timeframes are built here from
+// 1-min; daily comes from the watchlist scan's `context`.
+
+// `days`: sessions drawn. One extra prior session is always loaded on top, for
+// PDH/PDL and so the EMAs are warm by the first drawn bar.
+const RV_TIMEFRAMES = [
+  { key: "1m", min: 1, days: 1 },
+  { key: "5m", min: 5, days: 2 },
+  { key: "15m", min: 15, days: 4 },
+  { key: "1h", min: 60, days: 8 },
+  { key: "1D" },
+];
+const RV_SETUPS = ["Break and Retest", "Opening Range Break", "Bounce", "Trend Pullback", "Order Block Break", "Other"];
+// a detector setup "caught" a mark within this many minutes, same side
+const RV_MATCH_MIN = 10;
+const RV_TF_KEY = "smaug.review.tf";
+const RV_TICKER_KEY = "smaug.review.ticker";
+const RV_EMA_COLORS = { 9: "#6FB7E9", 21: "#E8A54B" };
+const RV_COLORS = {
+  long: CHART.green,
+  short: CHART.red,
+  exit: "#F0A030",
+  skip: "#8A8D93",
+  fill: "#5AA9F0",
+  detector: "#B79CF0",
+  support: "rgba(66, 203, 128, 0.75)",
+  resistance: "rgba(255, 111, 105, 0.75)",
+  ai: "rgba(183, 156, 240, 0.7)",
+  computed: "rgba(170, 173, 180, 0.6)",
+};
+const RTH_CLOSE_MIN = 16 * 60;
+const RV_NONE = [];
+
+const rvEtParts = (unix) => {
+  const d = new Date(unix * 1000);
+  const day = d.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  return { day, min: etMinuteOfDay(unix) };
+};
+const rvClock = (unix) =>
+  new Date(unix * 1000).toLocaleTimeString("en-US", {
+    timeZone: "America/New_York",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+const rvMoney = (v) => (v == null || Number.isNaN(v) ? "—" : Number(v).toFixed(2));
+const rvLocal = (key, fallback, allowed) => {
+  try {
+    const v = localStorage.getItem(key);
+    return v && (!allowed || allowed.includes(v)) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+};
+const rvSave = (key, v) => {
+  try {
+    localStorage.setItem(key, v);
+  } catch {
+    // not persisted; fine for this visit
+  }
+};
+
+// Every row in [first, last] ET dates, paged past PostgREST's 1000-row cap.
+// Stored bars run 04:00-16:00 ET, which never crosses a UTC midnight, so the
+// UTC-date bounds cover exactly those sessions.
+async function rvFetchMinutes(table, ticker, first, last) {
+  const out = [];
+  for (let offset = 0; ; offset += 1000) {
+    let q = supabase
+      .from(table)
+      .select("ts,open,high,low,close,volume")
+      .gte("ts", `${first}T00:00:00Z`)
+      .lt("ts", `${last}T23:59:59.999Z`)
+      .order("ts", { ascending: true })
+      .range(offset, offset + 999);
+    if (table === "intraday_bars") q = q.eq("ticker", ticker);
+    const { data, error } = await q;
+    if (error) throw new Error(error.message);
+    out.push(...data);
+    if (data.length < 1000) break;
+  }
+  return out.map((r) => {
+    const time = Math.floor(new Date(r.ts).getTime() / 1000);
+    const { day, min } = rvEtParts(time);
+    return { time, day, min, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume };
+  });
+}
+
+// Sessions with bars for a ticker, oldest first, and where each one's bars live.
+async function rvFetchDays(ticker) {
+  const { data, error } = await supabase.from("intraday_bar_days").select("day").eq("ticker", ticker).order("day");
+  if (error) throw new Error(error.message);
+  const src = new Map((data || []).map((r) => [r.day, "intraday_bars"]));
+  if (ticker === "SPY") {
+    // `bars` is the fuller copy (whole session, back to July), so it wins
+    for (const d of await fetchBarDays()) src.set(d, "bars");
+  }
+  return [...src.keys()].sort().map((day) => ({ day, table: src.get(day) }));
+}
+
+// 1-min rows -> m-minute candles. Buckets are anchored at 09:30 ET, as
+// TradingView does for stocks, so an hourly candle is 09:30-10:30, not 09:00.
+function rvAggregate(rows, m) {
+  if (m === 1) return rows.map((r) => ({ ...r, start: r.time }));
+  const out = [];
+  let cur = null;
+  for (const r of rows) {
+    const off = (((r.min - RTH_OPEN_MIN) % m) + m) % m;
+    const key = `${r.day} ${r.min - off}`;
+    if (!cur || cur.key !== key) {
+      cur = {
+        key,
+        time: r.time - off * 60,
+        day: r.day,
+        min: r.min - off,
+        open: r.open,
+        high: r.high,
+        low: r.low,
+        close: r.close,
+        volume: r.volume,
+      };
+      out.push(cur);
+    } else {
+      cur.high = Math.max(cur.high, r.high);
+      cur.low = Math.min(cur.low, r.low);
+      cur.close = r.close;
+      cur.volume += r.volume;
+    }
+  }
+  return out;
+}
+
+function rvEma(candles, len) {
+  const k = 2 / (len + 1);
+  let e = null;
+  return candles.map((c) => {
+    e = e == null ? c.close : c.close * k + e * (1 - k);
+    return { time: c.time, value: e };
+  });
+}
+
+// PDH/PDL from the prior session's RTH, PMH/PML from this session's premarket.
+// Only used where the watchlist scan has no row for the day (SPY before Nov 7).
+function rvComputedLevels(rows, day) {
+  const days = [...new Set(rows.map((r) => r.day))].sort();
+  const prev = days.filter((d) => d < day).pop();
+  const rth = (d) => rows.filter((r) => r.day === d && r.min >= RTH_OPEN_MIN && r.min < RTH_CLOSE_MIN);
+  const pre = rows.filter((r) => r.day === day && r.min < RTH_OPEN_MIN);
+  const out = [];
+  const add = (bars, tagHi, tagLo) => {
+    if (!bars.length) return;
+    out.push({ price: Math.max(...bars.map((b) => b.high)), tags: [tagHi], kind: "resistance" });
+    out.push({ price: Math.min(...bars.map((b) => b.low)), tags: [tagLo], kind: "support" });
+  };
+  if (prev) add(rth(prev), "PDH", "PDL");
+  add(pre, "PMH", "PML");
+  return out;
+}
+
+function rvLevels(snapshot, rows, day, showAi) {
+  if (snapshot) {
+    const lv = [
+      ...(snapshot.support || []).map((l) => ({ ...l, kind: "support" })),
+      ...(snapshot.resistance || []).map((l) => ({ ...l, kind: "resistance" })),
+    ];
+    if (showAi) {
+      for (const l of [...(snapshot.ai_support || []), ...(snapshot.ai_resistance || [])]) {
+        lv.push({ price: l.price, tags: ["AI"], reason: l.reason, kind: "ai" });
+      }
+    }
+    return lv.filter((l) => l.price != null);
+  }
+  return rvComputedLevels(rows, day).map((l) => ({ ...l, computed: true }));
+}
+
+// "Entry 10:09:49, exit 10:11:04." in a journal row's notes -> ET minutes
+const RV_TIME_RE = (word) => new RegExp(`${word} (\\d{1,2}):(\\d{2})(?::(\\d{2}))?`, "i");
+function rvFillMinutes(notes) {
+  const grab = (re) => {
+    const m = (notes || "").match(re);
+    return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+  };
+  return { entry: grab(RV_TIME_RE("Entry")), exit: grab(RV_TIME_RE("exit")) };
+}
+
+// The drawn candle (bucket start, unix s) that holds an ET day + minute.
+function rvBucketFor(candles, day, min) {
+  let hit = null;
+  for (const c of candles) {
+    if (c.day !== day) continue;
+    if (c.min <= min) hit = c;
+    else break;
+  }
+  return hit;
+}
+
+// Same rule as lab/marks.py: a setup catches an entry mark when it is on the
+// same side and its entry is within RV_MATCH_MIN of the marked candle.
+// A mark covers its whole candle, so a 10:33 setup sits inside a 10:30 5m mark.
+const RV_TF_MIN = { "1m": 1, "5m": 5, "15m": 15, "1h": 60, "1D": 390 };
+function rvScore(marks, setups) {
+  const near = (entryAt, m) => {
+    const t = new Date(entryAt).getTime();
+    const start = new Date(m.ts).getTime();
+    const end = start + (RV_TF_MIN[m.timeframe] || 1) * 60000;
+    const gap = t >= start && t < end ? 0 : Math.min(Math.abs(t - start), Math.abs(t - end));
+    return gap <= RV_MATCH_MIN * 60000;
+  };
+  const entries = marks.filter((m) => m.kind === "entry");
+  const skips = marks.filter((m) => m.kind === "skip");
+  const caught = entries.filter((m) =>
+    setups.some((s) => s.ticker === m.ticker && s.side === m.side && near(s.entry_at, m))
+  );
+  const firedOnSkip = skips.filter((m) =>
+    setups.some((s) => s.ticker === m.ticker && s.side === m.side && near(s.entry_at, m))
+  );
+  return { entries: entries.length, caught: caught.length, skips: skips.length, firedOnSkip: firedOnSkip.length };
+}
+
+function rvDayISO(day, min) {
+  // ET wall time -> ISO with offset, resolved from the day's own offset so
+  // July (EDT) and November (EST) both land right
+  const probe = new Date(`${day}T12:00:00Z`);
+  const etNoon = new Date(probe.toLocaleString("en-US", { timeZone: "America/New_York" }));
+  const utcNoon = new Date(probe.toLocaleString("en-US", { timeZone: "UTC" }));
+  const offMin = Math.round((utcNoon - etNoon) / 60000); // 240 or 300
+  const t = Date.UTC(...day.split("-").map((v, i) => (i === 1 ? Number(v) - 1 : Number(v)))) + (min + offMin) * 60000;
+  return new Date(t).toISOString();
+}
+
+const rvChartOptions = (height, daily) => {
+  const fmt = (time) => (typeof time === "number" ? rvClock(time) : String(time.year ? `${time.month}/${time.day}` : time));
+  return {
+    height,
+    layout: {
+      background: { color: CHART.surface },
+      textColor: CHART.dim,
+      fontFamily: "'IBM Plex Mono', monospace",
+      fontSize: 11,
+    },
+    grid: { vertLines: { visible: false }, horzLines: { color: CHART.edge } },
+    rightPriceScale: { borderColor: CHART.edge },
+    timeScale: {
+      borderColor: CHART.edge,
+      timeVisible: !daily,
+      secondsVisible: false,
+      ...(daily ? {} : { tickMarkFormatter: fmt }),
+    },
+    localization: daily ? {} : { timeFormatter: fmt },
+    crosshair: { mode: 0 },
+  };
+};
+
+// The chart itself. Stateless about marks: everything drawn comes in as props,
+// and clicks go back out as either an object id (a marker) or a candle + price.
+function RvChart({ candles, emas, levels, markers, onPick, height = 520, daily, onApi }) {
+  const holder = useRef(null);
+  const api = useRef({});
+  const pickRef = useRef(onPick);
+  useEffect(() => {
+    pickRef.current = onPick;
+  }, [onPick]);
+
+  useEffect(() => {
+    const el = holder.current;
+    const chart = createChart(el, { width: el.clientWidth, ...rvChartOptions(height, daily) });
+    const series = chart.addSeries(CandlestickSeries, {
+      upColor: CHART.green,
+      downColor: CHART.red,
+      borderVisible: false,
+      wickUpColor: CHART.green,
+      wickDownColor: CHART.red,
+      priceLineVisible: false,
+    });
+    const ema = {};
+    for (const len of [9, 21]) {
+      ema[len] = chart.addSeries(LineSeries, {
+        color: RV_EMA_COLORS[len],
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: false,
+        crosshairMarkerVisible: false,
+      });
+    }
+    const mk = createSeriesMarkers(series, []);
+    api.current = { chart, series, ema, mk, lines: [] };
+    const objectId = (p) => (p.hoveredInfo ? p.hoveredInfo.objectId : p.hoveredObjectId);
+    const onClick = (p) => {
+      if (!pickRef.current) return;
+      const id = objectId(p);
+      if (id) return pickRef.current({ id });
+      const bar = p.seriesData && p.seriesData.get(series);
+      if (!bar || !p.point) return;
+      const y = series.coordinateToPrice(p.point.y);
+      const price = Math.min(bar.high, Math.max(bar.low, y == null ? bar.close : y));
+      pickRef.current({ time: bar.time, price, bar });
+    };
+    const onMove = (p) => {
+      el.style.cursor = pickRef.current && (objectId(p) || p.time) ? "pointer" : "default";
+    };
+    chart.subscribeClick(onClick);
+    chart.subscribeCrosshairMove(onMove);
+    const ro = new ResizeObserver(() => chart.applyOptions({ width: el.clientWidth }));
+    ro.observe(el);
+    if (onApi) onApi(chart);
+    return () => {
+      ro.disconnect();
+      chart.unsubscribeClick(onClick);
+      chart.unsubscribeCrosshairMove(onMove);
+      if (onApi) onApi(null);
+      chart.remove();
+    };
+  }, [height, daily]);
+
+  useEffect(() => {
+    const { series, ema, chart } = api.current;
+    if (!series) return;
+    series.setData(candles.map(({ time, open, high, low, close }) => ({ time, open, high, low, close })));
+    for (const len of [9, 21]) ema[len].setData((emas && emas[len]) || []);
+    chart.timeScale().fitContent();
+  }, [candles, emas]);
+
+  useEffect(() => {
+    const a = api.current;
+    if (!a.series) return;
+    for (const l of a.lines) a.series.removePriceLine(l);
+    a.lines = (levels || []).map((l) =>
+      a.series.createPriceLine({
+        price: l.price,
+        color: l.computed ? RV_COLORS.computed : RV_COLORS[l.kind] || RV_COLORS.computed,
+        lineWidth: 1,
+        lineStyle: l.kind === "ai" ? 3 : 2,
+        axisLabelVisible: true,
+        title: (l.tags || []).join(" "),
+      })
+    );
+  }, [levels]);
+
+  useEffect(() => {
+    if (api.current.mk) api.current.mk.setMarkers(markers || []);
+  }, [markers]);
+
+  return <div ref={holder} style={{ width: "100%" }} />;
+}
+
+const rvBtn = (active, tone = B.blue) => ({
+  fontFamily: B.mono,
+  fontSize: 12,
+  padding: "6px 11px",
+  borderRadius: 8,
+  border: `1px solid ${active ? tone : B.edge}`,
+  background: active ? tone.replace(")", " / 0.14)") : "transparent",
+  color: active ? B.ink : B.dim,
+  cursor: "pointer",
+});
+const rvCard = { background: B.surface, border: `1px solid ${B.edge}`, borderRadius: 16, padding: "22px 24px" };
+const rvInput = {
+  width: "100%",
+  boxSizing: "border-box",
+  background: B.sunken,
+  border: `1px solid ${B.edge}`,
+  borderRadius: 8,
+  color: B.ink,
+  fontFamily: B.sans,
+  fontSize: 14,
+  padding: "8px 10px",
+};
+
+// Side panel: the selected candle, mark, fill or detector setup, and what can
+// be done with it.
+function RvPanel({ sel, levels, onSave, onDelete, onClose, saving, error }) {
+  const [form, setForm] = useState(null);
+  useEffect(() => {
+    if (!sel || (sel.type !== "draft" && sel.type !== "mark")) return setForm(null);
+    const m = sel.mark || {};
+    setForm({
+      kind: m.kind || "entry",
+      side: m.side || "Long",
+      setup: m.setup || "",
+      level: m.level ?? "",
+      reason: m.reason || "",
+    });
+  }, [sel]);
+
+  if (!sel) {
+    return (
+      <div style={{ color: B.dim, fontSize: 14, lineHeight: 1.6 }}>
+        <div style={{ ...eyebrow(B.faint), marginBottom: 10 }}>HOW TO MARK</div>
+        Click a candle to mark a good entry, a good exit or a trade to skip. Click where on the candle you'd have
+        filled: the mark keeps that price. Click a blue fill or a purple detector setup to rate it in one tap.
+      </div>
+    );
+  }
+
+  const head = (title, sub) => (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: B.ink }}>{title}</div>
+        <button onClick={onClose} style={{ ...rvBtn(false), padding: "2px 8px" }}>
+          ×
+        </button>
+      </div>
+      {sub && <div style={{ fontFamily: B.mono, fontSize: 12.5, color: B.dim, marginTop: 4 }}>{sub}</div>}
+    </div>
+  );
+
+  if (sel.type === "fill") {
+    const f = sel.fill;
+    return (
+      <div>
+        {head("Your fill", `${f.date} · ${f.direction} · ${f.result || "no P/L"}`)}
+        <div style={{ fontSize: 13.5, color: B.muted, lineHeight: 1.5, marginBottom: 14 }}>
+          {(f.notes || "").split(". Net Prc")[0]}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <button disabled={saving} style={rvBtn(true, B.green)} onClick={() => onSave({ fromFill: "entry" })}>
+            Good entry
+          </button>
+          {sel.exitCandle && (
+            <button disabled={saving} style={rvBtn(true, B.green)} onClick={() => onSave({ fromFill: "both" })}>
+              Good entry + exit
+            </button>
+          )}
+          <button disabled={saving} style={rvBtn(true, B.dim)} onClick={() => onSave({ fromFill: "skip" })}>
+            Should have skipped
+          </button>
+        </div>
+        {error && <div style={{ color: B.red, fontSize: 13, marginTop: 10 }}>{error}</div>}
+      </div>
+    );
+  }
+
+  if (sel.type === "detector") {
+    const s = sel.setup;
+    const failed = (s.failed || []).join(", ");
+    return (
+      <div>
+        {head(
+          `Detector ${s.side.toLowerCase()} setup`,
+          `${rvClock(new Date(s.entry_at).getTime() / 1000)} · entry ${rvMoney(s.entry)} · level ${rvMoney(s.level)}`
+        )}
+        <div style={{ fontSize: 13.5, color: B.muted, lineHeight: 1.6, marginBottom: 14 }}>
+          {(s.level_tags || []).join(" ") || "Pivot"} break and retest.{" "}
+          {s.passed ? "Passed every filter." : `Missed: ${failed}.`}
+          {s.outcome ? ` Outcome ${s.outcome}${s.r_multiple != null ? `, ${Number(s.r_multiple).toFixed(2)}R` : ""}.` : ""}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          <button disabled={saving} style={rvBtn(true, B.green)} onClick={() => onSave({ fromDetector: "entry" })}>
+            Agree: good entry
+          </button>
+          <button disabled={saving} style={rvBtn(true, B.dim)} onClick={() => onSave({ fromDetector: "skip" })}>
+            Disagree: skip it
+          </button>
+        </div>
+        {error && <div style={{ color: B.red, fontSize: 13, marginTop: 10 }}>{error}</div>}
+      </div>
+    );
+  }
+
+  if (!form) return null;
+  const set = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
+  const price = sel.type === "mark" ? sel.mark.price : sel.price;
+  const time = sel.type === "mark" ? new Date(sel.mark.ts).getTime() / 1000 : sel.time;
+  const nearby = [...(levels || [])].sort((a, b) => Math.abs(a.price - price) - Math.abs(b.price - price)).slice(0, 6);
+  const kinds = [
+    ["entry", "Good entry", B.green],
+    ["exit", "Good exit", B.amber],
+    ["skip", "Skip", B.dim],
+  ];
+  return (
+    <div>
+      {head(
+        sel.type === "mark" ? "Edit mark" : "New mark",
+        `${typeof time === "number" ? rvClock(time) : ""} · ${rvMoney(price)}`
+      )}
+      <div style={{ display: "flex", gap: 6, marginBottom: 10 }}>
+        {kinds.map(([k, label, tone]) => (
+          <button key={k} style={rvBtn(form.kind === k, tone)} onClick={() => set("kind")(k)}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {form.kind !== "exit" && (
+        <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+          {["Long", "Short"].map((s) => (
+            <button key={s} style={rvBtn(form.side === s, s === "Long" ? B.green : B.red)} onClick={() => set("side")(s)}>
+              {s}
+            </button>
+          ))}
+        </div>
+      )}
+      <div style={{ ...eyebrow(B.faint), margin: "6px 0" }}>SETUP</div>
+      <select value={form.setup} onChange={(e) => set("setup")(e.target.value)} style={rvInput}>
+        <option value="">—</option>
+        {RV_SETUPS.map((s) => (
+          <option key={s}>{s}</option>
+        ))}
+      </select>
+      <div style={{ ...eyebrow(B.faint), margin: "12px 0 6px" }}>KEY LEVEL</div>
+      <select value={form.level} onChange={(e) => set("level")(e.target.value)} style={rvInput}>
+        <option value="">—</option>
+        {nearby.map((l) => (
+          <option key={`${l.kind}${l.price}`} value={l.price}>
+            {rvMoney(l.price)} {(l.tags || []).join(" ")}
+          </option>
+        ))}
+      </select>
+      <div style={{ ...eyebrow(B.faint), margin: "12px 0 6px" }}>REASON</div>
+      <input
+        value={form.reason}
+        onChange={(e) => set("reason")(e.target.value)}
+        placeholder="e.g. retest of PDH, QQQ holding"
+        style={rvInput}
+        onKeyDown={(e) => e.key === "Enter" && onSave({ form })}
+      />
+      <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+        <button disabled={saving} style={rvBtn(true, B.blue)} onClick={() => onSave({ form })}>
+          {saving ? "Saving..." : "Save"}
+        </button>
+        {sel.type === "mark" && (
+          <button disabled={saving} style={rvBtn(true, B.red)} onClick={() => onDelete(sel.mark)}>
+            Delete
+          </button>
+        )}
+      </div>
+      {error && <div style={{ color: B.red, fontSize: 13, marginTop: 10 }}>{error}</div>}
+    </div>
+  );
+}
+
+function ReviewTab() {
+  const [tickers, setTickers] = useState([]); // [{ticker, grp}]
+  const [ticker, setTicker] = useState(() => rvLocal(RV_TICKER_KEY, "SPY"));
+  const [tf, setTf] = useState(() =>
+    rvLocal(RV_TF_KEY, "5m", RV_TIMEFRAMES.map((t) => t.key))
+  );
+  const [days, setDays] = useState([]); // [{day, table}]
+  const [day, setDay] = useState(null);
+  const [rows, setRows] = useState([]); // 1-min, the loaded window
+  const [qqqRows, setQqqRows] = useState([]);
+  const [snapshot, setSnapshot] = useState(null); // watchlist row for (ticker, day)
+  const [daily, setDaily] = useState({ main: [], qqq: [] });
+  const [fills, setFills] = useState([]); // journal rows for ticker
+  const [setups, setSetups] = useState([]); // midday_setups for ticker, window
+  const [marks, setMarks] = useState([]); // all of this ticker's marks
+  const [allScore, setAllScore] = useState(null);
+  const [showAi, setShowAi] = useState(true);
+  const [showQqq, setShowQqq] = useState(true);
+  const [sel, setSel] = useState(null);
+  const [status, setStatus] = useState({ loading: true });
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+  const charts = useRef({ main: null, qqq: null });
+
+  const tfDef = RV_TIMEFRAMES.find((t) => t.key === tf) || RV_TIMEFRAMES[1];
+  const isDaily = tf === "1D";
+
+  // watchlist tickers, from the latest scan
+  useEffect(() => {
+    (async () => {
+      const latest = await supabase
+        .from("watchlist_snapshots")
+        .select("run_date")
+        .order("run_date", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      if (!latest.data) return setTickers([{ ticker: "SPY", grp: "" }]);
+      const { data } = await supabase
+        .from("watchlist_snapshots")
+        .select("ticker,grp,sort_order")
+        .eq("run_date", latest.data.run_date)
+        .order("sort_order");
+      setTickers(data && data.length ? data : [{ ticker: "SPY", grp: "" }]);
+    })();
+  }, []);
+
+  // days for the ticker, its fills and its marks
+  useEffect(() => {
+    rvSave(RV_TICKER_KEY, ticker);
+    setSel(null);
+    (async () => {
+      try {
+        const [d, j, m] = await Promise.all([
+          rvFetchDays(ticker),
+          supabase.from("journal_entries").select("id,date,direction,result,notes,ticker").eq("ticker", ticker),
+          supabase.from("review_marks").select("*").eq("ticker", ticker).order("ts"),
+        ]);
+        if (j.error) throw new Error(j.error.message);
+        if (m.error) throw new Error(m.error.message);
+        setDays(d);
+        setFills(j.data || []);
+        setMarks(m.data || []);
+        setDay((cur) => (cur && d.some((x) => x.day === cur) ? cur : d.length ? d[d.length - 1].day : null));
+        if (!d.length) {
+          setRows([]);
+          setQqqRows([]);
+          setSetups([]);
+          setStatus({ loading: false, error: `No intraday bars stored for ${ticker}.` });
+        }
+      } catch (e) {
+        setStatus({ loading: false, error: e.message });
+      }
+    })();
+  }, [ticker]);
+
+  // bars for the window ending at `day`, plus QQQ and that morning's levels
+  useEffect(() => {
+    if (!day) return;
+    rvSave(RV_TF_KEY, tf);
+    let stale = false;
+    setStatus({ loading: true });
+    (async () => {
+      try {
+        const idx = days.findIndex((d) => d.day === day);
+        if (idx < 0) return;
+        const span = isDaily ? 1 : tfDef.days;
+        const win = days.slice(Math.max(0, idx - span), idx + 1); // +1 prior session
+        const tables = [...new Set(win.map((w) => w.table))];
+        const parts = await Promise.all(tables.map((t) => rvFetchMinutes(t, ticker, win[0].day, day)));
+        const merged = new Map();
+        // `bars` second so it overwrites intraday_bars where both have SPY
+        tables.forEach((t, i) => {
+          if (t === "intraday_bars") for (const r of parts[i]) merged.set(r.time, r);
+        });
+        tables.forEach((t, i) => {
+          if (t === "bars") for (const r of parts[i]) merged.set(r.time, r);
+        });
+        const mrows = [...merged.values()].sort((a, b) => a.time - b.time);
+        const [q, snap, qSnap, st] = await Promise.all([
+          ticker === "QQQ" ? Promise.resolve([]) : rvFetchMinutes("intraday_bars", "QQQ", win[0].day, day),
+          supabase.from("watchlist_snapshots").select("run_date,support,resistance,ai_support,ai_resistance,context")
+            .eq("ticker", ticker).lte("run_date", day).order("run_date", { ascending: false }).limit(1).maybeSingle(),
+          supabase.from("watchlist_snapshots").select("run_date,context")
+            .eq("ticker", "QQQ").lte("run_date", day).order("run_date", { ascending: false }).limit(1).maybeSingle(),
+          supabase.from("midday_setups").select("*").eq("ticker", ticker)
+            .gte("run_date", win[0].day).lte("run_date", day).order("entry_at"),
+        ]);
+        if (stale) return;
+        setRows(mrows);
+        setQqqRows(q);
+        setSnapshot(snap.data && snap.data.run_date === day ? snap.data : null);
+        const toDaily = (ctx) =>
+          ((ctx && ctx.daily) || [])
+            .filter((b) => b[0] < day)
+            .map(([time, open, high, low, close]) => ({ time, open, high, low, close }));
+        setDaily({ main: toDaily(snap.data?.context), qqq: toDaily(qSnap.data?.context) });
+        setSetups(st.data || []);
+        setStatus({ loading: false });
+      } catch (e) {
+        if (!stale) setStatus({ loading: false, error: e.message });
+      }
+    })();
+    return () => {
+      stale = true;
+    };
+  }, [day, tf, ticker, days]);
+
+  // overall agreement: every mark (any ticker) against the detector's setups
+  // on the same days. Recomputed when this ticker's marks change.
+  useEffect(() => {
+    (async () => {
+      const { data: all } = await supabase.from("review_marks").select("ticker,ts,kind,side,timeframe");
+      if (!all || !all.length) return setAllScore(null);
+      const ds = [...new Set(all.map((m) => rvEtParts(new Date(m.ts).getTime() / 1000).day))];
+      const { data: st } = await supabase.from("midday_setups").select("ticker,side,entry_at,run_date").in("run_date", ds);
+      const runDays = new Set((st || []).map((s) => s.run_date));
+      const covered = all.filter((m) => runDays.has(rvEtParts(new Date(m.ts).getTime() / 1000).day));
+      setAllScore({ ...rvScore(covered, st || []), total: all.length, covered: covered.length });
+    })();
+  }, [marks]);
+
+  const drawnDays = useMemo(() => {
+    const ds = [...new Set(rows.map((r) => r.day))].sort();
+    return new Set(ds.slice(-(isDaily ? 1 : tfDef.days)));
+  }, [rows, isDaily, tfDef]);
+
+  const candles = useMemo(() => {
+    if (isDaily) {
+      const today = rows.filter((r) => r.day === day && r.min >= RTH_OPEN_MIN && r.min < RTH_CLOSE_MIN);
+      const out = [...daily.main];
+      if (today.length) {
+        out.push({
+          time: day,
+          open: today[0].open,
+          high: Math.max(...today.map((r) => r.high)),
+          low: Math.min(...today.map((r) => r.low)),
+          close: today[today.length - 1].close,
+        });
+      }
+      return out;
+    }
+    return rvAggregate(rows, tfDef.min);
+  }, [rows, daily, tfDef, isDaily, day]);
+
+  const shown = useMemo(() => (isDaily ? candles : candles.filter((c) => drawnDays.has(c.day))), [candles, drawnDays, isDaily]);
+  const emas = useMemo(() => {
+    const cut = (s) => (isDaily ? s : s.filter((p) => shown.length && p.time >= shown[0].time));
+    return { 9: cut(rvEma(candles, 9)), 21: cut(rvEma(candles, 21)) };
+  }, [candles, shown, isDaily]);
+
+  const qqqCandles = useMemo(() => {
+    if (isDaily) return daily.qqq;
+    return rvAggregate(qqqRows, tfDef.min).filter((c) => drawnDays.has(c.day));
+  }, [qqqRows, daily, tfDef, isDaily, drawnDays]);
+
+  const qqqEmas = useMemo(() => ({ 9: rvEma(qqqCandles, 9), 21: rvEma(qqqCandles, 21) }), [qqqCandles]);
+
+  const levels = useMemo(() => rvLevels(snapshot, rows, day, showAi), [snapshot, rows, day, showAi]);
+
+  // where a mark/fill/setup sits on the drawn candles
+  const placeAt = (unix) => {
+    if (isDaily) {
+      const d = rvEtParts(unix).day;
+      return shown.some((c) => c.time === d) ? d : null;
+    }
+    const { day: d, min } = rvEtParts(unix);
+    const c = rvBucketFor(shown, d, min);
+    return c ? c.time : null;
+  };
+  const fillTimes = (f) => {
+    const { entry, exit } = rvFillMinutes(f.notes);
+    const at = (min) => (min == null || !drawnDays.has(f.date) ? null : rvBucketFor(shown, f.date, min));
+    return { entry: at(entry), exit: at(exit), entryMin: entry, exitMin: exit };
+  };
+
+  const markers = useMemo(() => {
+    const out = [];
+    if (!isDaily) {
+      for (const f of fills) {
+        const t = fillTimes(f);
+        if (t.entry) {
+          out.push({
+            time: t.entry.time,
+            position: f.direction === "Long" ? "belowBar" : "aboveBar",
+            shape: "circle",
+            color: RV_COLORS.fill,
+            text: "in",
+            id: `fill:${f.id}`,
+          });
+        }
+        if (t.exit) {
+          out.push({
+            time: t.exit.time,
+            position: f.direction === "Long" ? "aboveBar" : "belowBar",
+            shape: "circle",
+            color: RV_COLORS.fill,
+            text: `out ${f.result || ""}`.trim(),
+            id: `fill:${f.id}`,
+          });
+        }
+      }
+      for (const s of setups) {
+        const time = placeAt(new Date(s.entry_at).getTime() / 1000);
+        if (time == null) continue;
+        out.push({
+          time,
+          position: "atPriceMiddle",
+          price: s.entry,
+          shape: "square",
+          color: RV_COLORS.detector,
+          text: s.passed ? "D" : "d",
+          id: `det:${s.id}`,
+        });
+      }
+    }
+    for (const m of marks) {
+      const time = placeAt(new Date(m.ts).getTime() / 1000);
+      if (time == null) continue;
+      const long = m.side !== "Short";
+      if (m.kind === "entry") {
+        out.push({
+          time,
+          position: long ? "atPriceBottom" : "atPriceTop",
+          price: m.price,
+          shape: long ? "arrowUp" : "arrowDown",
+          color: long ? RV_COLORS.long : RV_COLORS.short,
+          text: long ? "L" : "S",
+          id: `mark:${m.id}`,
+        });
+      } else if (m.kind === "exit") {
+        out.push({ time, position: "atPriceMiddle", price: m.price, shape: "square", color: RV_COLORS.exit, text: "X", id: `mark:${m.id}` });
+      } else {
+        out.push({
+          time,
+          position: "atPriceMiddle",
+          price: m.price,
+          shape: "circle",
+          color: RV_COLORS.skip,
+          text: `skip ${long ? "L" : "S"}`,
+          id: `mark:${m.id}`,
+        });
+      }
+    }
+    // lightweight-charts wants markers in time order; daily times are strings
+    return out.sort((a, b) => (a.time < b.time ? -1 : a.time > b.time ? 1 : 0));
+  }, [fills, setups, marks, shown, drawnDays, isDaily]);
+
+  // keep the QQQ panel on the same time range as the main chart
+  useEffect(() => {
+    const { main, qqq } = charts.current;
+    if (!main || !qqq) return;
+    let syncing = false;
+    const follow = (from, to) => (range) => {
+      if (syncing || !range) return;
+      syncing = true;
+      try {
+        to.timeScale().setVisibleRange(range);
+      } catch {
+        // the other chart has no bars in that range
+      }
+      syncing = false;
+    };
+    const a = follow(main, qqq);
+    const b = follow(qqq, main);
+    main.timeScale().subscribeVisibleTimeRangeChange(a);
+    qqq.timeScale().subscribeVisibleTimeRangeChange(b);
+    return () => {
+      // either chart may already be removed (toggled off, or remounted for 1D)
+      try {
+        main.timeScale().unsubscribeVisibleTimeRangeChange(a);
+      } catch {
+        // gone
+      }
+      try {
+        qqq.timeScale().unsubscribeVisibleTimeRangeChange(b);
+      } catch {
+        // gone
+      }
+    };
+  }, [shown, qqqCandles, showQqq]);
+
+  const markTs = (time) =>
+    isDaily ? rvDayISO(String(time), RTH_OPEN_MIN) : new Date(time * 1000).toISOString();
+
+  const onPick = (p) => {
+    setSaveError(null);
+    if (p.id) {
+      const [type, id] = p.id.split(":");
+      if (type === "mark") {
+        const mark = marks.find((m) => m.id === id);
+        if (mark) setSel({ type: "mark", mark });
+      } else if (type === "fill") {
+        const fill = fills.find((f) => f.id === id);
+        if (fill) {
+          const t = fillTimes(fill);
+          setSel({ type: "fill", fill, entryCandle: t.entry, exitCandle: t.exit });
+        }
+      } else if (type === "det") {
+        const setup = setups.find((s) => s.id === id);
+        if (setup) setSel({ type: "detector", setup });
+      }
+      return;
+    }
+    const ts = markTs(p.time);
+    const existing = marks.find((m) => m.ts && new Date(m.ts).getTime() === new Date(ts).getTime());
+    if (existing) return setSel({ type: "mark", mark: existing });
+    setSel({ type: "draft", time: p.time, price: p.price });
+  };
+
+  // the open entry an exit at `ts` closes: the latest entry before it that day
+  const entryFor = (ts) => {
+    const d = rvEtParts(new Date(ts).getTime() / 1000).day;
+    return [...marks]
+      .filter(
+        (m) =>
+          m.kind === "entry" &&
+          new Date(m.ts) < new Date(ts) &&
+          rvEtParts(new Date(m.ts).getTime() / 1000).day === d
+      )
+      .sort((a, b) => new Date(a.ts) - new Date(b.ts))
+      .pop();
+  };
+
+  const persist = async (row, id) => {
+    const { data: s } = await supabase.auth.getSession();
+    const user_id = s.session?.user?.id;
+    const payload = { ...row, ticker, user_id, updated_at: new Date().toISOString() };
+    const q = id
+      ? supabase.from("review_marks").update(payload).eq("id", id)
+      : supabase.from("review_marks").upsert(payload, { onConflict: "user_id,ticker,ts,kind" });
+    const { data, error } = await q.select().single();
+    if (error) throw new Error(error.message);
+    return data;
+  };
+
+  const onSave = async (act) => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      const saved = [];
+      const candleRow = (c, kind, side, source, extra = {}) => ({
+        ts: new Date(c.time * 1000).toISOString(),
+        timeframe: tf,
+        price: c.close,
+        kind,
+        side,
+        source,
+        ...extra,
+      });
+      if (act.fromFill) {
+        const { fill, entryCandle, exitCandle } = sel;
+        if (!entryCandle) throw new Error("This fill's entry time isn't on the chart.");
+        const why = `journal fill ${fill.date}, ${fill.result || "no P/L"}`;
+        const kind = act.fromFill === "skip" ? "skip" : "entry";
+        const e = await persist(candleRow(entryCandle, kind, fill.direction, "fill", { reason: why }));
+        saved.push(e);
+        if (act.fromFill === "both" && exitCandle) {
+          saved.push(await persist(candleRow(exitCandle, "exit", fill.direction, "fill", { entry_id: e.id, reason: why })));
+        }
+      } else if (act.fromDetector) {
+        const s = sel.setup;
+        const time = placeAt(new Date(s.entry_at).getTime() / 1000);
+        const c = shown.find((x) => x.time === time);
+        saved.push(
+          await persist({
+            ts: c ? new Date(c.time * 1000).toISOString() : s.entry_at,
+            timeframe: c ? tf : "1m",
+            price: s.entry,
+            kind: act.fromDetector,
+            side: s.side,
+            source: "detector",
+            setup: "Break and Retest",
+            level: s.level,
+            reason: `detector ${(s.level_tags || []).join(" ") || "pivot"} ${s.passed ? "passed" : "near miss"}`,
+          })
+        );
+      } else {
+        const f = act.form;
+        const ts = sel.type === "mark" ? sel.mark.ts : markTs(sel.time);
+        const entry = f.kind === "exit" ? entryFor(ts) : null;
+        const row = {
+          ts,
+          timeframe: sel.type === "mark" ? sel.mark.timeframe : tf,
+          price: sel.type === "mark" ? sel.mark.price : sel.price,
+          kind: f.kind,
+          side: f.kind === "exit" ? entry?.side || null : f.side,
+          entry_id: entry?.id || null,
+          setup: f.setup,
+          level: f.level === "" ? null : Number(f.level),
+          reason: f.reason.trim(),
+        };
+        saved.push(await persist(row, sel.type === "mark" ? sel.mark.id : null));
+      }
+      setMarks((ms) => {
+        const byId = new Map(ms.map((m) => [m.id, m]));
+        for (const s of saved) byId.set(s.id, s);
+        return [...byId.values()].sort((a, b) => new Date(a.ts) - new Date(b.ts));
+      });
+      setSel(null);
+    } catch (e) {
+      setSaveError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onDelete = async (mark) => {
+    setSaving(true);
+    const { error } = await supabase.from("review_marks").delete().eq("id", mark.id);
+    setSaving(false);
+    if (error) return setSaveError(error.message);
+    setMarks((ms) => ms.filter((m) => m.id !== mark.id));
+    setSel(null);
+  };
+
+  // per-day agreement with the detector, for the drawn day
+  const dayMarks = marks.filter((m) => rvEtParts(new Date(m.ts).getTime() / 1000).day === day);
+  const daySetups = setups.filter((s) => s.run_date === day);
+  const dayScore = rvScore(dayMarks, daySetups);
+
+  // journal days with fills not yet marked: the review queue
+  const queue = useMemo(() => {
+    const markedDays = new Map();
+    for (const m of marks) {
+      const d = rvEtParts(new Date(m.ts).getTime() / 1000).day;
+      markedDays.set(d, (markedDays.get(d) || 0) + 1);
+    }
+    const byDay = new Map();
+    for (const f of fills) byDay.set(f.date, (byDay.get(f.date) || 0) + 1);
+    const have = new Set(days.map((d) => d.day));
+    return [...byDay.entries()]
+      .map(([d, n]) => ({ day: d, trades: n, marks: markedDays.get(d) || 0, charted: have.has(d) }))
+      .sort((a, b) => (a.day < b.day ? 1 : -1));
+  }, [fills, marks, days]);
+
+  const groups = [...new Set(tickers.map((t) => t.grp))];
+  const idx = days.findIndex((d) => d.day === day);
+  const step = (n) => {
+    const next = days[idx + n];
+    if (next) setDay(next.day);
+  };
+  const legend = [
+    ["L / S", "your good entry", RV_COLORS.long],
+    ["X", "your good exit", RV_COLORS.exit],
+    ["skip", "a trade to skip", RV_COLORS.skip],
+    ["in / out", "your journal fills", RV_COLORS.fill],
+    ["D / d", "detector setup (passed / near miss)", RV_COLORS.detector],
+    ["EMA 9", "", RV_EMA_COLORS[9]],
+    ["EMA 21", "", RV_EMA_COLORS[21]],
+  ];
+
+  return (
+    <div style={{ fontFamily: B.sans, color: B.ink, display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={rvCard}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 14 }}>
+          <div style={{ fontSize: 17, fontWeight: 700 }}>Review</div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {RV_TIMEFRAMES.map((t) => (
+              <button key={t.key} style={rvBtn(tf === t.key)} onClick={() => setTf(t.key)}>
+                {t.key}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 14, marginTop: 16 }}>
+          {groups.map((g) => (
+            <div key={g} style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+              {g && <span style={{ ...eyebrow(B.faint), marginRight: 2 }}>{g}</span>}
+              {tickers
+                .filter((t) => t.grp === g)
+                .map((t) => (
+                  <button key={t.ticker} style={rvBtn(ticker === t.ticker)} onClick={() => setTicker(t.ticker)}>
+                    {t.ticker}
+                  </button>
+                ))}
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
+          <button style={rvBtn(false)} disabled={idx <= 0} onClick={() => step(-1)}>
+            ←
+          </button>
+          <select value={day || ""} onChange={(e) => setDay(e.target.value)} style={{ ...rvInput, width: "auto" }}>
+            {[...days].reverse().map((d) => (
+              <option key={d.day} value={d.day}>
+                {d.day}
+              </option>
+            ))}
+          </select>
+          <button style={rvBtn(false)} disabled={idx < 0 || idx >= days.length - 1} onClick={() => step(1)}>
+            →
+          </button>
+          <label style={{ fontSize: 13, color: B.dim, display: "flex", gap: 6, alignItems: "center", marginLeft: 8 }}>
+            <input type="checkbox" checked={showAi} onChange={(e) => setShowAi(e.target.checked)} /> AI levels
+          </label>
+          {ticker !== "QQQ" && (
+            <label style={{ fontSize: 13, color: B.dim, display: "flex", gap: 6, alignItems: "center" }}>
+              <input type="checkbox" checked={showQqq} onChange={(e) => setShowQqq(e.target.checked)} /> QQQ
+            </label>
+          )}
+          <div style={{ ...eyebrow(snapshot ? B.faint : B.amber), marginLeft: "auto" }}>
+            {snapshot ? "LEVELS FROM THAT MORNING'S SCAN" : "LEVELS COMPUTED: PDH/PDL, PMH/PML"}
+          </div>
+        </div>
+      </div>
+
+      {status.error && <div style={{ ...rvCard, color: B.red, fontSize: 14 }}>{status.error}</div>}
+
+      <div style={{ display: "flex", gap: 20, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div style={{ ...rvCard, flex: "1 1 640px", minWidth: 0, padding: 14 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 6px 10px" }}>
+            <div style={{ fontFamily: B.mono, fontSize: 13, color: B.blue }}>
+              {ticker} · {tf} · {day || "—"}
+            </div>
+            {status.loading && <div style={eyebrow(B.dim)}>LOADING</div>}
+          </div>
+          <RvChart
+            key={`main-${isDaily}`}
+            candles={shown}
+            emas={emas}
+            levels={levels}
+            markers={markers}
+            onPick={onPick}
+            daily={isDaily}
+            onApi={(c) => (charts.current.main = c)}
+          />
+          {ticker !== "QQQ" && showQqq && (
+            <div style={{ marginTop: 10 }}>
+              <div style={{ ...eyebrow(B.faint), padding: "4px 6px 6px" }}>
+                QQQ{!qqqCandles.length ? " · NO BARS STORED FOR THIS DAY" : ""}
+              </div>
+              <RvChart
+                key={`qqq-${isDaily}`}
+                candles={qqqCandles}
+                emas={qqqEmas}
+                levels={RV_NONE}
+                markers={RV_NONE}
+                height={170}
+                daily={isDaily}
+                onApi={(c) => (charts.current.qqq = c)}
+              />
+            </div>
+          )}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 16px", padding: "12px 6px 2px" }}>
+            {legend.map(([k, v, c]) => (
+              <span key={k} style={{ fontSize: 12, color: B.dim }}>
+                <span style={{ fontFamily: B.mono, color: c, fontWeight: 600 }}>{k}</span> {v}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ flex: "0 1 320px", display: "flex", flexDirection: "column", gap: 20, minWidth: 280 }}>
+          <div style={rvCard}>
+            <RvPanel
+              sel={sel}
+              levels={levels}
+              onSave={onSave}
+              onDelete={onDelete}
+              onClose={() => setSel(null)}
+              saving={saving}
+              error={saveError}
+            />
+          </div>
+          <div style={rvCard}>
+            <div style={{ ...eyebrow(B.faint), marginBottom: 10 }}>DETECTOR VS YOU</div>
+            {daySetups.length ? (
+              <div style={{ fontSize: 14, color: B.muted, lineHeight: 1.6 }}>
+                This day: {daySetups.length} setup{daySetups.length === 1 ? "" : "s"} (
+                {daySetups.filter((s) => s.passed).length} passed). It caught {dayScore.caught} of your{" "}
+                {dayScore.entries} entr{dayScore.entries === 1 ? "y" : "ies"} and fired on {dayScore.firedOnSkip} of
+                your {dayScore.skips} skip{dayScore.skips === 1 ? "" : "s"}.
+              </div>
+            ) : (
+              <div style={{ fontSize: 14, color: B.dim, lineHeight: 1.6 }}>
+                No detector run for this day. It runs at 2pm on weekdays, from Nov 16.
+              </div>
+            )}
+            {allScore && (
+              <div style={{ fontSize: 13, color: B.dim, lineHeight: 1.6, marginTop: 10 }}>
+                All marks on detector days ({allScore.covered} of {allScore.total}): caught {allScore.caught} of{" "}
+                {allScore.entries} entries, fired on {allScore.firedOnSkip} of {allScore.skips} skips. Within{" "}
+                {RV_MATCH_MIN} min, same side.
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", alignItems: "flex-start" }}>
+        <div style={{ ...rvCard, flex: "1 1 420px" }}>
+          <div style={{ ...eyebrow(B.faint), marginBottom: 12 }}>YOUR {ticker} MARKS · {marks.length}</div>
+          {!marks.length && <div style={{ color: B.dim, fontSize: 14 }}>None yet.</div>}
+          <div style={{ maxHeight: 320, overflowY: "auto" }}>
+            {[...marks].reverse().map((m) => {
+              const t = new Date(m.ts).getTime() / 1000;
+              const { day: d } = rvEtParts(t);
+              const tone = m.kind === "entry" ? (m.side === "Short" ? B.red : B.green) : m.kind === "exit" ? B.amber : B.dim;
+              return (
+                <div
+                  key={m.id}
+                  onClick={() => {
+                    setDay(d);
+                    setSel({ type: "mark", mark: m });
+                  }}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "92px 54px 74px 70px 1fr",
+                    gap: 8,
+                    padding: "7px 0",
+                    borderTop: `1px solid ${B.edgeSoft}`,
+                    fontSize: 13,
+                    cursor: "pointer",
+                    alignItems: "baseline",
+                  }}
+                >
+                  <span style={{ fontFamily: B.mono, color: B.dim }}>{d}</span>
+                  <span style={{ fontFamily: B.mono, color: B.dim }}>{rvClock(t)}</span>
+                  <span style={{ fontFamily: B.mono, color: tone }}>
+                    {m.kind} {m.side ? m.side[0] : ""}
+                  </span>
+                  <span style={{ fontFamily: B.mono, color: B.muted }}>{rvMoney(m.price)}</span>
+                  <span style={{ color: B.muted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {[m.setup, m.reason].filter(Boolean).join(" · ")}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {queue.length > 0 && (
+          <div style={{ ...rvCard, flex: "1 1 300px" }}>
+            <div style={{ ...eyebrow(B.faint), marginBottom: 12 }}>YOUR {ticker} TRADES TO REVIEW</div>
+            <div style={{ maxHeight: 320, overflowY: "auto" }}>
+              {queue.map((q) => (
+                <div
+                  key={q.day}
+                  onClick={() => q.charted && setDay(q.day)}
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    padding: "7px 0",
+                    borderTop: `1px solid ${B.edgeSoft}`,
+                    fontSize: 13,
+                    cursor: q.charted ? "pointer" : "default",
+                    color: q.charted ? B.muted : B.ghost,
+                  }}
+                >
+                  <span style={{ fontFamily: B.mono }}>{q.day}</span>
+                  <span>
+                    {q.trades} trade{q.trades === 1 ? "" : "s"} ·{" "}
+                    <span style={{ color: q.marks ? B.greenText : B.amber }}>{q.marks} marked</span>
+                    {!q.charted && " · no bars"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ textAlign: "center", fontSize: 12.5, color: B.ghost, lineHeight: 1.5 }}>
+        Marks save to Smaug and the Lab reads them as your answer key. SPY charts back to July; other tickers keep
+        about two weeks of 1-minute bars, through about 1:45pm. Verify against your platform before trading.
+      </div>
+    </div>
+  );
+}
+
 const NAV = [
-  { label: "Reports", children: ["Morning Brief", "Dashboard", "Watchlist", "Journal"] },
+  { label: "Reports", children: ["Morning Brief", "Dashboard", "Watchlist", "Review", "Journal"] },
   // Everything behind the SPY entry model: the synthesized rules + preview, the
   // labeled examples they are fit on, and the pipeline's feature analysis.
   {
@@ -9516,6 +10745,7 @@ export default function Smaug() {
 <DashboardTab />
         )}
         {tab === "Watchlist" && <WatchlistTab />}
+        {tab === "Review" && <ReviewTab />}
         {tab === "Journal" && <JournalTab />}
         {tab === "Indicator" && <ModelTab />}
         {tab === "Training Data" && <TrainingDataTab />}

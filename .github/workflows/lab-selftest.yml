@@ -34,6 +34,8 @@ jobs:
         run: |
           python -m lab.replay_test --days 5 | tee out/replay.txt
           python -m lab.replay_test --days 3 --module _pulse --max-trades 6 --kill-at 11:00 | tee -a out/replay.txt
+      - name: Review marks scorer (synthetic)
+        run: python -m lab.marks selftest
       - name: Probe
         run: python -m lab.research probe | tee out/probe.json
       - name: Lookahead check

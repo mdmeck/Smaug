@@ -121,6 +121,16 @@ Pre-market sheet for a fixed ticker list (`WATCHLIST` in `watchlist_scan.py`), s
 - Shorts run through the long code on mirrored prices (`flip()`), so a rule is written once. `--selftest` checks that a day and its mirror give the same setup; run it after any change.
 - It is a second implementation of the spec's defaults, outside `lab/strategies/`, because the Lab build is on hold. When the Lab build starts, move the detector there and have this script call it.
 
+## Review tab
+
+The trader marks candles as a good entry, good exit or a trade to skip; they go to `review_marks`, the Lab's answer key (`python -m lab.marks score`). Load-bearing rules:
+
+- **Its own table, never `training_examples`.** That one is the SPY entry model's; its rows pin SPY sessions and the indicator routine reads every row as SPY. Marks are multi-ticker. Written only by the trader from the webapp; the Lab and routines only read.
+- **Bars:** SPY from `bars` (back to July, full session), everything else from `intraday_bars` (the midday job's pull: ~10 sessions, through ~13:45 ET). 5m/15m/1h are aggregated client-side from 1-min, anchored at 09:30 ET; daily is the watchlist scan's `context`. Day pickers read `bar_days` and the `intraday_bar_days` view.
+- **Levels are that morning's** `watchlist_snapshots` row for the day, so a review sees what was known pre-market. Days without a row (SPY before Nov 7) fall back to PDH/PDL/PMH/PML computed from the bars.
+- **One scoring rule in two places:** same side, entry within 10 min of the marked candle (`RV_MATCH_MIN` in `App.jsx`, `--tolerance` in `lab/marks.py`). Change both together.
+- Fills come from `journal_entries` notes (`Entry HH:MM:SS, exit HH:MM:SS`), placed on the underlying's candle for that minute.
+
 ## Webapp notes
 
 - `webapp/src/App.jsx` is one ~3700-line file holding every component, the theme object `T`, and all Supabase access. Follow the existing inline-style-object convention rather than introducing CSS files.

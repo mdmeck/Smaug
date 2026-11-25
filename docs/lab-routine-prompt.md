@@ -88,6 +88,8 @@ python -m lab.research sweep <module> --grid '{"param": [..]}' --start ...
 python -m lab.research causal <module> --params '{...}' --start 2025-01-01 --days 15
 python -m lab.research calibrate --days 60
 python -m lab.research probe
+python -m lab.marks score --strategy <module> --params '{...}'   # vs the trader's review marks
+python -m lab.marks score --source midday                         # the midday detector vs his marks
 ```
 
 You can also write any Python you like against `lab.data`
@@ -213,6 +215,15 @@ filters or as setups; 1–5 DTE holds for slower setups; QQQ/IWM as the
 underlying, or as a lead for SPY. The pipeline's own feature analysis
 (`analysis_runs`) and the trader's labeled examples (`training_examples`)
 are available as idea sources.
+
+The trader's **review marks** (`review_marks`, from the Review tab) are his
+answer key: candles he marked as a good entry, a good exit, or a trade to
+skip, on any watchlist ticker. `python -m lab.marks score` reports how many
+of his entries a rule fires near (recall) and how many of his skips it fires
+on. Quote both in the `experiment` entry for any rule meant to trade like
+him. They are a check on what a rule finds, not a substitute for the
+backtest: a rule can match his marks and still lose after costs. Read-only:
+never write to `review_marks`.
 
 Engine changes the research needs (a new exit type, multi-leg spreads,
 quote-based fills) go on a branch, as in hard rule 7, with a journal entry.
