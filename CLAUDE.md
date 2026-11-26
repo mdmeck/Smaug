@@ -92,11 +92,13 @@ Claude's autonomous strategy desk: a scheduled routine (`docs/lab-routine-prompt
 
 - **One implementation per strategy.** A strategy is a module in `lab/strategies/` whose `signals(day, ctx, params)` is called by both `backtest.py` and `runner.py`. Never re-implement a rule in the runner. `python -m lab.research causal <module>` checks for lookahead by replaying every prefix; run it after any change. Underscore modules (`_pulse`) are test fixtures.
 - **`broker.py` is the only code that calls `alpaca.submit_order`.** It re-reads `lab_controls` before every entry and allows only buy-to-open single options and sell-to-close up to the held qty. `lab_controls` is written by the trader from the Lab tab only; the routine's charter forbids writing it.
+- **Contracts per order: paper 5, live 1, in code.** `broker.max_contracts()` takes the trader's `lab_controls.max_contracts` but caps it at `PAPER_MAX_CONTRACTS` (5) only when the endpoint *and* `mode` are paper, else `LIVE_MAX_CONTRACTS` (1). Raising the live ceiling is a code change on purpose.
+- **Scale-out lives in `lab/exits.py`, shared by backtest and runner.** `scale_frac` sells part of the position at the first target (premium or underlying), the rest runs with its stop at entry (`runner_be`) to `trail_pct` or a `trail_ema` [fast, slow, minutes] cross. Set on the Signal or through a strategy's params; a no-op on one contract. One `lab_trades` row per round trip still: `scale_qty`/`scale_price`, `pnl` covers both legs. `python -m lab.scale_test` checks it offline.
 - **Paper vs live is two switches:** `ALPACA_TRADING_URL` (defaults to paper) *and* `lab_controls.mode`, plus the strategy's own status `live`. Live keys never go in the routine's environment.
 - **Stock bars are split-adjusted only, never dividend-adjusted** — strikes are chosen from historical prices, and dividend adjustment shifts old SPY bars enough to pick contracts that barely traded. The cache path includes the adjustment for that reason.
 - Alpaca free plan: SIP history back to 2016 except the latest 15 minutes (the runner uses the real-time IEX feed); option bars from 2024-02-15; options accept no bracket/OCO orders, so exits are managed by the runner with a resting stop as the backstop.
 - The cost model in `lab/options.py` is deliberately pessimistic; `backtest.IV_MULT` (modeled pricing for pre-2024 periods only) comes from `research calibrate`.
-- Verify runner changes with `python -m lab.replay_test` (simulated sessions against a fake broker, no keys needed) — also run by the `lab-selftest.yml` workflow on pushes touching `lab/`, which additionally exercises the real Alpaca account.
+- Verify runner changes with `python -m lab.replay_test` (simulated sessions against a fake broker, no keys needed) and `python -m lab.scale_test` — also run by the `lab-selftest.yml` workflow on pushes touching `lab/`, which additionally exercises the real Alpaca account.
 
 ## Watchlist
 

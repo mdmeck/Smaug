@@ -706,6 +706,19 @@ create table if not exists lab_trades (
   updated_at timestamptz not null default now()
 );
 
+-- Scale-out (lab/exits.py): part of the position sold at the first target,
+-- the rest run as a trailer. `contracts` stays the number filled at entry;
+-- the runner is contracts - scale_qty, and pnl covers both legs. Added
+-- 2026-11 — run these lines once on an existing database.
+alter table lab_trades add column if not exists scale_qty int;
+alter table lab_trades add column if not exists scale_price double precision;
+alter table lab_trades add column if not exists scale_ts timestamptz;
+-- runner's premium high since the scale, for trail_pct; persisted so the
+-- afternoon job picks up where the morning one left off
+alter table lab_trades add column if not exists peak_price double precision;
+-- what the resting stop is now: 'stop', or 'breakeven' once moved to entry
+alter table lab_trades add column if not exists stop_reason text;
+
 create unique index if not exists lab_trades_user_strategy_signal_key
   on lab_trades (user_id, strategy, signal_ts);
 create index if not exists lab_trades_user_created_idx on lab_trades (user_id, created_at desc);

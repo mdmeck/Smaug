@@ -14,6 +14,9 @@ minute by minute on the option's own price:
   * underlying stop/target, max hold and exit_by: decided on a bar's close,
     filled at the next option bar's open less spread
   * stop and target in the same bar -> stop (the bar's path is unknown)
+  * scale-out (Signal.scale_frac, more than one contract): the first target
+    sells part of the position instead of all of it, and the rest runs to
+    its own exits — see lab/exits.py. pnl and ret cover both legs
 
 Pricing: real Alpaca option bars where they exist (2024+), otherwise
 Black-Scholes off the underlying (options.model_path) with sigma = prior
@@ -26,7 +29,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from . import data, options
+from . import data, exits, options
 from .alpaca import NY, occ_symbol
 
 OPTIONS_START = pd.Timestamp("2024-02-01").date()
@@ -55,6 +58,11 @@ class Trade:
     pnl: float = np.nan
     ret: float = np.nan
     filled: bool = False
+    # partial profit at the first target (exits.py); exit/exit_ts above are
+    # then the runner's. pnl and ret cover both legs.
+    scale_qty: int = 0
+    scale_ts: object = None
+    scale_price: float = np.nan
 
 
 def daily_bars(minutes):
@@ -124,45 +132,81 @@ def simulate(sig, day, ctx, pricing="auto", contracts=1):
     t.filled = True
 
     stop = t.entry * (1 - sig.stop_pct) if sig.stop_pct else None
+    stop_reason = "stop"
     target = t.entry * (1 + sig.target_pct) if sig.target_pct else None
     exit_by = pd.Timestamp(f"{d} {sig.exit_by}", tz=NY)
     max_hold = t.entry_ts + pd.Timedelta(minutes=sig.max_hold_min) if sig.max_hold_min else None
+    k = exits.scale_qty(contracts, sig.scale_frac)
+    ema_against = exits.ema_against_series(day, sig.direction, sig.trail_ema) if k and sig.trail_ema else None
+    peak = None      # runner's premium high since the scale
+
+    def take_scale(ts, px):
+        nonlocal stop, stop_reason, peak
+        t.scale_ts, t.scale_price, t.scale_qty = ts, px, k
+        if sig.runner_be and (stop is None or stop < t.entry):
+            stop, stop_reason = t.entry, "breakeven"
+        peak = px
 
     pending = None   # reason decided on a close, filled at next bar's open
+    scale_pending = False
     for ts, b in after.iterrows():
         if pending:
             t.exit_ts, t.exit, t.exit_reason = ts, options.sell_fill(float(b["open"])), pending
             break
+        scaled_now = False
+        if scale_pending:          # u_target on the last close: scale at this open
+            take_scale(ts, options.sell_fill(float(b["open"])))
+            scale_pending = False
         if stop is not None and b["low"] <= stop:
             px = min(float(b["open"]), stop)
-            t.exit_ts, t.exit, t.exit_reason = ts, options.sell_fill(px, stop=True), "stop"
+            t.exit_ts, t.exit, t.exit_reason = ts, options.sell_fill(px, stop=True), stop_reason
             break
-        if target is not None and b["high"] >= target + TICK:
-            t.exit_ts, t.exit, t.exit_reason = ts, target, "target"
-            break
+        if t.scale_qty == 0 and target is not None and b["high"] >= target + TICK:
+            if not k:
+                t.exit_ts, t.exit, t.exit_reason = ts, target, "target"
+                break
+            # resting limit for the scale leg; the runner's new stop is only
+            # tested from the next bar (this bar's path after the fill is unknown)
+            take_scale(ts, target)
+            scaled_now = True
         if ts in day.index:
             u = day.loc[ts]
-            if sig.u_stop is not None and ((sig.direction == "long" and u["close"] <= sig.u_stop) or
-                                           (sig.direction == "short" and u["close"] >= sig.u_stop)):
+            long = sig.direction == "long"
+            if sig.u_stop is not None and ((long and u["close"] <= sig.u_stop) or
+                                           (not long and u["close"] >= sig.u_stop)):
                 pending = "u_stop"
-            elif sig.u_target is not None and ((sig.direction == "long" and u["close"] >= sig.u_target) or
-                                               (sig.direction == "short" and u["close"] <= sig.u_target)):
-                pending = "u_target"
+            elif (t.scale_qty == 0 and not scaled_now and sig.u_target is not None and
+                  ((long and u["close"] >= sig.u_target) or (not long and u["close"] <= sig.u_target))):
+                if k:
+                    scale_pending = True
+                else:
+                    pending = "u_target"
+            elif t.scale_qty and ema_against is not None and bool(ema_against.get(ts, False)):
+                pending = "ema_trail"
         if not pending and ts >= exit_by:
             pending = "time"
         if not pending and max_hold is not None and ts >= max_hold:
             pending = "max_hold"
+        if t.scale_qty and sig.trail_pct:
+            peak = max(peak, float(b["high"]))
+            trail = peak * (1 - sig.trail_pct)
+            if stop is None or trail > stop:
+                stop, stop_reason = trail, "trail"
     if t.exit_ts is None:
         last = after.iloc[-1]
         t.exit_ts, t.exit, t.exit_reason = after.index[-1], options.sell_fill(float(last["close"])), pending or "eod"
 
-    t.pnl = (t.exit - t.entry) * 100 * contracts - 2 * options.FEE_PER_CONTRACT * contracts
+    run_qty = contracts - t.scale_qty
+    gross = (t.exit - t.entry) * 100 * run_qty
+    if t.scale_qty:
+        gross += (t.scale_price - t.entry) * 100 * t.scale_qty
+    t.pnl = gross - 2 * options.FEE_PER_CONTRACT * contracts
     t.ret = t.pnl / (t.entry * 100 * contracts)
     return t
 
 
 def run(strategy, params=None, start="2024-02-01", end=None, pricing="auto", symbol="SPY",
-        max_trades_per_day=None, minutes=None, progress=False):
+        max_trades_per_day=None, minutes=None, progress=False, contracts=1):
     end = end or (pd.Timestamp.now(tz=NY) - pd.Timedelta(days=1)).date()
     if minutes is None:
         # one extra year of daily context for strategies that look back
@@ -186,7 +230,8 @@ def run(strategy, params=None, start="2024-02-01", end=None, pricing="auto", sym
                 continue
             if max_trades_per_day and n >= max_trades_per_day:
                 break
-            tr = simulate(s, day, ctx, pricing=pricing)
+            exits.apply_overrides(s, params)
+            tr = simulate(s, day, ctx, pricing=pricing, contracts=contracts)
             trades.append(tr)
             if tr.filled:
                 busy_until = tr.exit_ts

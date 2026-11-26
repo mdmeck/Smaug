@@ -3,6 +3,7 @@
   python -m lab.research probe
   python -m lab.research backtest orb --params '{"or_minutes": 30}' --start 2024-02-01
   python -m lab.research sweep orb --grid '{"or_minutes": [5, 15, 30]}'
+  python -m lab.research backtest orb --contracts 5 --params '{"scale_frac": 0.6, "trail_ema": [9, 21, 5]}'
   python -m lab.research causal orb
   python -m lab.research calibrate --days 40
 
@@ -67,11 +68,12 @@ def cmd_probe(a):
 def cmd_backtest(a):
     strat = strategies.load(a.strategy)
     params = {**strat.DEFAULTS, **json.loads(a.params or "{}")}
-    tr = backtest.run(strat, params, start=a.start, end=a.end, pricing=a.pricing, progress=a.verbose)
+    tr = backtest.run(strat, params, start=a.start, end=a.end, pricing=a.pricing, progress=a.verbose,
+                      contracts=a.contracts)
     if a.save:
         tr.to_csv(a.save, index=False)
     _out({"strategy": a.strategy, "params": params, "start": a.start, "end": a.end,
-          "pricing": a.pricing, "stats": backtest.stats(tr)})
+          "pricing": a.pricing, "contracts": a.contracts, "stats": backtest.stats(tr)})
 
 
 def cmd_sweep(a):
@@ -85,7 +87,8 @@ def cmd_sweep(a):
     rows = []
     for combo in itertools.product(*(grid[k] for k in keys)):
         params = {**strat.DEFAULTS, **json.loads(a.params or "{}"), **dict(zip(keys, combo))}
-        tr = backtest.run(strat, params, start=a.start, end=a.end, pricing=a.pricing, minutes=minutes)
+        tr = backtest.run(strat, params, start=a.start, end=a.end, pricing=a.pricing, minutes=minutes,
+                          contracts=a.contracts)
         s = backtest.stats(tr)
         rows.append({"params": dict(zip(keys, combo)),
                      "n": s["all"].get("n"),
@@ -209,6 +212,9 @@ def main(argv=None):
         s.add_argument("--start", default="2024-02-01")
         s.add_argument("--end")
         s.add_argument("--pricing", default="auto", choices=["auto", "real", "model"])
+        if name in ("backtest", "sweep"):
+            # a scale-out rule (params scale_frac) needs 2+ contracts to act
+            s.add_argument("--contracts", type=int, default=1)
         if name == "backtest":
             s.add_argument("--save")
             s.add_argument("-v", "--verbose", action="store_true")

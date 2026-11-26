@@ -4,7 +4,8 @@ the routine says about itself.
 
 Allowed order shapes, and nothing else:
   * buy-to-open a single call or put, limit price, TIF day
-  * sell-to-close up to the quantity actually held (stop, limit or market)
+  * sell-to-close up to the quantity actually held (stop, limit or market),
+    which includes closing part of a position (a scale-out)
 No selling to open, no spreads, no equities — a bug can lose the premium of
 one long option, never more than that.
 """
@@ -15,6 +16,13 @@ from . import alpaca, clock, supa
 from .alpaca import NY
 
 ENTRY_WINDOW = ("09:31", "15:30")
+# Hard ceilings on contracts per order, in code, over lab_controls.max_contracts
+# (which the trader sets from the Lab tab). Paper may size up so scale-outs
+# can be tested; anything that isn't paper on *both* switches gets the live
+# ceiling, whatever the row says. Raising LIVE_MAX_CONTRACTS is a code change
+# on purpose.
+PAPER_MAX_CONTRACTS = 5
+LIVE_MAX_CONTRACTS = 1
 
 
 class Refused(Exception):
@@ -39,6 +47,10 @@ def day_pnl(trades=None):
     is open."""
     trades = today_trades() if trades is None else trades
     realized = sum(t["pnl"] or 0 for t in trades if t["status"] == "closed")
+    # the scaled-out leg of a trade still running is realized already, and
+    # the broker's unrealized P/L on the remaining contracts doesn't include it
+    realized += sum((t["scale_price"] - t["entry_price"]) * 100 * t["scale_qty"] for t in trades
+                    if t["status"] == "open" and t.get("scale_qty") and t.get("scale_price") is not None)
     unrealized = sum(float(p.get("unrealized_pl") or 0) for p in alpaca.positions()
                      if p.get("asset_class") == "us_option")
     return realized + unrealized
@@ -55,6 +67,14 @@ def check_mode(c, strategy_status):
             raise Refused("strategy not promoted to live")
 
 
+def max_contracts(c):
+    """Contracts per order allowed right now: the trader's setting, capped by
+    the ceiling for the mode. Paper only when the endpoint is paper and
+    controls.mode says paper."""
+    ceiling = PAPER_MAX_CONTRACTS if (alpaca.is_paper() and c["mode"] == "paper") else LIVE_MAX_CONTRACTS
+    return min(int(c["max_contracts"]), ceiling)
+
+
 def open_position(strategy, occ, contracts, limit_price):
     """Buy-to-open. Raises Refused with the reason if any limit fails."""
     c = controls()
@@ -64,8 +84,9 @@ def open_position(strategy, occ, contracts, limit_price):
     now = clock.now()
     if not (ENTRY_WINDOW[0] <= now.strftime("%H:%M") <= ENTRY_WINDOW[1]):
         raise Refused(f"outside entry window {ENTRY_WINDOW}")
-    if contracts < 1 or contracts > c["max_contracts"]:
-        raise Refused(f"contracts {contracts} > max {c['max_contracts']}")
+    cap = max_contracts(c)
+    if contracts < 1 or contracts > cap:
+        raise Refused(f"contracts {contracts} > max {cap}")
     cost = limit_price * 100 * contracts
     if cost > c["max_premium_per_trade"]:
         raise Refused(f"premium ${cost:.0f} > max ${c['max_premium_per_trade']:.0f}")
