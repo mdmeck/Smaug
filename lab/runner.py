@@ -11,6 +11,10 @@ acts on a signal whose ts is the bar that just closed. Exits are managed
 here because Alpaca options take no bracket/OCO orders: a stop rests at the
 broker as the backstop (so a dead runner still can't lose more than the
 stop), and the target / underlying / time exits are watched by this loop.
+A trade with a scale-out rule (lab/exits.py) sells part of its contracts at
+the first target, moves the resting stop to entry for the rest, and lets
+them run to a trailing exit; the scale is recorded on the same lab_trades
+row (scale_qty / scale_price), and its pnl covers both legs.
 
 Actions jobs cap at 6h and RTH is 6.5h, so the day is two jobs — morning
 (to 12:50 ET) and afternoon (to the close) — and everything the second needs
@@ -21,7 +25,7 @@ import traceback
 
 import pandas as pd
 
-from . import alpaca, backtest, broker, clock, data, strategies, supa
+from . import alpaca, backtest, broker, clock, data, exits, strategies, supa
 from .alpaca import NY
 
 ENTRY_TIMEOUT_S = 90       # unfilled entry limit is canceled after this
@@ -121,6 +125,7 @@ class Runner:
                 self.error(f"signals {s['name']}", e)
                 continue
             for sig in sigs[:1]:
+                exits.apply_overrides(sig, s["params"])
                 self.enter(s, sig, day)
 
     def enter(self, strat, sig, day):
@@ -208,42 +213,71 @@ class Runner:
             self.log("entry_timeout", occ=t["occ"])
 
     def manage_open(self, t, now, day, halt):
-        # an exit already in flight: just wait for it
+        # an exit (or a scale-out sell) already in flight: just wait for it
         if t.get("exit_order_id"):
             o = alpaca.get_order(t["exit_order_id"])
+            scaling = (t.get("exit_reason") or "").startswith("scale")
             if o["status"] == "filled":
-                self.record_close(t, o, t["exit_reason"])
+                if scaling:
+                    self.record_scale(t, o)
+                else:
+                    self.record_close(t, o, t["exit_reason"])
             elif o["status"] in ("canceled", "expired", "rejected"):
-                supa.update("lab_trades", {"id": t["id"]}, {"exit_order_id": None})
+                if scaling and int(float(o.get("filled_qty") or 0)):
+                    self.record_scale(t, o)
+                else:
+                    supa.update("lab_trades", {"id": t["id"]}, {"exit_order_id": None})
+                    if scaling:
+                        self.rearm_stop(t)
             return
         so = alpaca.get_order(t["stop_order_id"]) if t.get("stop_order_id") else None
         if so and so["status"] == "filled":
-            self.record_close(t, so, "stop")
+            self.record_close(t, so, t.get("stop_reason") or "stop")
             return
         sig = t["signal"] or {}
+        scaled = bool(t.get("scale_qty"))
+        k = 0 if scaled else exits.scale_qty(int(t["contracts"]), sig.get("scale_frac"))
         reason = halt
         if not reason and sig.get("exit_by") and now.strftime("%H:%M") >= sig["exit_by"]:
             reason = "time"
         if not reason and sig.get("max_hold_min") and t.get("entry_ts"):
             if now >= pd.Timestamp(t["entry_ts"]).tz_convert(NY) + pd.Timedelta(minutes=sig["max_hold_min"]):
                 reason = "max_hold"
+        long = t["direction"] == "long"
         if not reason and len(day):
             c = float(day["close"].iloc[-1])
-            long = t["direction"] == "long"
             if sig.get("u_stop") is not None and (c <= sig["u_stop"] if long else c >= sig["u_stop"]):
                 reason = "u_stop"
-            elif sig.get("u_target") is not None and (c >= sig["u_target"] if long else c <= sig["u_target"]):
+            elif not scaled and sig.get("u_target") is not None and (c >= sig["u_target"] if long else c <= sig["u_target"]):
                 reason = "u_target"
+            elif scaled and sig.get("trail_ema") and exits.ema_cross_against(day, t["direction"], sig["trail_ema"]):
+                reason = "ema_trail"
         limit = None
-        if not reason and t.get("target_price"):
+        need_quote = (not reason and not scaled and t.get("target_price")) or (scaled and sig.get("trail_pct"))
+        bid = 0.0
+        if need_quote:
             q = alpaca.option_quotes_latest([t["occ"]]).get(t["occ"]) or {}
             bid = float(q.get("bp") or 0)
-            if bid >= t["target_price"]:
-                reason, limit = "target", bid
-        if reason:
+        if not reason and not scaled and t.get("target_price") and bid >= t["target_price"]:
+            reason, limit = "target", bid
+        if not reason and scaled and sig.get("trail_pct") and bid > 0:
+            # watched trail on the runner; the resting stop stays at breakeven
+            # (or the original stop) as the backstop
+            peak = max(float(t.get("peak_price") or 0), bid)
+            if peak > float(t.get("peak_price") or 0):
+                supa.update("lab_trades", {"id": t["id"]}, {"peak_price": round(peak, 2)})
+                t["peak_price"] = peak
+            if bid <= peak * (1 - sig["trail_pct"]):
+                reason = "trail"
+        if reason in ("target", "u_target") and k:
+            self.scale(t, reason, so, k, limit)
+        elif reason:
             self.exit(t, reason, so, limit)
 
-    def exit(self, t, reason, stop_order, limit=None):
+    def _pull_stop(self, t, stop_order):
+        """Cancel the resting stop (Alpaca reserves its qty, so nothing else
+        can sell until it's gone). Returns False if it filled meanwhile — the
+        trade is then closed and there's nothing left to do."""
         if stop_order and stop_order["status"] not in ("filled", "canceled", "expired"):
             broker.cancel(stop_order["id"])
             for _ in range(20):
@@ -252,9 +286,65 @@ class Runner:
                     break
                 clock.sleep(0.5)
             if stop_order["status"] == "filled":
-                self.record_close(t, stop_order, "stop")
+                self.record_close(t, stop_order, t.get("stop_reason") or "stop")
+                return False
+        return True
+
+    def rearm_stop(self, t):
+        so = broker.place_stop(t["occ"], self.remaining(t), t["stop_price"])
+        supa.update("lab_trades", {"id": t["id"]}, {"stop_order_id": so["id"]})
+        t["stop_order_id"] = so["id"]
+
+    def scale(self, t, reason, stop_order, k, limit=None):
+        """Sell k contracts at the first target; the rest become the runner."""
+        if not self._pull_stop(t, stop_order):
+            return
+        o = broker.close_position(t["occ"], k, limit)
+        if o is None:
+            self.log("exit_nothing_held", occ=t["occ"], reason=reason)
+            supa.update("lab_trades", {"id": t["id"]}, {"status": "error", "notes": "position missing at scale"})
+            return
+        supa.update("lab_trades", {"id": t["id"]}, {"exit_order_id": o["id"], "exit_reason": f"scale:{reason}"})
+        self.log("scale_sent", occ=t["occ"], qty=k, reason=reason, limit=limit)
+        for _ in range(20):
+            o = alpaca.get_order(o["id"])
+            if o["status"] == "filled":
+                self.record_scale(t, o)
                 return
-        o = broker.close_position(t["occ"], t["contracts"], limit)
+            clock.sleep(1)
+        broker.cancel(o["id"])
+        o = alpaca.get_order(o["id"])
+        if o["status"] == "filled" or int(float(o.get("filled_qty") or 0)):
+            self.record_scale(t, o)     # partial fill: scale what filled
+            return
+        # nothing sold: back to the full position with its stop, re-decide next pass
+        supa.update("lab_trades", {"id": t["id"]}, {"exit_order_id": None, "exit_reason": ""})
+        self.rearm_stop(t)
+
+    def record_scale(self, t, o):
+        qty = int(float(o["filled_qty"]))
+        px = float(o["filled_avg_price"])
+        sig = t["signal"] or {}
+        stop, stop_reason = t["stop_price"], "stop"
+        if sig.get("runner_be", True) and (stop is None or stop < t["entry_price"]):
+            stop, stop_reason = t["entry_price"], "breakeven"
+        patch = {"scale_qty": qty, "scale_price": px, "scale_ts": o["filled_at"], "peak_price": px,
+                 "stop_price": round(stop, 2), "stop_reason": stop_reason,
+                 "exit_order_id": None, "exit_reason": "",
+                 "updated_at": clock.now().tz_convert("UTC").isoformat()}
+        supa.update("lab_trades", {"id": t["id"]}, patch)
+        t.update(patch)
+        self.log("scaled", occ=t["occ"], qty=qty, price=px, runner=int(t["contracts"]) - qty,
+                 stop=round(stop, 2))
+        if int(t["contracts"]) - qty > 0:
+            self.rearm_stop(t)
+        else:   # can't happen with scale_qty, but never leave a row open on nothing
+            self.record_close(t, o, "target")
+
+    def exit(self, t, reason, stop_order, limit=None):
+        if not self._pull_stop(t, stop_order):
+            return
+        o = broker.close_position(t["occ"], self.remaining(t), limit)
         if o is None:
             self.log("exit_nothing_held", occ=t["occ"], reason=reason)
             supa.update("lab_trades", {"id": t["id"]}, {"status": "error", "notes": "position missing at exit"})
@@ -270,13 +360,19 @@ class Runner:
         if limit:   # target limit didn't fill: pull it and let the next pass re-decide
             broker.cancel(o["id"])
             # re-arm the backstop
-            so = broker.place_stop(t["occ"], t["contracts"], t["stop_price"])
+            so = broker.place_stop(t["occ"], self.remaining(t), t["stop_price"])
             supa.update("lab_trades", {"id": t["id"]}, {"exit_order_id": None, "stop_order_id": so["id"]})
+
+    @staticmethod
+    def remaining(t):
+        return int(t["contracts"]) - int(t.get("scale_qty") or 0)
 
     def record_close(self, t, o, reason):
         px = float(o["filled_avg_price"])
         qty = int(float(o["filled_qty"]))
         pnl = (px - t["entry_price"]) * 100 * qty
+        if t.get("scale_qty"):      # the leg sold at the first target
+            pnl += (t["scale_price"] - t["entry_price"]) * 100 * t["scale_qty"]
         supa.update("lab_trades", {"id": t["id"]}, {
             "status": "closed", "exit_price": px, "exit_ts": o["filled_at"], "exit_reason": reason,
             "pnl": round(pnl, 2), "updated_at": clock.now().tz_convert("UTC").isoformat()})

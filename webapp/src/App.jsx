@@ -8329,7 +8329,8 @@ function LabPanel({ title, right, children }) {
 }
 
 const LAB_LIMITS = [
-  ["max_contracts", "Max contracts / order", 1, 10],
+  // broker.py caps this at 5 on paper and 1 live, whatever is saved here
+  ["max_contracts", "Max contracts / order (paper 5, live 1)", 1, 5],
   ["max_open_positions", "Max open positions", 1, 5],
   ["max_trades_per_day", "Max trades / day", 0, 20],
   ["max_premium_per_trade", "Max premium / trade ($)", 1, 100000],

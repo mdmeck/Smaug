@@ -32,6 +32,11 @@ class Signal:
     u_target: Optional[float] = None    # underlying target level
     exit_by: str = "15:45"          # hard time exit (NY)
     max_hold_min: Optional[int] = None
+    # scale-out and runner (lab/exits.py); all off by default
+    scale_frac: Optional[float] = None  # fraction of contracts sold at the first target
+    trail_pct: Optional[float] = None   # runner: exit this far below its premium high
+    trail_ema: Optional[list] = None    # runner: [fast, slow, minutes] EMA cross exit
+    runner_be: bool = True              # runner's stop moves to entry after the scale
     tag: str = ""
     meta: dict = field(default_factory=dict)
 

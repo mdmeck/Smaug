@@ -108,6 +108,14 @@ Strategy modules live in `lab/strategies/`; read `__init__.py` for the
 contract and `orb.py` for an example. The runner and backtester call the
 same `signals()` function, so what you test is what trades.
 
+Exits can scale out: `scale_frac` on a Signal (or in a strategy's params)
+sells that fraction of the contracts at the first target and lets the rest
+run with the stop at entry, to `trail_pct` or a `trail_ema` [fast, slow,
+minutes] cross (`lab/exits.py`). It needs 2+ contracts, so backtest with
+`--contracts` (the trader takes 3-4 of 5 off and trails the rest; paper
+allows up to 5 contracts). Compare a scaled variant against the same rule
+all-out at the target, and count it as a variant tried.
+
 ### Research discipline
 
 These exist because every one of them is a known way to fool yourself on

@@ -3,6 +3,7 @@ simulated time, against a fake Alpaca and an in-memory Supabase.
 
     python -m lab.replay_test                 # last 10 sessions of `bars`
     python -m lab.replay_test --days 30 --kill-at 11:00
+    python -m lab.replay_test --contracts 5 --params '{"scale_frac": 0.6, "trail_ema": [9, 21, 5]}'
 
 No keys needed: SPY minutes come from the pipeline's public `bars` table and
 option quotes are modeled (options.model_path) with a realistic spread. The
@@ -16,6 +17,7 @@ are open at once, limits refuse what they should.
 """
 import argparse
 import itertools
+import json
 import sys
 
 import pandas as pd
@@ -214,7 +216,7 @@ def install(market, fs, clk, history, vix):
     data.vix_daily = lambda s, e: vix
 
 
-def replay_day(d, minutes, controls, kill_at=None, module="orb", params=None):
+def replay_day(d, minutes, controls, kill_at=None, module="orb", params=None, contracts=1):
     day = minutes[minutes.index.date == d]
     history = minutes[minutes.index.date < d]
     clk = FakeClock(pd.Timestamp(f"{d} 09:05", tz=NY))
@@ -224,7 +226,7 @@ def replay_day(d, minutes, controls, kill_at=None, module="orb", params=None):
     fs = FakeSupa()
     fs.t["lab_controls"].append({"user_id": supa.USER_ID, **controls})
     fs.t["lab_strategies"].append({"id": "s1", "name": f"{module}_test", "module": module, "params": params or {},
-                                   "status": "paper", "contracts": 1})
+                                   "status": "paper", "contracts": contracts})
     install(market, fs, clk, history, vix)
 
     # the kill switch flips mid-session when asked to
@@ -270,7 +272,11 @@ def check(d, market, fs, kill_at):
         if late:
             problems.append(f"entered after kill switch: {[t['signal_ts'] for t in late]}")
     closed = [t for t in trades if t["status"] == "closed"]
+    for t in closed:
+        if t.get("scale_qty") and not 0 < t["scale_qty"] < t["contracts"]:
+            problems.append(f"{t['occ']} scaled {t['scale_qty']} of {t['contracts']}")
     return {"date": str(d), "signals": len(trades), "closed": len(closed),
+            "scaled": sum(bool(t.get("scale_qty")) for t in closed),
             "rejected": sum(t["status"] == "rejected" for t in trades),
             "pnl": round(sum(t["pnl"] for t in closed), 2),
             "exits": [t["exit_reason"] for t in closed], "problems": problems}
@@ -284,16 +290,21 @@ def main(argv=None):
     p.add_argument("--module", default="orb")
     p.add_argument("--max-trades", type=int, default=4)
     p.add_argument("--max-loss", type=float, default=200)
+    p.add_argument("--contracts", type=int, default=1)
+    p.add_argument("--params", help="strategy params JSON, e.g. a scale-out rule")
     a = p.parse_args(argv)
     # quiet the runner's per-event prints
     runner.print = lambda *x, **k: None
     minutes = supabase_bars()
     days = sorted({d for d in minutes.index.date if (minutes.index.date == d).sum() >= 380})[-a.days:]
-    controls = {"trading_enabled": True, "mode": "paper", "max_contracts": 1, "max_open_positions": 1,
-                "max_trades_per_day": a.max_trades, "max_daily_loss": a.max_loss, "max_premium_per_trade": 1000}
+    controls = {"trading_enabled": True, "mode": "paper", "max_contracts": a.contracts, "max_open_positions": 1,
+                "max_trades_per_day": a.max_trades, "max_daily_loss": a.max_loss,
+                "max_premium_per_trade": 1000 * a.contracts}
+    params = json.loads(a.params) if a.params else None
     bad = 0
     for d in days:
-        market, fs = replay_day(d, minutes, dict(controls), kill_at=a.kill_at, module=a.module)
+        market, fs = replay_day(d, minutes, dict(controls), kill_at=a.kill_at, module=a.module,
+                                params=params, contracts=a.contracts)
         r = check(d, market, fs, a.kill_at)
         bad += bool(r["problems"])
         print(r, flush=True)
